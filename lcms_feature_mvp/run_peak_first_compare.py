@@ -1,0 +1,628 @@
+#!/usr/bin/env python3
+"""Generate the standalone Peak-first LC-MS compare workbench."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
+from core.lcms_parser import load_lcms_directory
+from core.lcms_peak_first import PeakFirstParams, prepare_peak_first_payload
+from core.lcms_workbench import spectrum_payload
+
+
+PEAK_FIRST_TEMPLATE = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LC-MS 峰优先差异分析 / Peak-first Compare</title>
+  <style>
+    body { margin:0; font-family:Arial,"Microsoft YaHei",sans-serif; color:#172033; background:#f7f9fc; }
+    header { padding:12px 18px; background:#0f172a; color:white; display:flex; gap:18px; align-items:center; }
+    header h1 { font-size:18px; margin:0; }
+    main { display:grid; grid-template-columns: minmax(0,1.75fr) minmax(360px,.75fr); gap:12px; padding:12px; }
+    section { background:white; border:1px solid #d9e0ea; border-radius:8px; padding:10px; min-width:0; }
+    h2 { margin:0 0 8px; font-size:16px; }
+    canvas { width:100%; border:1px solid #e4e9f2; border-radius:6px; background:white; }
+    .wide { grid-column:1 / -1; }
+    .left { grid-column:1; }
+    .right { grid-column:2; }
+    .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+    button, select, input { border:1px solid #cfd7e6; border-radius:6px; padding:5px 8px; background:white; }
+    table { border-collapse:collapse; width:100%; font-size:12px; }
+    th, td { border-bottom:1px solid #e7ebf2; padding:5px 6px; white-space:nowrap; text-align:right; }
+    th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align:left; }
+    tr[data-peak], tr[data-mz], tr[data-global-feature] { cursor:pointer; }
+    tr.selected { background:#fff3d8; }
+    .scroll { overflow:auto; max-height:360px; }
+    .tall-scroll { max-height:420px; }
+    .note { color:#667085; font-size:12px; }
+    .pan { width:220px; }
+    .xic-grid { display:grid; grid-template-columns:minmax(260px,.56fr) minmax(0,1.44fr); gap:12px; align-items:start; }
+    .xic-grid canvas { height:auto; }
+    .feature-map { height:auto; }
+    input:disabled { opacity:.45; }
+    .tooltip { position:fixed; display:none; z-index:20; max-width:360px; padding:8px 10px; border:1px solid #cfd7e6; border-radius:6px; background:rgba(255,255,255,.96); box-shadow:0 8px 24px rgba(15,23,42,.15); font-size:12px; pointer-events:none; }
+    .mini-table { margin:6px 0 10px; max-height:150px; overflow:auto; }
+    .status-high_consistency { color:#17803a; font-weight:600; }
+    .status-chromatogram_consistent_spectrum_changed,
+    .status-need_local_rt_mz_analysis,
+    .status-chromatogram_changed,
+    .status-possible_rt_shift { color:#b42318; font-weight:600; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>LC-MS 峰优先差异分析 / Peak-first Compare</h1>
+  <label>Comparison <select id="comparisonSelect"></select></label>
+  <span id="summary"></span>
+  <a href="/lcms_xcalibur_workbench.html" style="color:#bfdbfe">Original global RT-m/z compare</a>
+</header>
+<main>
+  <section class="wide">
+    <h2>1. Aligned TIC/BPC overlay with detected TIC peaks</h2>
+    <div class="controls">
+      <label>Signal <select id="chromMode"><option value="tic">TIC</option><option value="bpc">BPC</option></select></label>
+      <label><input type="checkbox" id="showAligned" checked> aligned RT</label>
+      <label>Vertical offset <input id="offset" type="range" min="0" max="1.2" step="0.05" value="0"></label>
+      <button id="resetChrom">Reset zoom</button>
+      <label>Pan <input id="chromPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
+    </div>
+    <canvas id="chromCanvas" width="1500" height="360"></canvas>
+    <div id="chromInfo" class="note"></div>
+  </section>
+
+  <section class="left">
+    <h2>2. Selected TIC peak summed spectrum</h2>
+    <div class="controls">
+      <button id="saveFeature">Save selected changed m/z as LCMSFeature</button>
+      <button id="resetDetail">Reset spectrum zoom</button>
+      <label>Pan <input id="detailPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
+      <span id="featureInfo" class="note"></span>
+    </div>
+    <canvas id="detailCanvas" width="1050" height="340"></canvas>
+    <div id="detailInfo" class="note"></div>
+    <div id="detailTooltip" class="tooltip"></div>
+  </section>
+
+  <section class="right">
+    <h2>3. TIC Peak consistency table</h2>
+    <div class="scroll tall-scroll"><table id="peakTable"></table></div>
+  </section>
+
+  <section class="wide">
+    <div class="xic-grid">
+      <div>
+        <h2>5. Top changed m/z in selected TIC peak</h2>
+        <div id="selectedMzInfo" class="note"></div>
+        <div class="scroll"><table id="mzTable"></table></div>
+      </div>
+      <div>
+        <h2>6. XIC confirmation</h2>
+        <div class="controls">
+          <button id="resetXic">Reset XIC view</button>
+          <button id="toggleXicFull">Show full XIC</button>
+          <label>Pan <input id="xicPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
+        </div>
+        <canvas id="xicCanvas" width="1200" height="380"></canvas>
+        <div id="xicInfo" class="note"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wide">
+    <h2>7. Overall low-similarity feature groups</h2>
+    <div class="note">Ranked by low similarity with abundance weighting, so tiny low-confidence signals are pushed down.</div>
+    <div class="scroll"><table id="globalFeatureTable"></table></div>
+  </section>
+
+  <section class="wide">
+    <h2>8. Feature-level RT-m/z heatmap</h2>
+    <div class="controls">
+      <button id="resetFeatureMap">Reset heatmap zoom</button>
+      <label>Pan <input id="featureMapPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
+      <span id="featureMapInfo" class="note"></span>
+    </div>
+    <canvas id="featureMapCanvas" class="feature-map" width="1500" height="430"></canvas>
+  </section>
+
+  <section class="wide">
+    <h2>Saved LCMSFeature regions</h2>
+    <div class="scroll"><table id="featureTable"></table></div>
+  </section>
+</main>
+<script>
+let DATA = null;
+let COMPARISONS = [];
+let state = { comparison:null, selectedPeakId:null, selectedMz:null, chromZoom:null, detailZoom:null, xicZoom:null, xicFull:false, xic:null, xicLoading:false, xicRequestId:0, featureMapZoom:null, features:[] };
+const colors = ["#1f77b4","#e74c3c","#2ecc71","#9b59b6","#f39c12","#00bcd4","#795548","#e91e63"];
+const $ = id => document.getElementById(id);
+function nice(v,d=3){ const n=Number(v); return Number.isFinite(n)?n.toFixed(d):""; }
+function color(i){ return colors[i % colors.length]; }
+async function fetchJson(url, options){ const r=await fetch(url,{cache:"no-store",...(options||{})}); if(!r.ok) throw new Error(`${url} HTTP ${r.status}`); return await r.json(); }
+function apiUrl(path){ const sep=path.includes("?")?"&":"?"; return `${path}${sep}comparison=${encodeURIComponent(state.comparison||"")}`; }
+function plot(canvas, domain){ const p={left:66,right:canvas.width-24,top:18,bottom:canvas.height-48,...domain}; p.toX=x=>p.left+(x-p.xmin)/Math.max(p.xmax-p.xmin,1e-12)*(p.right-p.left); p.toY=y=>p.bottom-(y-p.ymin)/Math.max(p.ymax-p.ymin,1e-12)*(p.bottom-p.top); p.fromX=x=>p.xmin+(x-p.left)/Math.max(p.right-p.left,1e-12)*(p.xmax-p.xmin); p.fromY=y=>p.ymin+(p.bottom-y)/Math.max(p.bottom-p.top,1e-12)*(p.ymax-p.ymin); return p; }
+function axes(ctx,p,xl,yl){ ctx.strokeStyle="#d9e0ea"; ctx.beginPath(); ctx.moveTo(p.left,p.top); ctx.lineTo(p.left,p.bottom); ctx.lineTo(p.right,p.bottom); ctx.stroke(); ctx.fillStyle="#667085"; ctx.font="12px Arial"; ctx.fillText(yl,8,p.top+10); ctx.fillText(xl,(p.left+p.right)/2-25,p.bottom+30); for(let i=0;i<=5;i++){ const x=p.left+(p.right-p.left)*i/5; const y=p.bottom-(p.bottom-p.top)*i/5; ctx.fillText(nice(p.xmin+(p.xmax-p.xmin)*i/5,2),x-15,p.bottom+8); ctx.fillText(nice(p.ymin+(p.ymax-p.ymin)*i/5,1),p.left-58,y+4); } }
+function xDomainWidth(z){ return Math.max((z?.xmax||0)-(z?.xmin||0),1e-9); }
+function setPan(id, zoom, full, onPan){
+  const el=$(id); if(!el||!full){return;}
+  const width=xDomainWidth(zoom); const fullWidth=Math.max(full.xmax-full.xmin,1e-9);
+  if(!zoom||width>=fullWidth*.999){ el.disabled=true; el.min=full.xmin; el.max=full.xmin; el.value=full.xmin; return; }
+  el.disabled=false; el.min=full.xmin; el.max=full.xmax-width; el.step=Math.max(fullWidth/1000,1e-6); el.value=Math.max(full.xmin,Math.min(zoom.xmin,full.xmax-width));
+  el.oninput=()=>onPan(Number(el.value),width);
+}
+function drawDragBox(canvas,start,end){
+  const ctx=canvas.getContext("2d"); const x=Math.min(start.x,end.x), y=Math.min(start.y,end.y), w=Math.abs(end.x-start.x), h=Math.abs(end.y-start.y);
+  ctx.save(); ctx.fillStyle="rgba(37,99,235,.16)"; ctx.strokeStyle="rgba(37,99,235,.75)"; ctx.setLineDash([6,4]); ctx.fillRect(x,y,w,h); ctx.strokeRect(x,y,w,h); ctx.restore();
+}
+function hideDetailTooltip(){ const tip=$("detailTooltip"); if(tip)tip.style.display="none"; }
+function chromSeries(){
+  const aligned=$("showAligned").checked;
+  return DATA.sample_ids.map((sample,i)=>{
+    const pts=DATA.chromatograms[sample][aligned?"aligned":"raw"];
+    return {sample,color:color(i),x:pts.map(p=>p[0]),y:pts.map(p=>$("chromMode").value==="bpc"?p[2]:p[1])};
+  });
+}
+function chromFullDomain(){
+  const series=chromSeries(); const xs=series.flatMap(s=>s.x), ys=series.flatMap(s=>s.y);
+  return {series,xmin:Math.min(...xs),xmax:Math.max(...xs),ymin:0,ymax:Math.max(...ys,1)};
+}
+function drawChrom(){
+  const canvas=$("chromCanvas"),ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
+  const full=chromFullDomain(); const series=full.series;
+  const domain=state.chromZoom||full;
+  const offset=(domain.ymax-domain.ymin)*Number($("offset").value||0); const p=plot(canvas,{...domain,ymax:domain.ymax+offset*(series.length-1)}); axes(ctx,p,"RT (min)",$("chromMode").value.toUpperCase());
+  series.forEach((s,i)=>{ const yoff=(series.length-1-i)*offset; ctx.strokeStyle=s.color; ctx.beginPath(); s.x.forEach((x,j)=>{ const px=p.toX(x),py=p.toY(s.y[j]+yoff); if(j===0)ctx.moveTo(px,py); else ctx.lineTo(px,py); }); ctx.stroke(); ctx.fillStyle=s.color; ctx.fillText(s.sample,p.left+8,Math.max(p.top+14,Math.min(p.bottom-5,p.toY(yoff)-5))); });
+  DATA.peak_results.forEach(pk=>{ const x=p.toX(pk.rt_apex); if(x<p.left||x>p.right)return; ctx.strokeStyle=pk.status==="high_consistency"?"rgba(22,163,74,.35)":"rgba(220,38,38,.45)"; ctx.beginPath(); ctx.moveTo(x,p.bottom); ctx.lineTo(x,p.bottom-9); ctx.stroke(); });
+  const selected=selectedPeak();
+  if(selected){ const x0=p.toX(selected.rt_start), x1=p.toX(selected.rt_end); if(x1>=p.left&&x0<=p.right){ ctx.fillStyle=selected.status==="high_consistency"?"rgba(34,197,94,.20)":"rgba(239,68,68,.22)"; ctx.fillRect(Math.max(p.left,x0),p.top,Math.min(p.right,x1)-Math.max(p.left,x0),p.bottom-p.top); ctx.strokeStyle="#111827"; ctx.setLineDash([5,4]); ctx.strokeRect(Math.max(p.left,x0),p.top,Math.min(p.right,x1)-Math.max(p.left,x0),p.bottom-p.top); ctx.setLineDash([]); }}
+  canvas._plot=p; $("chromInfo").textContent=`${DATA.peak_results.length} compared TIC peaks; only the selected peak is shaded. Small ticks mark other compared peak apices.`;
+  setPan("chromPan",state.chromZoom,full,(xmin,width)=>{state.chromZoom={...state.chromZoom,xmin,xmax:xmin+width};drawAll();});
+}
+function renderPeakTable(){
+  const rows=[...DATA.peak_results].sort((a,b)=>Number(a.rt_apex)-Number(b.rt_apex)).map(pk=>`<tr data-peak="${pk.tic_peak_id}" class="${pk.tic_peak_id===state.selectedPeakId?'selected':''}"><td>${pk.tic_peak_id}</td><td class="status-${pk.status}">${pk.status}</td><td>${nice(pk.rt_start)}</td><td>${nice(pk.rt_apex)}</td><td>${nice(pk.rt_end)}</td><td>${nice(pk.peak_consistency_score,3)}</td><td>${nice(pk.spectrum_score,3)}</td><td>${nice(pk.chromatogram_score,3)}</td><td>${nice(pk.presence_absence_score,3)}</td><td>${nice(pk.area,1)}</td><td>${nice(pk.snr,1)}</td></tr>`);
+  $("peakTable").innerHTML=`<tr><th>peak_id</th><th>status</th><th>rt_start</th><th>rt_apex</th><th>rt_end</th><th>consistency</th><th>spectrum</th><th>chrom</th><th>presence</th><th>area</th><th>S/N</th></tr>${rows.join("")}`;
+  document.querySelectorAll("tr[data-peak]").forEach(row=>row.onclick=()=>{state.selectedPeakId=row.dataset.peak; state.selectedMz=null; state.xic=null; state.detailZoom=null; state.xicZoom=null; drawAll();});
+}
+function selectedPeak(){ return DATA.peak_results.find(p=>p.tic_peak_id===state.selectedPeakId)||null; }
+function detailFullDomain(pk){
+  const bins=pk.spectrum_mz_bins||[], matrix=pk.spectrum_raw_matrix||{}; const ymax=Math.max(1,...Object.values(matrix).flat());
+  return {xmin:Math.min(...bins,DATA.params.mz_tolerance_da),xmax:Math.max(...bins,2000),ymin:0,ymax};
+}
+function spectrumHitAt(canvas, clientX, clientY){
+  const pk=selectedPeak(); if(!pk||!canvas._plot)return null;
+  const r=canvas.getBoundingClientRect(); const x=(clientX-r.left)*canvas.width/r.width, y=(clientY-r.top)*canvas.height/r.height;
+  const p=canvas._plot; if(x<p.left||x>p.right||y<p.top||y>p.bottom)return null;
+  const bins=pk.spectrum_mz_bins||[], matrix=pk.spectrum_raw_matrix||{};
+  let best=null;
+  bins.forEach((mz,j)=>{
+    const px=p.toX(mz); const dx=Math.abs(px-x);
+    if(dx>8)return;
+    const values=DATA.sample_ids.map(sample=>Number((matrix[sample]||[])[j]||0));
+    const maxI=Math.max(...values);
+    if(maxI<=0)return;
+    const py=p.toY(maxI);
+    if(y<py-10||y>p.bottom+8)return;
+    if(!best||dx<best.dx) best={mz, index:j, values, maxIntensity:maxI, dx, px};
+  });
+  return best;
+}
+function spectrumInfoRows(hit){
+  if(!hit)return "";
+  const rows=DATA.sample_ids.map((sample,i)=>`<tr><td>${sample}</td><td>${nice(hit.values[i],1)}</td></tr>`).join("");
+  const positive=hit.values.filter(v=>v>0);
+  const max=Math.max(...hit.values,0), min=positive.length?Math.min(...positive):0;
+  const fold=min>0?max/min:null;
+  return `<div><b>Selected m/z ${nice(hit.mz,5)}</b>; max ${nice(max,1)}${fold?`; fold ${nice(fold,2)}`:""}</div><div class="mini-table"><table><tr><th>sample</th><th>summed intensity</th></tr>${rows}</table></div>`;
+}
+function selectedSpectrumHit(){
+  const pk=selectedPeak(); if(!pk||!state.selectedMz)return null;
+  const bins=pk.spectrum_mz_bins||[], matrix=pk.spectrum_raw_matrix||{};
+  if(!bins.length)return null;
+  let index=0, best=Infinity;
+  bins.forEach((mz,j)=>{ const d=Math.abs(Number(mz)-Number(state.selectedMz)); if(d<best){best=d; index=j;} });
+  const values=DATA.sample_ids.map(sample=>Number((matrix[sample]||[])[index]||0));
+  return {mz:Number(bins[index]), index, values, maxIntensity:Math.max(...values,0)};
+}
+function selectedFeatureGroup(){
+  const pk=selectedPeak(); if(!pk||!state.selectedMz)return null;
+  const groups=pk.feature_groups||[];
+  let best=null, bestDelta=Infinity;
+  groups.forEach(group=>{ const d=Math.abs(Number(group.representative_mz)-Number(state.selectedMz)); if(d<bestDelta){bestDelta=d; best=group;} });
+  return best;
+}
+function showDetailTooltip(e, hit){
+  const tip=$("detailTooltip"); if(!tip||!hit){hideDetailTooltip(); return;}
+  tip.innerHTML=spectrumInfoRows(hit);
+  tip.style.left=`${e.clientX+14}px`; tip.style.top=`${e.clientY+14}px`; tip.style.display="block";
+}
+function featureMapRank(item){
+  const rows=featureMapRows();
+  const idx=rows.findIndex(row=>row.feature_group_id===item.feature_group_id);
+  return idx>=0 ? idx+1 : "";
+}
+function featureMapTooltipRows(item){
+  if(!item)return "";
+  const merged=(item.merged_parent_tic_peak_ids||[]).join(", ");
+  return `<div><b>${item.feature_group_id||""}</b></div>
+    <table>
+      <tr><th>rank</th><td>${featureMapRank(item)}</td></tr>
+      <tr><th>RT</th><td>${nice(item.representative_rt,4)} min</td></tr>
+      <tr><th>m/z</th><td>${nice(item.representative_mz,5)}</td></tr>
+      <tr><th>TIC peak</th><td>${item.parent_tic_peak_id||""}</td></tr>
+      <tr><th>merged TIC</th><td>${merged||item.parent_tic_peak_id||""}</td></tr>
+      <tr><th>similarity</th><td>${nice(item.similarity_score,3)}</td></tr>
+      <tr><th>ranking</th><td>${nice(item.ranking_score,3)}</td></tr>
+      <tr><th>max area</th><td>${nice(item.max_area,1)}</td></tr>
+    </table>`;
+}
+function showFeatureMapTooltip(e, item){
+  const tip=$("detailTooltip"); if(!tip||!item){hideDetailTooltip(); return;}
+  tip.innerHTML=featureMapTooltipRows(item);
+  tip.style.left=`${e.clientX+14}px`; tip.style.top=`${e.clientY+14}px`; tip.style.display="block";
+}
+async function selectSpectrumMz(mz){
+  const requestId=++state.xicRequestId;
+  state.selectedMz=Number(mz); state.xicZoom=null; state.xic=null; state.xicLoading=true; drawAll();
+  try {
+    await loadXic(requestId);
+    if(requestId===state.xicRequestId){ state.xicLoading=false; drawAll(); }
+  } catch(err) {
+    if(requestId===state.xicRequestId){ state.xicLoading=false; $("xicInfo").textContent=`XIC request failed: ${err.message||err}`; }
+  }
+}
+function drawDetail(){
+  const canvas=$("detailCanvas"),ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
+  const pk=selectedPeak(); if(!pk){ $("detailInfo").textContent="Select one TIC peak from the table or TIC plot to compare its summed spectrum."; canvas._plot=null; $("detailPan").disabled=true; return; }
+  state.selectedPeakId=pk.tic_peak_id;
+  const bins=pk.spectrum_mz_bins||[], matrix=pk.spectrum_raw_matrix||{}, full=detailFullDomain(pk);
+  const p=plot(canvas,state.detailZoom||full); axes(ctx,p,"m/z","summed spectrum");
+  DATA.sample_ids.forEach((sample,i)=>{ const v=matrix[sample]||[]; ctx.strokeStyle=color(i); v.forEach((inten,j)=>{ if(inten<=0)return; const x=p.toX(bins[j]); if(x<p.left||x>p.right)return; ctx.beginPath(); ctx.moveTo(x,p.bottom); ctx.lineTo(x,p.toY(inten)); ctx.stroke(); }); ctx.fillStyle=color(i); ctx.fillText(sample,p.left+8,p.top+14+i*14); });
+  if(state.selectedMz){ const x=p.toX(state.selectedMz); if(x>=p.left&&x<=p.right){ ctx.save(); ctx.strokeStyle="#111827"; ctx.setLineDash([6,4]); ctx.beginPath(); ctx.moveTo(x,p.top); ctx.lineTo(x,p.bottom); ctx.stroke(); ctx.fillStyle="#111827"; ctx.fillText(`m/z ${nice(state.selectedMz,4)}`,Math.min(x+6,p.right-95),p.top+14); ctx.restore(); }}
+  canvas._plot=p;
+  setPan("detailPan",state.detailZoom,full,(xmin,width)=>{state.detailZoom={...state.detailZoom,xmin,xmax:xmin+width};drawAll();});
+  const scoreText=`shape ${nice(pk.shape_score)}; area ${nice(pk.area_score)}; apex ${nice(pk.apex_score)}; width ${nice(pk.width_score)}; cosine ${nice(pk.cosine_score)}; top m/z ${nice(pk.top_mz_overlap_score)}; rel abundance ${nice(pk.relative_abundance_score)}; presence ${nice(pk.presence_absence_score)}; apex spectrum ${nice(pk.apex_spectrum_score)}`;
+  $("detailInfo").textContent=`${pk.tic_peak_id} ${pk.status}; RT ${nice(pk.rt_start)}-${nice(pk.rt_end)}; consistency ${nice(pk.peak_consistency_score)}; ${scoreText}`;
+}
+function renderMzTable(){
+  const pk=selectedPeak(); const changes=pk?.top_changed_mz||[];
+  const hit=selectedSpectrumHit();
+  const group=selectedFeatureGroup();
+  const groupRows=group?DATA.sample_ids.map(sample=>`<tr><td>${sample}</td><td>${nice((group.area_by_sample||{})[sample],1)}</td><td>${nice((group.match_score_by_sample||{})[sample],3)}</td><td>${nice((group.rt_correction_by_sample||{})[sample],4)}</td></tr>`).join(""):"";
+  const groupInfo=group?`<div><b>${group.feature_group_id}</b>; RT ${nice(group.representative_rt,4)}; similarity ${nice(group.similarity_score,3)}; difference ${nice(group.difference_score,3)}; method ${group.alignment_method||""}</div><div class="mini-table"><table><tr><th>sample</th><th>area</th><th>match</th><th>local RT shift</th></tr>${groupRows}</table></div>`:"";
+  $("selectedMzInfo").innerHTML=hit?`${spectrumInfoRows(hit)}${groupInfo}`:"Click a spectrum signal or a Top changed m/z row to show XIC.";
+  const rows=changes.map(item=>`<tr data-mz="${item.mz}" class="${Number(state.selectedMz)===Number(item.mz)?'selected':''}"><td>${nice(item.mz,4)}</td><td>${item.difference_type}</td><td>${nice(item.ranking_score,3)}</td><td>${nice(item.cv,3)}</td><td>${item.presence_count}/${DATA.sample_ids.length}</td><td>${nice(item.max_fold_change,2)}</td></tr>`);
+  $("mzTable").innerHTML=`<tr><th>feature m/z</th><th>group type</th><th>ranking</th><th>CV</th><th>matched</th><th>fold</th></tr>${rows.join("")}`;
+  document.querySelectorAll("tr[data-mz]").forEach(row=>row.onclick=async()=>{await selectSpectrumMz(Number(row.dataset.mz));});
+}
+async function loadXic(requestId){
+  const pk=selectedPeak(); if(!pk||!state.selectedMz)return;
+  const full=state.xicFull ? "&full=1" : "";
+  const payload=await fetchJson(apiUrl(`/api/xic?peak_id=${encodeURIComponent(pk.tic_peak_id)}&mz=${encodeURIComponent(state.selectedMz)}${full}`));
+  if(requestId&&requestId!==state.xicRequestId)return;
+  state.xic=payload;
+  state.xicZoom={xmin:Number(payload.rt_start),xmax:Number(payload.rt_end),ymin:0,ymax:null};
+}
+function xicFullDomain(){
+  if(!state.xic)return null;
+  const series=state.xic.xic_by_sample||{}; const xs=Object.values(series).flatMap(s=>s.rt), ys=Object.values(series).flatMap(s=>s.intensity);
+  return {xmin:Math.min(...xs),xmax:Math.max(...xs),ymin:0,ymax:Math.max(...ys,1),xs,ys};
+}
+function drawXic(){
+  const canvas=$("xicCanvas"),ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(state.xicLoading){ $("xicInfo").textContent=`Loading XIC for m/z ${nice(state.selectedMz,5)}...`; canvas._plot=null; $("xicPan").disabled=true; return; }
+  if(!state.xic){ $("xicInfo").textContent="Select a Top changed m/z to extract XIC."; canvas._plot=null; $("xicPan").disabled=true; return; }
+  const series=state.xic.xic_by_sample||{}, full=xicFullDomain();
+  const z=state.xicZoom||{xmin:Number(state.xic.rt_start),xmax:Number(state.xic.rt_end),ymin:0,ymax:null};
+  const visibleYs=Object.values(series).flatMap(s=>s.rt.map((rt,j)=>rt>=z.xmin&&rt<=z.xmax?s.intensity[j]:null).filter(v=>v!==null));
+  const domain={xmin:z.xmin,xmax:z.xmax,ymin:0,ymax:z.ymax||Math.max(1,...visibleYs)};
+  const p=plot(canvas,domain); axes(ctx,p,"aligned RT (min)","XIC intensity");
+  const x0=p.toX(state.xic.integration_rt_start), x1=p.toX(state.xic.integration_rt_end);
+  if(x1>=p.left&&x0<=p.right){ ctx.save(); ctx.fillStyle="rgba(34,197,94,.12)"; ctx.fillRect(Math.max(p.left,x0),p.top,Math.min(p.right,x1)-Math.max(p.left,x0),p.bottom-p.top); ctx.restore(); }
+  DATA.sample_ids.forEach((sample,i)=>{ const s=series[sample]; if(!s)return; ctx.strokeStyle=color(i); ctx.beginPath(); let started=false; s.rt.forEach((x,j)=>{ if(x<domain.xmin||x>domain.xmax){started=false; return;} const px=p.toX(x),py=p.toY(s.intensity[j]); if(!started){ctx.moveTo(px,py); started=true;} else ctx.lineTo(px,py); }); ctx.stroke(); ctx.fillStyle=color(i); ctx.fillText(`${sample} area ${nice((state.xic.integration_by_sample[sample]||{}).area,1)}`,p.left+8,p.top+14+i*14); });
+  canvas._plot=p;
+  setPan("xicPan",state.xicZoom,full,(xmin,width)=>{state.xicZoom={...state.xicZoom,xmin,xmax:xmin+width,ymax:null};drawAll();});
+  $("xicInfo").textContent=`XIC m/z ${nice(state.xic.target_mz,5)} +/- ${nice(state.xic.mz_tolerance,5)}; parent peak ${state.xic.peak_id}; ${state.xic.full_run?"full XIC":"local XIC"}; green band is feature/TIC integration RT ${nice(state.xic.integration_rt_start)}-${nice(state.xic.integration_rt_end)}`;
+}
+function featureMapRows(){ return (DATA.global_feature_groups||[]).filter(item=>Number(item.representative_rt)>0&&Number(item.representative_mz)>0&&Number(item.max_area)>0); }
+function featureMapFullDomain(){
+  const rows=featureMapRows(); if(!rows.length)return {xmin:0,xmax:1,ymin:0,ymax:1};
+  const xs=rows.map(item=>Number(item.representative_rt)), ys=rows.map(item=>Number(item.representative_mz));
+  const xpad=Math.max((Math.max(...xs)-Math.min(...xs))*0.04,0.05), ypad=Math.max((Math.max(...ys)-Math.min(...ys))*0.04,1);
+  return {xmin:Math.min(...xs)-xpad,xmax:Math.max(...xs)+xpad,ymin:Math.max(0,Math.min(...ys)-ypad),ymax:Math.max(...ys)+ypad};
+}
+function lerp(a,b,t){ return a+(b-a)*t; }
+function featureSimilarityColor(similarity, rankNorm=0){
+  const sim=Math.max(0,Math.min(1,Number(similarity)||0));
+  const strength=Math.max(0,Math.min(1,(0.96-sim)/0.36));
+  const curved=Math.pow(strength,0.72);
+  const green=[34,197,94], yellow=[250,204,21], red=[239,68,68];
+  let r,g,b;
+  if(curved < 0.5){
+    const t=curved/0.5;
+    r=Math.round(lerp(green[0],yellow[0],t));
+    g=Math.round(lerp(green[1],yellow[1],t));
+    b=Math.round(lerp(green[2],yellow[2],t));
+  } else {
+    const t=(curved-0.5)/0.5;
+    r=Math.round(lerp(yellow[0],red[0],t));
+    g=Math.round(lerp(yellow[1],red[1],t));
+    b=Math.round(lerp(yellow[2],red[2],t));
+  }
+  const alpha=Math.max(0.18,Math.min(0.95,0.18+0.62*curved+0.20*Math.sqrt(Math.max(0,Math.min(1,rankNorm)))));
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+function featureMapPriority(item, maxRanking=1){
+  const similarity=Number(item.similarity_score)||0;
+  const lowNorm=Math.max(0,Math.min(1,(0.96-similarity)/0.36));
+  const rankNorm=Math.max(0,Math.min(1,(Number(item.ranking_score)||0)/Math.max(maxRanking,1e-9)));
+  return lowNorm*0.78 + Math.sqrt(rankNorm)*0.22;
+}
+function featureMapHitAt(canvas, clientX, clientY){
+  if(!canvas._plot)return null;
+  const r=canvas.getBoundingClientRect(); const x=(clientX-r.left)*canvas.width/r.width, y=(clientY-r.top)*canvas.height/r.height;
+  const p=canvas._plot; if(x<p.left||x>p.right||y<p.top||y>p.bottom)return null;
+  const rows=featureMapRows();
+  const maxRanking=Math.max(...rows.map(item=>Number(item.ranking_score)||0),1e-9);
+  let best=null;
+  rows.forEach(item=>{
+    const px=p.toX(Number(item.representative_rt)), py=p.toY(Number(item.representative_mz));
+    const d=Math.hypot(px-x,py-y);
+    const priority=featureMapPriority(item,maxRanking);
+    if(d<=11&&(!best||priority>best.priority+0.03||(Math.abs(priority-best.priority)<=0.03&&d<best.d)))best={item,d,priority};
+  });
+  return best?.item||null;
+}
+async function selectGlobalFeature(item){
+  if(!item)return;
+  state.selectedPeakId=item.parent_tic_peak_id;
+  state.selectedMz=null;
+  state.detailZoom=null;
+  state.xic=null;
+  state.xicZoom=null;
+  await selectSpectrumMz(Number(item.representative_mz));
+}
+function drawFeatureMap(){
+  const canvas=$("featureMapCanvas"),ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
+  const rows=featureMapRows(), full=featureMapFullDomain();
+  if(!rows.length){ $("featureMapInfo").textContent="No global feature groups."; canvas._plot=null; $("featureMapPan").disabled=true; return; }
+  const domain=state.featureMapZoom||full; const p=plot(canvas,domain); axes(ctx,p,"RT (min)","m/z");
+  const maxArea=Math.max(...rows.map(item=>Number(item.max_area)||0),1);
+  const maxRanking=Math.max(...rows.map(item=>Number(item.ranking_score)||0),1e-9);
+  const drawRows=[...rows].sort((a,b)=>featureMapPriority(a,maxRanking)-featureMapPriority(b,maxRanking));
+  drawRows.forEach(item=>{
+    const rt=Number(item.representative_rt), mz=Number(item.representative_mz);
+    if(rt<domain.xmin||rt>domain.xmax||mz<domain.ymin||mz>domain.ymax)return;
+    const x=p.toX(rt), y=p.toY(mz);
+    const abundanceNorm=Math.log1p(Number(item.max_area)||0)/Math.log1p(maxArea);
+    const rankNorm=Math.max(0,Math.min(1,(Number(item.ranking_score)||0)/maxRanking));
+    const lowNorm=Math.max(0,Math.min(1,(0.96-Number(item.similarity_score||0))/0.36));
+    const radius=Math.max(3,Math.min(14,3+abundanceNorm*4.5+Math.sqrt(rankNorm)*4.5+lowNorm*2));
+    ctx.fillStyle=featureSimilarityColor(item.similarity_score, rankNorm);
+    ctx.fillRect(x-radius,y-radius,radius*2,radius*2);
+    if(item.parent_tic_peak_id===state.selectedPeakId&&Math.abs(Number(item.representative_mz)-Number(state.selectedMz||0))<1e-6){
+      ctx.strokeStyle="#111827"; ctx.lineWidth=2; ctx.strokeRect(x-radius-2,y-radius-2,radius*2+4,radius*2+4); ctx.lineWidth=1;
+    }
+  });
+  const legendX=p.right-360, legendY=p.top+8, legendW=170, legendH=10;
+  for(let i=0;i<legendW;i++){
+    const ratio=i/(legendW-1);
+    ctx.fillStyle=featureSimilarityColor(1-ratio, 0.3);
+    ctx.fillRect(legendX+i,legendY,1,legendH);
+  }
+  ctx.fillStyle="#667085";
+  ctx.fillText("high similarity",legendX,legendY+24);
+  ctx.fillText("low similarity",legendX+legendW-78,legendY+24);
+  ctx.fillText("size follows abundance + ranking",legendX,legendY+40);
+  canvas._plot=p;
+  setPan("featureMapPan",state.featureMapZoom,full,(xmin,width)=>{state.featureMapZoom={...state.featureMapZoom,xmin,xmax:xmin+width};drawAll();});
+  $("featureMapInfo").textContent=`${rows.length} unique feature groups; similarity heatmap; blank areas mean no detected feature signal.`;
+}
+function renderGlobalFeatureTable(){
+  const rows=(DATA.global_feature_groups||[]).map((item,i)=>{
+    const selected=item.parent_tic_peak_id===state.selectedPeakId && Math.abs(Number(item.representative_mz)-Number(state.selectedMz||0))<1e-6;
+    return `<tr data-global-feature="1" data-peak="${item.parent_tic_peak_id}" data-mz="${item.representative_mz}" class="${selected?'selected':''}"><td>${i+1}</td><td>${item.feature_group_id}</td><td>${item.parent_tic_peak_id}</td><td>${nice(item.representative_rt,3)}</td><td>${nice(item.representative_mz,4)}</td><td>${nice(item.similarity_score,3)}</td><td>${nice(item.difference_score,3)}</td><td>${nice(item.ranking_score,3)}</td><td>${nice(item.abundance_norm,3)}</td><td>${nice(item.max_area,1)}</td><td>${nice(item.max_fold_change,2)}</td><td>${item.sample_count}/${DATA.sample_ids.length}</td><td>${item.merged_feature_count||1}</td><td>${(item.merged_parent_tic_peak_ids||[]).join(", ")}</td><td>${item.difference_type||""}</td></tr>`;
+  });
+  $("globalFeatureTable").innerHTML=`<tr><th>rank</th><th>feature_group</th><th>TIC peak</th><th>RT</th><th>m/z</th><th>similarity</th><th>difference</th><th>ranking</th><th>abundance</th><th>max area</th><th>fold</th><th>matched</th><th>merged</th><th>merged TIC peaks</th><th>type</th></tr>${rows.join("")}`;
+  document.querySelectorAll("tr[data-global-feature]").forEach(row=>row.onclick=async()=>{
+    await selectGlobalFeature({parent_tic_peak_id:row.dataset.peak, representative_mz:Number(row.dataset.mz)});
+  });
+}
+async function loadFeatures(){ const p=await fetchJson(apiUrl("/api/features")); state.features=p.features||[]; renderFeatures(); }
+function renderFeatures(){ const rows=state.features.map((f,i)=>`<tr><td>${i+1}</td><td>${f.parent_tic_peak_id||""}</td><td>${nice(f.representative_mz,5)}</td><td>${f.source||""}</td></tr>`); $("featureTable").innerHTML=`<tr><th>#</th><th>parent peak</th><th>m/z</th><th>source</th></tr>${rows.join("")}`; }
+async function saveFeature(){
+  const pk=selectedPeak(); if(!pk||!state.selectedMz||!state.xic)return;
+  const feature={feature_id:`PF_${Date.now()}`, parent_tic_peak_id:pk.tic_peak_id, project_id:DATA.project_id, sample_ids:DATA.sample_ids, representative_mz:state.selectedMz, mz_tolerance:state.xic.mz_tolerance, rt_start:pk.rt_start, rt_apex:pk.rt_apex, rt_end:pk.rt_end, raw_area_by_sample:Object.fromEntries(Object.entries(state.xic.integration_by_sample).map(([s,v])=>[s,v.area])), difference_score:1-pk.peak_consistency_score, peak_consistency_score:pk.peak_consistency_score, spectrum_score:pk.spectrum_score, source:"peak_first_local_analysis", annotation_status:"unannotated", created_at:new Date().toISOString()};
+  const p=await fetchJson(apiUrl("/api/features"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({features:[...state.features,feature]})}); state.features=p.features||[]; $("featureInfo").textContent=`Saved ${p.saved_count} features`; renderFeatures();
+}
+function drawAll(){ drawChrom(); renderPeakTable(); drawDetail(); renderMzTable(); drawXic(); renderGlobalFeatureTable(); drawFeatureMap(); }
+function attachZoom(canvas, kind){
+  let start=null;
+  canvas.onmousedown=e=>{ const r=canvas.getBoundingClientRect(); start={x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height}; };
+  canvas.onmousemove=e=>{
+    if(!start){
+      if(kind==="detail"){ const hit=spectrumHitAt(canvas,e.clientX,e.clientY); canvas.style.cursor=hit?"pointer":"crosshair"; showDetailTooltip(e,hit); }
+      if(kind==="featureMap"){ const hit=featureMapHitAt(canvas,e.clientX,e.clientY); canvas.style.cursor=hit?"pointer":"crosshair"; showFeatureMapTooltip(e,hit); }
+      return;
+    }
+    if(!canvas._plot)return;
+    hideDetailTooltip();
+    const r=canvas.getBoundingClientRect(); const cur={x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height};
+    drawAll(); drawDragBox(canvas,start,cur);
+  };
+  canvas.onmouseleave=()=>{ hideDetailTooltip(); canvas.style.cursor="default"; if(start){ start=null; drawAll(); } };
+  canvas.onmouseup=e=>{
+    if(!start||!canvas._plot)return;
+    const r=canvas.getBoundingClientRect(); const end={x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height};
+    const p=canvas._plot; const dx=Math.abs(end.x-start.x), dy=Math.abs(end.y-start.y);
+    if(dx<5&&dy<5){
+      if(kind==="chrom"){ const rt=p.fromX(end.x); const hit=DATA.peak_results.find(pk=>pk.rt_start<=rt&&rt<=pk.rt_end); if(hit){state.selectedPeakId=hit.tic_peak_id; state.selectedMz=null; state.xic=null; state.detailZoom=null; state.xicZoom=null;} }
+      if(kind==="detail"){ const hit=spectrumHitAt(canvas,e.clientX,e.clientY); if(hit){ selectSpectrumMz(hit.mz); } }
+      if(kind==="featureMap"){ const hit=featureMapHitAt(canvas,e.clientX,e.clientY); if(hit){ selectGlobalFeature(hit); } }
+    } else {
+      const xmin=Math.min(p.fromX(start.x),p.fromX(end.x)), xmax=Math.max(p.fromX(start.x),p.fromX(end.x));
+      const ymin=Math.max(0,Math.min(p.fromY(start.y),p.fromY(end.y))), ymax=Math.max(p.fromY(start.y),p.fromY(end.y));
+      if(kind==="chrom") state.chromZoom={xmin,xmax,ymin,ymax};
+      if(kind==="detail") state.detailZoom={xmin,xmax,ymin,ymax};
+      if(kind==="xic") state.xicZoom={xmin,xmax,ymin,ymax};
+      if(kind==="featureMap") state.featureMapZoom={xmin,xmax,ymin,ymax};
+    }
+    start=null; drawAll();
+  };
+}
+async function boot(){
+  const comparisonPayload=await fetchJson("/api/comparisons");
+  COMPARISONS=comparisonPayload.comparisons||[];
+  state.comparison=comparisonPayload.default_comparison || COMPARISONS[0]?.id || "";
+  $("comparisonSelect").innerHTML=COMPARISONS.map(item=>`<option value="${item.id}">${item.label}</option>`).join("");
+  $("comparisonSelect").value=state.comparison;
+  $("comparisonSelect").onchange=async()=>{ state.comparison=$("comparisonSelect").value; state.selectedPeakId=null; state.selectedMz=null; state.chromZoom=null; state.detailZoom=null; state.xicZoom=null; state.featureMapZoom=null; state.xic=null; state.features=[]; await loadComparison(); };
+  await loadComparison();
+}
+async function loadComparison(){
+  DATA=await fetchJson(apiUrl("/api/bootstrap")); state.selectedPeakId=null; state.featureMapZoom=null;
+  $("summary").textContent=`${DATA.sample_ids.length} samples; ${DATA.peak_results.length} confirmed TIC peaks; reference ${DATA.reference_sample}`;
+  ["chromMode","showAligned","offset"].forEach(id=>$(id).oninput=drawAll); $("resetChrom").onclick=()=>{state.chromZoom=null;drawAll();}; $("resetDetail").onclick=()=>{state.detailZoom=null;drawAll();}; $("resetXic").onclick=()=>{ if(state.xic){state.xicZoom={xmin:Number(state.xic.rt_start),xmax:Number(state.xic.rt_end),ymin:0,ymax:null};} drawAll(); }; $("resetFeatureMap").onclick=()=>{state.featureMapZoom=null;drawAll();}; $("saveFeature").onclick=saveFeature;
+  $("toggleXicFull").onclick=async()=>{ state.xicFull=!state.xicFull; $("toggleXicFull").textContent=state.xicFull?"Show local XIC":"Show full XIC"; if(state.selectedMz){ await selectSpectrumMz(state.selectedMz); } else { drawAll(); } };
+  $("toggleXicFull").textContent=state.xicFull?"Show local XIC":"Show full XIC";
+  attachZoom($("chromCanvas"),"chrom"); attachZoom($("detailCanvas"),"detail"); attachZoom($("xicCanvas"),"xic"); attachZoom($("featureMapCanvas"),"featureMap");
+  await loadFeatures(); drawAll();
+}
+boot().catch(err=>{document.body.innerHTML=`<pre>${err.stack||err}</pre>`;});
+</script>
+</body>
+</html>
+"""
+
+
+def write_peak_first_sqlite(path: Path, payload: dict[str, object], spectra: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bootstrap = dict(payload)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS peak_first_artifacts (
+                artifact_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS saved_lcms_features (
+                feature_id TEXT PRIMARY KEY,
+                feature_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO peak_first_artifacts (artifact_key, payload_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(artifact_key) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            ("bootstrap", json.dumps(bootstrap, ensure_ascii=False, separators=(",", ":"))),
+        )
+        for sample_id, sample_spectra in spectra.items():
+            connection.execute(
+                """
+                INSERT INTO peak_first_artifacts (artifact_key, payload_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(artifact_key) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (f"spectra:{sample_id}", json.dumps(sample_spectra, ensure_ascii=False, separators=(",", ":"))),
+            )
+        connection.commit()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate LC-MS Peak-first Compare V2.")
+    parser.add_argument("--input-dir", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--project-id", default="lcms_peak_first")
+    parser.add_argument("--reference-sample", default="")
+    parser.add_argument("--sample-contains", action="append", default=[], help="Keep samples whose sample_id contains this text. Can be repeated.")
+    parser.add_argument("--include-sample", action="append", default=[], help="Keep an exact sample_id. Can be repeated.")
+    parser.add_argument("--sqlite-name", default="lcms_peak_first_compare.sqlite")
+    parser.add_argument("--max-peaks-per-scan", type=int, default=500)
+    parser.add_argument("--spectrum-min-intensity", type=float, default=0.0)
+    parser.add_argument("--min-snr", type=float, default=5.0)
+    parser.add_argument("--min-area-ratio", type=float, default=0.00001)
+    parser.add_argument("--top-n-peaks", type=int, default=80)
+    parser.add_argument("--top-n-mz", type=int, default=60)
+    parser.add_argument("--top-n-changed-mz", type=int, default=20)
+    parser.add_argument("--max-spectrum-points-per-scan", type=int, default=200)
+    parser.add_argument("--mz-tolerance-da", type=float, default=0.5)
+    parser.add_argument("--mz-tolerance-ppm", type=float, default=20.0)
+    parser.add_argument("--mz-tolerance-mode", choices=["da", "ppm"], default="da")
+    parser.add_argument("--min-changed-mz-gap-da", type=float, default=1.0)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    input_dir = Path(args.input_dir)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    raw_files, scans_by_sample = load_lcms_directory(input_dir, args.project_id)
+    if args.include_sample or args.sample_contains:
+        exact = set(args.include_sample or [])
+        contains = [str(item) for item in args.sample_contains or [] if str(item)]
+        keep = [
+            sample_id for sample_id in scans_by_sample
+            if sample_id in exact or any(token in sample_id for token in contains)
+        ]
+        scans_by_sample = {sample_id: scans_by_sample[sample_id] for sample_id in keep}
+        raw_files = [raw_file for raw_file in raw_files if raw_file.sample_id in scans_by_sample]
+    if len(scans_by_sample) < 2:
+        raise ValueError(
+            "Peak-first Compare needs at least two selected samples. "
+            f"Selected: {list(scans_by_sample)}"
+        )
+    sample_ids = list(scans_by_sample)
+    reference = args.reference_sample if args.reference_sample in scans_by_sample else sample_ids[0]
+    params = PeakFirstParams(
+        min_snr=args.min_snr,
+        min_area_ratio=args.min_area_ratio,
+        top_n_peaks=args.top_n_peaks,
+        top_n_mz=args.top_n_mz,
+        top_n_changed_mz=args.top_n_changed_mz,
+        max_spectrum_points_per_scan=args.max_spectrum_points_per_scan,
+        mz_tolerance_da=args.mz_tolerance_da,
+        mz_tolerance_ppm=args.mz_tolerance_ppm,
+        mz_tolerance_mode=args.mz_tolerance_mode,
+        min_changed_mz_gap_da=args.min_changed_mz_gap_da,
+    )
+    payload = prepare_peak_first_payload(raw_files, scans_by_sample, args.project_id, reference, params)
+    spectra = spectrum_payload(
+        scans_by_sample,
+        shifts=dict(payload["alignment"]["rt_shift_by_sample"]),
+        mz_min=0,
+        mz_max=10_000,
+        max_peaks_per_scan=args.max_peaks_per_scan,
+        min_intensity=args.spectrum_min_intensity,
+    )
+    html_path = output_dir / "lcms_peak_first_compare.html"
+    sqlite_path = output_dir / args.sqlite_name
+    write_peak_first_sqlite(sqlite_path, payload, spectra)
+    html_path.write_text(PEAK_FIRST_TEMPLATE, encoding="utf-8")
+    print(f"Samples: {len(sample_ids)}")
+    print(f"Reference: {reference}")
+    print(f"Confirmed TIC peaks: {len(payload['peak_results'])}")
+    print(f"SQLite: {sqlite_path.resolve()}")
+    print(f"Peak-first Compare: {html_path.resolve()}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local LC-MS data and generated analysis databases
+*.raw
+*.RAW
+*.mzML
+*.mzXML
+*.sqlite
+*.sqlite3
+*.db
+
+# Generated reports/caches
+lcms_feature_mvp/data/raw/**
+lcms_feature_mvp/data/converted/**
+lcms_feature_mvp/质谱数据/**
+lcms_feature_mvp/outputs/**
+lcms_feature_mvp/outputs_real_mzml/**
+lcms_feature_mvp/outputs_workbench/**
+
+lcms_realdata_platform/data/**
+lcms_realdata_platform/LC-MS数据/**
+lcms_realdata_platform/outputs*/**/*.sqlite
+lcms_realdata_platform/outputs*/**/*.csv
+lcms_realdata_platform/outputs*/**/*.json
+lcms_realdata_platform/*.log
+
+# Keep directory placeholders
+!.gitkeep
+!**/.gitkeep
