@@ -1,0 +1,4 @@
+# The current Python analysis and report servers use only the Python 3.10+
+# standard library. The migration package includes a self-contained
+# ThermoRawFileParser distribution for converting Thermo .raw files to mzML;
+# an externally authorized executable may also be supplied with -ParserPath.

@@ -1,0 +1,2664 @@
+#!/usr/bin/env python3
+"""Generate an Xcalibur-style LC-MS review workbench."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import sqlite3
+import time
+from contextlib import closing
+from pathlib import Path
+
+from core.lcms_parser import load_lcms_directory
+from core.lcms_workbench import prepare_workbench_payload
+
+
+WORKBENCH_TEMPLATE = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LC-MS Xcalibur Style Workbench</title>
+  <style>
+    :root { --bg:#f6f7fb; --panel:#fff; --line:#d9dee8; --ink:#172033; --muted:#667085; --blue:#2563eb; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: Arial, "Microsoft YaHei", sans-serif; color:var(--ink); background:var(--bg); }
+    header { padding:12px 16px; background:#fff; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+    h1 { margin:0; font-size:18px; }
+    .shell { display:grid; grid-template-columns:320px minmax(0,1fr); min-height:calc(100vh - 58px); }
+    aside { background:#fbfcfa; border-right:1px solid var(--line); padding:12px; overflow:auto; max-height:calc(100vh - 58px); }
+    main { padding:10px; display:grid; grid-template-columns: 2fr 1fr; gap:10px; min-width:0; }
+    section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; min-width:0; }
+    h2 { margin:0 0 8px; font-size:14px; }
+    canvas { width:100%; height:290px; border:1px solid #edf0f5; border-radius:6px; background:#fff; display:block; }
+    .wide { grid-column:1 / -1; }
+    .controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:12px; color:var(--muted); }
+    .controls label { display:inline-flex; gap:4px; align-items:center; }
+    select, input, button { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+    button { cursor:pointer; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th, td { padding:5px 6px; border-bottom:1px solid #edf0f5; text-align:right; white-space:nowrap; }
+    th:first-child, td:first-child { text-align:left; }
+    tr:hover { background:#f3f6ff; }
+    .scroll { overflow:auto; max-height:310px; }
+    .note { color:var(--muted); font-size:12px; }
+    .sample-list { display:flex; gap:8px; flex-wrap:wrap; }
+    .sample-list-side { display:grid; gap:6px; margin-top:10px; }
+    .sample-row { display:grid; grid-template-columns:18px 22px minmax(0,1fr) 64px; gap:7px; align-items:center; font-size:12px; }
+    .sample-row.drag-over { border-top:3px solid var(--blue); }
+    .sample-handle { border:0; padding:0; width:18px; height:22px; background:transparent; color:var(--muted); cursor:grab; font-size:15px; }
+    .sample-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .color-picker-button { width:18px; height:18px; min-width:18px; padding:0; border:2px solid #fff; border-radius:50%; box-shadow:0 0 0 1px var(--line); }
+    .sample-palette { display:none; grid-template-columns:repeat(8,18px); gap:6px; padding:8px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+    .sample-palette.open { display:grid; }
+    .color-swatch { width:16px; height:16px; padding:0; border-radius:50%; border:2px solid transparent; cursor:pointer; }
+    .color-swatch.active { border-color:var(--ink); box-shadow:0 0 0 2px #fff, 0 0 0 3px var(--ink); }
+    .shift-input { width:62px; height:24px; padding:0 4px; border:1px solid var(--line); border-radius:4px; font-size:11px; }
+    .side-section { border-top:1px solid var(--line); padding-top:10px; margin-top:10px; }
+    .tooltip { position:fixed; display:none; pointer-events:none; z-index:20; max-width:280px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; box-shadow:0 8px 24px rgba(31,37,40,.16); font-size:12px; line-height:1.35; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LC-MS Workbench</h1>
+    <div class="controls">
+      <label>Comparison <select id="comparisonSelect"></select></label>
+      <label>Reference <select id="referenceSelect"></select></label>
+      <label><input type="checkbox" id="useAligned" checked> aligned RT</label>
+      <label>Chrom <select id="chromMode"><option value="tic">TIC</option><option value="bpc">BPC</option></select></label>
+      <label>Spectrum <select id="spectrumMode"><option value="single">single RT scan</option><option value="sum">summed RT range</option><option value="apex">apex spectrum</option><option value="average">average spectrum</option></select></label>
+      <label>Top labels <input id="topMzInput" size="3" value="8"></label>
+      <label><input type="checkbox" id="overlayXic" checked> overlay XIC</label>
+      <button id="exportTopMz">Export top m/z CSV</button>
+      <label>RT range <input id="rtStartInput" size="6"> - <input id="rtEndInput" size="6"></label>
+      <button id="resetChrom">Reset chromatogram zoom</button>
+      <button id="undoChrom">Undo chromatogram zoom</button>
+      <button id="resetSpec">Reset spectrum zoom</button>
+      <button id="undoSpec">Undo spectrum zoom</button>
+    </div>
+  </header>
+  <div class="shell">
+  <aside>
+    <div class="controls">
+      <button id="selectAll">All</button>
+      <button id="selectNone">None</button>
+      <button id="autoAlign">Auto align main peaks</button>
+      <button id="clearAlign">Clear RT shifts</button>
+    </div>
+    <div class="side-section">
+      <div class="controls">
+        <label>Vertical offset <input type="range" id="verticalOffset" min="0" max="1.2" step="0.05" value="0"></label>
+        <span id="offsetValue">0.00</span>
+      </div>
+      <div class="controls">
+        <label>X pan <input type="range" id="xPanSlider" min="0" max="1000" value="0"></label>
+        <span id="xPanValue">Create window</span>
+      </div>
+    </div>
+    <div id="sampleChecks" class="sample-list-side"></div>
+    <div id="sampleStatus" class="note side-section"></div>
+  </aside>
+  <main>
+    <section class="wide">
+      <h2>1. Chromatogram browser, Xcalibur-like top pane</h2>
+      <canvas id="chromCanvas" width="1400" height="360"></canvas>
+      <div id="chromInfo" class="note"></div>
+    </section>
+    <section class="wide">
+      <h2>2. Spectrum pane: single full scan by default, optional summed RT range</h2>
+      <div class="controls">
+        <label>Spectrum offset <input type="range" id="spectrumOffset" min="0" max="1.2" step="0.05" value="0"></label>
+        <span id="spectrumOffsetValue">0.00</span>
+      </div>
+      <canvas id="spectrumCanvas" width="1400" height="340"></canvas>
+      <div id="spectrumInfo" class="note"></div>
+    </section>
+    <section>
+      <h2>3. RT x m/z similarity heatmap after main-peak alignment</h2>
+      <div class="controls">
+        <label>Compare <select id="heatmapSelect"></select></label>
+        <label>Normalization <select id="normalizationSelect"></select></label>
+        <label>Mode <select id="heatmapMode"><option value="difference" selected>difference</option><option value="similarity">similarity</option><option value="normalized_intensity">normalized intensity</option><option value="raw_intensity">raw intensity</option></select></label>
+        <button id="resetHeatmap">Reset heatmap zoom</button>
+        <button id="undoHeatmap">Undo heatmap zoom</button>
+        <span>difference = 1 - similarity; brighter red means larger difference</span>
+      </div>
+      <canvas id="heatmapCanvas" width="900" height="520"></canvas>
+      <div id="heatmapInfo" class="note"></div>
+    </section>
+    <section>
+      <h2>4. Lowest-similarity bins</h2>
+      <div class="controls">
+        <button id="saveFeature">Save current region as LCMSFeature</button>
+        <button id="saveTopFeatures">Save top difference regions</button>
+        <button id="exportFeatures">Export saved features CSV</button>
+        <button id="exportFeatureMatrix">Export feature matrix CSV</button>
+      </div>
+      <div class="scroll"><table id="diffTable"></table></div>
+    </section>
+    <section>
+      <h2>5. Difference drill-down XIC</h2>
+      <div class="controls">
+        <button id="resetXic">Reset XIC zoom</button>
+        <button id="undoXic">Undo XIC zoom</button>
+      </div>
+      <canvas id="xicCanvas" width="900" height="300"></canvas>
+      <div id="xicInfo" class="note"></div>
+    </section>
+    <section>
+      <h2>6. Selected RT-m/z intensity table</h2>
+      <div class="controls">
+        <button id="exportSelectedIntensity">Export selected intensity CSV</button>
+      </div>
+      <div class="scroll"><table id="intensityTable"></table></div>
+    </section>
+    <section class="wide">
+      <h2>Saved LCMSFeature regions</h2>
+      <div class="scroll"><table id="savedFeatureTable"></table></div>
+    </section>
+    <section class="wide">
+      <h2>Feature matrix from saved regions</h2>
+      <div id="featureMatrixInfo" class="note"></div>
+      <div class="scroll"><table id="featureMatrixTable"></table></div>
+    </section>
+    <section class="wide">
+      <h2>Data and alignment</h2>
+      <div class="scroll"><table id="sourceTable"></table></div>
+    </section>
+  </main>
+  </div>
+  <div id="tooltip" class="tooltip"></div>
+  <script>
+    let DATA = null;
+    const BOOTSTRAP_URL = "/api/bootstrap";
+    const FEATURES_URL = "/api/features";
+    let CURRENT_COMPARISON = "";
+    let COMPARISONS = [];
+    const colors = [
+      "#e74c3c", "#e91e63", "#ff5722", "#e67e22", "#f39c12", "#ffc107",
+      "#4caf50", "#2ecc71", "#1abc9c", "#00bcd4", "#1f77b4", "#607d8b",
+      "#9b59b6", "#673ab7", "#795548", "#000000",
+      "#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A", "#19D3F3",
+      "#FF6692", "#B6E880", "#FF97FF", "#FECB52",
+      "#2E91E5", "#E15F99", "#1CA71C", "#FB0D0D", "#DA16FF", "#222A2A",
+      "#B68100", "#750D86", "#EB663B", "#511CFB", "#00A08B", "#FB00D1"
+    ];
+    const defaultColorSequence = [
+      "#1f77b4", "#e74c3c", "#2ecc71", "#9b59b6", "#f39c12", "#00bcd4",
+      "#795548", "#e91e63", "#607d8b", "#ff5722", "#4caf50", "#673ab7",
+      "#ffc107", "#1abc9c", "#000000", "#636EFA", "#EF553B", "#00CC96",
+      "#AB63FA", "#FFA15A", "#19D3F3", "#FF6692", "#B6E880", "#750D86"
+    ];
+    let state = null;
+
+    function createInitialState() {
+      return {
+        referenceSample: DATA.reference_sample,
+        selectedSamples: new Set(DATA.sample_ids),
+        sampleOrder: [...DATA.sample_ids],
+        sampleColors: new Map(DATA.sample_ids.map((s, i) => [s, defaultColorSequence[i % defaultColorSequence.length]])),
+        rtShifts: new Map(DATA.sample_ids.map(s => [s, DATA.alignment.rt_shift_by_sample[s] || 0])),
+        openPaletteSample: null,
+        verticalOffset: 0,
+        spectrumOffset: 0,
+        selectedRt: DATA.rt_min,
+        selectedMz: (DATA.mz_min + DATA.mz_max) / 2,
+        rtRange: [DATA.rt_min, Math.min(DATA.rt_min + 0.5, DATA.rt_max)],
+        chromZoom: null,
+        specZoom: null,
+        xicZoom: null,
+        heatmapZoom: null,
+        chromZoomHistory: [],
+        specZoomHistory: [],
+        xicZoomHistory: [],
+        heatmapZoomHistory: [],
+        dynamicHeatmapCache: new Map(),
+        heatmapWindowCache: new Map(),
+        activeHeatmapWindow: null,
+        savedFeatures: []
+      };
+    }
+
+    function $(id) { return document.getElementById(id); }
+    function nice(n, digits=3) {
+      const value = Number(n);
+      return Number.isFinite(value) ? value.toFixed(digits) : "";
+    }
+    function selectedSampleIds() { return state.sampleOrder.filter(s => state.selectedSamples.has(s)); }
+    function useAligned() { return $("useAligned").checked; }
+    function chromValueIndex() { return $("chromMode").value === "tic" ? 1 : 2; }
+    function xValue(point) { return point[0]; }
+    function traceColor(sample) { return state.sampleColors.get(sample) || colors[DATA.sample_ids.indexOf(sample) % colors.length]; }
+    function rtShift(sample) { return useAligned() ? (state.rtShifts.get(sample) || 0) : 0; }
+    function topMzCount() { return Math.max(0, Math.min(30, Number($("topMzInput")?.value) || 0)); }
+    function showXicOverlay() { return $("overlayXic")?.checked !== false; }
+    function mainPeak(sample) { return DATA.alignment.main_peak_by_sample?.[sample] || null; }
+    function mainPeakDisplayRt(sample) {
+      const peak = mainPeak(sample);
+      if (!peak || peak.apex_time_min === undefined || peak.apex_time_min === null) return null;
+      return Number(peak.apex_time_min) + rtShift(sample);
+    }
+
+    function mainPeakApexRt(sample) {
+      const peak = mainPeak(sample);
+      if (!peak || peak.apex_time_min === undefined || peak.apex_time_min === null) return null;
+      return Number(peak.apex_time_min);
+    }
+
+    function applyReferenceAlignment() {
+      const refApex = mainPeakApexRt(state.referenceSample);
+      DATA.sample_ids.forEach(sample => {
+        const apex = mainPeakApexRt(sample);
+        state.rtShifts.set(sample, refApex !== null && apex !== null ? refApex - apex : 0);
+      });
+    }
+
+    function domainFromSeries(series) {
+      const xs = series.flatMap(s => s.x);
+      const ys = series.flatMap(s => s.y);
+      if (!xs.length || !ys.length) return { xmin: DATA.rt_min, xmax: DATA.rt_max, ymin: 0, ymax: 1 };
+      return { xmin: Math.min(...xs), xmax: Math.max(...xs), ymin: 0, ymax: Math.max(...ys, 1) };
+    }
+
+    function drawAxes(ctx, plot, xLabel, yLabel) {
+      ctx.strokeStyle = "#d9dee8"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(plot.left, plot.top); ctx.lineTo(plot.left, plot.bottom); ctx.lineTo(plot.right, plot.bottom); ctx.stroke();
+      ctx.fillStyle = "#667085"; ctx.font = "12px Arial";
+      ctx.fillText(xLabel, (plot.left + plot.right) / 2 - 25, plot.bottom + 30);
+      ctx.fillText(yLabel, 8, plot.top + 12);
+      const tickCount = 5;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      for (let i=0; i<=tickCount; i++) {
+        const ratio = i / tickCount;
+        const value = plot.xmin + (plot.xmax - plot.xmin) * ratio;
+        const x = plot.left + (plot.right - plot.left) * ratio;
+        ctx.strokeStyle = "#d9dee8";
+        ctx.beginPath(); ctx.moveTo(x, plot.bottom); ctx.lineTo(x, plot.bottom + 5); ctx.stroke();
+        ctx.fillStyle = "#667085";
+        ctx.fillText(formatAxisTick(value), x, plot.bottom + 8);
+      }
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      for (let i=0; i<=tickCount; i++) {
+        const ratio = i / tickCount;
+        const value = plot.ymin + (plot.ymax - plot.ymin) * ratio;
+        const y = plot.bottom - (plot.bottom - plot.top) * ratio;
+        ctx.strokeStyle = "#d9dee8";
+        ctx.beginPath(); ctx.moveTo(plot.left - 5, y); ctx.lineTo(plot.left, y); ctx.stroke();
+        ctx.fillStyle = "#667085";
+        ctx.fillText(formatAxisTick(value), plot.left - 8, y);
+      }
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+    }
+
+    function makePlot(canvas, domain) {
+      const plot = { left:64, right:canvas.width-22, top:18, bottom:canvas.height-54, ...domain };
+      plot.toX = x => plot.left + (x - plot.xmin) / Math.max(plot.xmax - plot.xmin, 1e-12) * (plot.right - plot.left);
+      plot.toY = y => plot.bottom - (y - plot.ymin) / Math.max(plot.ymax - plot.ymin, 1e-12) * (plot.bottom - plot.top);
+      plot.fromX = px => plot.xmin + (px - plot.left) / Math.max(plot.right - plot.left, 1e-12) * (plot.xmax - plot.xmin);
+      plot.fromY = py => plot.ymin + (plot.bottom - py) / Math.max(plot.bottom - plot.top, 1e-12) * (plot.ymax - plot.ymin);
+      return plot;
+    }
+
+    function formatAxisTick(value) {
+      const abs = Math.abs(Number(value));
+      if (!Number.isFinite(abs)) return "";
+      if (abs >= 1000) return String(Math.round(value));
+      if (abs >= 100) return value.toFixed(1);
+      if (abs >= 10) return value.toFixed(2);
+      return value.toFixed(3);
+    }
+
+    function drawChromatogram() {
+      const canvas = $("chromCanvas"), ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const series = selectedSampleIds().map((sample, idx) => {
+        const points = DATA.chromatograms[sample].raw;
+        return {
+          sample,
+          color: traceColor(sample),
+          x: points.map(p => xValue(p) + rtShift(sample)),
+          y: points.map(p => p[chromValueIndex()])
+        };
+      });
+      const domain = { ...(state.chromZoom || domainFromSeries(series)) };
+      const baseSpan = Math.max(domain.ymax - domain.ymin, 1);
+      const offsetStep = baseSpan * state.verticalOffset;
+      domain.ymax += Math.max(0, series.length - 1) * offsetStep;
+      const plot = makePlot(canvas, domain);
+      drawAxes(ctx, plot, "RT (min)", $("chromMode").value.toUpperCase());
+      series.forEach((s, idx) => {
+        ctx.strokeStyle = s.color; ctx.lineWidth = 1.4; ctx.beginPath();
+        const topDownIndex = Math.max(0, series.length - 1 - idx);
+        s.x.forEach((x, i) => {
+          const px = plot.toX(x), py = plot.toY(s.y[i] + topDownIndex * offsetStep);
+          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        });
+        ctx.stroke();
+        ctx.fillStyle = s.color;
+        const labelY = plot.toY(topDownIndex * offsetStep) - 6;
+        ctx.fillText(s.sample, plot.left + 8, Math.max(plot.top + 14, Math.min(plot.bottom - 4, labelY)));
+        const peakRt = mainPeakDisplayRt(s.sample);
+        if (peakRt !== null && peakRt >= plot.xmin && peakRt <= plot.xmax) {
+          const px = plot.toX(peakRt);
+          ctx.save();
+          ctx.setLineDash([3, 3]);
+          ctx.strokeStyle = s.color;
+          ctx.beginPath();
+          ctx.moveTo(px, plot.top);
+          ctx.lineTo(px, plot.bottom);
+          ctx.stroke();
+          ctx.restore();
+          ctx.fillText("main", px + 4, plot.top + 14 + idx * 12);
+        }
+      });
+      ctx.strokeStyle = "#111827"; ctx.setLineDash([4, 4]);
+      const markerX = plot.toX(state.selectedRt);
+      ctx.beginPath(); ctx.moveTo(markerX, plot.top); ctx.lineTo(markerX, plot.bottom); ctx.stroke(); ctx.setLineDash([]);
+      const rangeX0 = plot.toX(state.rtRange[0]), rangeX1 = plot.toX(state.rtRange[1]);
+      ctx.fillStyle = "rgba(37,99,235,.10)"; ctx.fillRect(Math.min(rangeX0, rangeX1), plot.top, Math.abs(rangeX1-rangeX0), plot.bottom-plot.top);
+      if (showXicOverlay() && Number.isFinite(state.selectedMz)) {
+        const tolerance = currentMzTolerance();
+        const overlayBase = plot.ymin + (plot.ymax - plot.ymin) * 0.08;
+        const overlayHeight = (plot.ymax - plot.ymin) * 0.24;
+        selectedSampleIds().forEach(sample => {
+          const points = extractXic(sample, state.selectedMz, tolerance)
+            .filter(([rt]) => rt >= plot.xmin && rt <= plot.xmax);
+          const maxI = Math.max(0, ...points.map(point => point[1]));
+          if (!points.length || maxI <= 0) return;
+          ctx.save();
+          ctx.setLineDash([6, 4]);
+          ctx.strokeStyle = traceColor(sample);
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          points.forEach(([rt, intensity], index) => {
+            const x = plot.toX(rt);
+            const y = plot.toY(overlayBase + intensity / maxI * overlayHeight);
+            if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+          ctx.restore();
+        });
+        ctx.fillStyle = "#111827";
+        ctx.fillText(`XIC overlay m/z ${nice(state.selectedMz, 4)}`, plot.left + 8, plot.bottom - 8);
+      }
+      $("chromInfo").textContent = `selected RT ${nice(state.selectedRt, 4)} min; selected m/z ${nice(state.selectedMz, 4)}; summed range ${nice(state.rtRange[0], 4)}-${nice(state.rtRange[1], 4)} min; alignment ${DATA.alignment.alignment_method || "main peak"}, match window ${DATA.alignment.alignment_match_window_min ?? ""} min`;
+      canvas._plot = plot;
+    }
+
+    function nearestScan(sample, scans, rt) {
+      let best = scans[0], delta = Infinity;
+      scans.forEach(scan => {
+        const d = Math.abs((scan.rt + rtShift(sample)) - rt);
+        if (d < delta) { best = scan; delta = d; }
+      });
+      return best;
+    }
+
+    function rangeScans(sample, scans, rt0, rt1) {
+      return scans.filter(scan => {
+        const rt = scan.rt + rtShift(sample);
+        return rt >= rt0 && rt <= rt1;
+      });
+    }
+
+    function apexScan(sample, scans, rt0, rt1) {
+      const candidates = rangeScans(sample, scans, rt0, rt1);
+      const source = candidates.length ? candidates : scans;
+      const signal = $("chromMode").value === "tic" ? "tic" : "base_peak_intensity";
+      return source.reduce((best, scan) => {
+        if (!best) return scan;
+        return (scan[signal] || 0) > (best[signal] || 0) ? scan : best;
+      }, null);
+    }
+
+    function mergedSpectrum(sample, scans, rt0, rt1, binWidth, mode) {
+      const bins = new Map();
+      const included = rangeScans(sample, scans, rt0, rt1);
+      included.forEach(scan => {
+        const rt = scan.rt + rtShift(sample);
+        scan.mz.forEach((mz, i) => {
+          const key = Math.round(mz / binWidth);
+          bins.set(key, (bins.get(key) || 0) + scan.intensity[i]);
+        });
+      });
+      const divisor = mode === "average" ? Math.max(1, included.length) : 1;
+      return {
+        pairs: Array.from(bins.entries()).map(([key, intensity]) => [key * binWidth, intensity / divisor]).sort((a,b) => a[0]-b[0]),
+        scanCount: included.length
+      };
+    }
+
+    function currentSpectrumSeries() {
+      const mode = $("spectrumMode").value;
+      return selectedSampleIds().map((sample, idx) => {
+        const scans = DATA.spectra[sample] || [];
+        let pairs = [];
+        let labelRt = (state.rtRange[0] + state.rtRange[1]) / 2;
+        let scanCount = 0;
+        let rtStart = state.rtRange[0];
+        let rtEnd = state.rtRange[1];
+        if (!scans.length) {
+          return { sample, color: traceColor(sample), pairs, labelRt, rtStart, rtEnd, scanCount, spectrumType: mode };
+        }
+        if (mode === "single") {
+          const scan = nearestScan(sample, scans, state.selectedRt);
+          pairs = scan.mz.map((mz, i) => [mz, scan.intensity[i]]);
+          labelRt = scan.rt + rtShift(sample);
+          rtStart = labelRt;
+          rtEnd = labelRt;
+          scanCount = scan ? 1 : 0;
+        } else if (mode === "apex") {
+          const scan = apexScan(sample, scans, state.rtRange[0], state.rtRange[1]);
+          pairs = scan ? scan.mz.map((mz, i) => [mz, scan.intensity[i]]) : [];
+          labelRt = scan ? scan.rt + rtShift(sample) : labelRt;
+          rtStart = state.rtRange[0];
+          rtEnd = state.rtRange[1];
+          scanCount = scan ? 1 : 0;
+        } else {
+          const merged = mergedSpectrum(sample, scans, state.rtRange[0], state.rtRange[1], DATA.spectrum_bin_width || 1, mode);
+          pairs = merged.pairs;
+          scanCount = merged.scanCount;
+          labelRt = (state.rtRange[0] + state.rtRange[1]) / 2;
+        }
+        return { sample, color: traceColor(sample), pairs, labelRt, rtStart, rtEnd, scanCount, spectrumType: mode };
+      });
+    }
+
+    function spectrumYMaxForWindow(xmin, xmax) {
+      let ymax = 1;
+      currentSpectrumSeries().forEach(s => {
+        s.pairs.forEach(([mz, intensity]) => {
+          if (mz >= xmin && mz <= xmax && intensity > ymax) ymax = intensity;
+        });
+      });
+      return ymax;
+    }
+
+    function topSpectrumPeaks(series, plot, count) {
+      const rows = [];
+      series.forEach(s => {
+        s.pairs.forEach(([mz, intensity]) => {
+          if (mz >= plot.xmin && mz <= plot.xmax && intensity > 0) {
+            rows.push({ sample:s.sample, mz, intensity, yOffset:s.yOffset || 0, color:s.color, labelRt:s.labelRt, rtStart:s.rtStart, rtEnd:s.rtEnd, scanCount:s.scanCount, spectrumType:s.spectrumType });
+          }
+        });
+      });
+      rows.sort((a, b) => b.intensity - a.intensity);
+      return rows.slice(0, count);
+    }
+
+    function nearestSpectrumPeak(canvas, screenX, screenY) {
+      const plot = canvas._plot;
+      const series = canvas._spectrumSeries || [];
+      if (!plot) return null;
+      let best = null;
+      series.forEach(s => {
+        s.pairs.forEach(([mz, intensity]) => {
+          if (mz < plot.xmin || mz > plot.xmax) return;
+          const px = plot.toX(mz);
+          const py = plot.toY(intensity + (s.yOffset || 0));
+          const dist = Math.hypot(px - screenX, py - screenY);
+          if (dist <= 14 && (!best || dist < best.dist)) {
+            best = { sample:s.sample, mz, intensity, labelRt:s.labelRt, color:s.color, dist };
+          }
+        });
+      });
+      return best;
+    }
+
+    function selectSpectrumPeak(canvas, screenX, screenY) {
+      const hit = nearestSpectrumPeak(canvas, screenX, screenY);
+      if (!hit) return false;
+      state.selectedMz = hit.mz;
+      drawAll();
+      return true;
+    }
+
+    function drawSpectrum() {
+      const canvas = $("spectrumCanvas"), ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const series = currentSpectrumSeries();
+      const allMz = series.flatMap(s => s.pairs.map(p => p[0]));
+      const allI = series.flatMap(s => s.pairs.map(p => p[1]));
+      const domain = { ...(state.specZoom || { xmin: Math.min(...allMz, DATA.mz_min), xmax: Math.max(...allMz, DATA.mz_max), ymin: 0, ymax: Math.max(...allI, 1) }) };
+      const baseSpan = Math.max(domain.ymax - domain.ymin, 1);
+      const offsetStep = baseSpan * state.spectrumOffset;
+      domain.ymax += Math.max(0, series.length - 1) * offsetStep;
+      series.forEach((s, idx) => { s.yOffset = Math.max(0, series.length - 1 - idx) * offsetStep; });
+      const plot = makePlot(canvas, domain);
+      drawAxes(ctx, plot, "m/z", "intensity");
+      series.forEach((s, idx) => {
+        ctx.strokeStyle = s.color; ctx.lineWidth = 1;
+        s.pairs.forEach(([mz, intensity]) => {
+          if (mz < plot.xmin || mz > plot.xmax) return;
+          const x = plot.toX(mz);
+          const baseY = plot.toY(s.yOffset || 0);
+          ctx.beginPath(); ctx.moveTo(x, baseY); ctx.lineTo(x, plot.toY(intensity + (s.yOffset || 0))); ctx.stroke();
+        });
+        ctx.fillStyle = s.color;
+        const rtLabel = s.rtStart === s.rtEnd ? `RT ${nice(s.labelRt, 3)}` : `RT ${nice(s.rtStart, 3)}-${nice(s.rtEnd, 3)}`;
+        ctx.fillText(`${s.sample} ${rtLabel}`, plot.left + 8, Math.max(plot.top + 16, Math.min(plot.bottom - 4, plot.toY(s.yOffset || 0) - 6)));
+      });
+      const labels = topSpectrumPeaks(series, plot, topMzCount());
+      ctx.font = "11px Arial";
+      labels.forEach((peak, index) => {
+        const x = plot.toX(peak.mz);
+        const y = plot.toY(peak.intensity + (peak.yOffset || 0));
+        const textY = Math.max(plot.top + 12, y - 8 - (index % 3) * 11);
+        ctx.fillStyle = peak.color;
+        ctx.fillText(nice(peak.mz, 2), Math.min(plot.right - 58, x + 3), textY);
+      });
+      if (Number.isFinite(state.selectedMz)) {
+        const x = plot.toX(state.selectedMz);
+        if (x >= plot.left && x <= plot.right) {
+          ctx.save();
+          ctx.setLineDash([4, 4]);
+          ctx.strokeStyle = "#111827";
+          ctx.beginPath(); ctx.moveTo(x, plot.top); ctx.lineTo(x, plot.bottom); ctx.stroke();
+          ctx.restore();
+        }
+      }
+      const modeLabels = { single:"single-scan full MS view from nearest RT", sum:"summed spectrum over selected RT range", apex:"apex spectrum from selected RT range", average:"average spectrum over selected RT range" };
+      const totalScans = series.reduce((sum, item) => sum + (item.scanCount || 0), 0);
+      $("spectrumInfo").textContent = `${modeLabels[$("spectrumMode").value] || "spectrum"}; scans ${totalScans}; selected m/z ${nice(state.selectedMz, 4)}`;
+      canvas._plot = plot;
+      canvas._spectrumSeries = series;
+    }
+
+    function heatValue(score) {
+      if (score === null || score === undefined || !Number.isFinite(Number(score))) return null;
+      return $("heatmapMode").value === "difference" ? 1 - score : score;
+    }
+
+    function meanIntensityForCell(h, raw, mzIdx, rtIdx, field) {
+      const values = Object.values(scoredHeatmapSampleIntensityMap(h, raw, mzIdx, rtIdx))
+        .map(item => Number(item?.[field] || 0));
+      if (!values.length || Math.max(...values) <= 0) return null;
+      return values.reduce((sum, value) => sum + value, 0) / values.length;
+    }
+
+    function heatMetricValue(h, raw, mzIdx, rtIdx) {
+      const score = h?.scores?.[mzIdx]?.[rtIdx];
+      const mode = $("heatmapMode").value;
+      if (mode === "normalized_intensity") return meanIntensityForCell(h, raw, mzIdx, rtIdx, "normalized");
+      if (mode === "raw_intensity") return meanIntensityForCell(h, raw, mzIdx, rtIdx, "raw");
+      if (mode === "difference" && isPairHeatmap(h)) return directionalPairDifference(h, raw, mzIdx, rtIdx, score);
+      return heatValue(score);
+    }
+
+    function isPairHeatmap(h) {
+      return String(h?.comparison_type || "").startsWith("pair") && h?.reference_sample && h?.sample_id;
+    }
+
+    function directionalPairDifference(h, raw, mzIdx, rtIdx, score) {
+      if (score === null || score === undefined || !Number.isFinite(Number(score))) return null;
+      const values = scoredHeatmapSampleIntensityMap(h, raw, mzIdx, rtIdx);
+      const ref = values?.[h.reference_sample]?.normalized || 0;
+      const sample = values?.[h.sample_id]?.normalized || 0;
+      if (ref <= 0 && sample <= 0) return null;
+      const sign = sample >= ref ? 1 : -1;
+      return sign * (1 - Number(score));
+    }
+
+    function heatColorFromValue(metricValue, colorDomain=null, heatmap=null) {
+      if (metricValue === null || metricValue === undefined || !Number.isFinite(Number(metricValue))) return null;
+      const low = colorDomain?.low ?? 0;
+      const high = colorDomain?.high ?? 1;
+      if ($("heatmapMode").value === "difference" && isPairHeatmap(heatmap)) {
+        const limit = Math.max(Math.abs(low), Math.abs(high), 1e-12);
+        const value = Math.max(-1, Math.min(1, Number(metricValue) / limit));
+        if (Math.abs(value) < 1e-9) return "rgb(255,255,255)";
+        const magnitude = Math.pow(Math.abs(value), 0.65);
+        if (value > 0) return interpolateColor([255,255,255], [215,48,39], magnitude);
+        return interpolateColor([255,255,255], [44,123,182], magnitude);
+      }
+      const value = Math.pow(Math.max(0, Math.min(1, (metricValue - low) / Math.max(high - low, 1e-12))), 0.65);
+      if ($("heatmapMode").value === "difference") {
+        if (value < 0.5) return interpolateColor([255,255,255], [254,224,139], value / 0.5);
+        return interpolateColor([254,224,139], [215,48,39], (value - 0.5) / 0.5);
+      }
+      const s = value;
+      if ($("heatmapMode").value === "similarity") {
+        if (s < 0.5) return interpolateColor([215,48,39], [255,255,191], s / 0.5);
+        return interpolateColor([255,255,191], [26,150,65], (s - 0.5) / 0.5);
+      }
+      return interpolateColor([247,252,245], [0,109,44], s);
+    }
+
+    function interpolateColor(a, b, t) {
+      const value = Math.max(0, Math.min(1, t));
+      const r = Math.round(a[0] + (b[0] - a[0]) * value);
+      const g = Math.round(a[1] + (b[1] - a[1]) * value);
+      const blue = Math.round(a[2] + (b[2] - a[2]) * value);
+      return `rgb(${r},${g},${blue})`;
+    }
+
+    function quantileSorted(sorted, q) {
+      if (!sorted.length) return 0;
+      const pos = Math.max(0, Math.min(1, q)) * (sorted.length - 1);
+      const low = Math.floor(pos), high = Math.ceil(pos);
+      if (low === high) return sorted[low];
+      return sorted[low] * (1 - (pos - low)) + sorted[high] * (pos - low);
+    }
+
+    function heatmapColorDomain(h) {
+      const values = [];
+      const raw = rawHeatmapFor(h);
+      for (let mzIdx=0; mzIdx<(h?.mz_bin_count || 0); mzIdx++) {
+        for (let rtIdx=0; rtIdx<(h?.rt_bin_count || 0); rtIdx++) {
+          const heat = heatMetricValue(h, raw, mzIdx, rtIdx);
+          if (heat !== null && Number.isFinite(heat)) values.push(heat);
+        }
+      }
+      values.sort((a, b) => a - b);
+      if (!values.length) return { low:0, high:1, valid:0, nullCount:0 };
+      if ($("heatmapMode").value === "difference" && isPairHeatmap(h)) {
+        const limit = Math.max(Math.abs(quantileSorted(values, 0.01)), Math.abs(quantileSorted(values, 0.99)), 1e-6);
+        return {
+          low: -limit,
+          high: limit,
+          valid: values.length,
+          nullCount: (h.mz_bin_count || 0) * (h.rt_bin_count || 0) - values.length
+        };
+      }
+      return {
+        low: quantileSorted(values, 0.01),
+        high: quantileSorted(values, 0.99),
+        valid: values.length,
+        nullCount: (h.mz_bin_count || 0) * (h.rt_bin_count || 0) - values.length
+      };
+    }
+
+    function drawHeatmapLegend(ctx, plot, domain, heatmap=null) {
+      const x0 = plot.right - 170;
+      const y0 = plot.top + 8;
+      const width = 132;
+      const height = 10;
+      for (let i=0; i<width; i++) {
+        const value = domain.low + (domain.high - domain.low) * i / Math.max(1, width - 1);
+        ctx.fillStyle = heatColorFromValue(value, domain, heatmap) || "#fff";
+        ctx.fillRect(x0 + i, y0, 1, height);
+      }
+      ctx.strokeStyle = "#d9dee8";
+      ctx.strokeRect(x0, y0, width, height);
+      ctx.fillStyle = "#667085";
+      ctx.font = "11px Arial";
+      ctx.textAlign = "left";
+      ctx.fillText(formatAxisTick(domain.low), x0, y0 + 24);
+      ctx.textAlign = "right";
+      ctx.fillText(formatAxisTick(domain.high), x0 + width, y0 + 24);
+      ctx.textAlign = "left";
+      ctx.fillText($("heatmapMode").value, x0, y0 - 3);
+    }
+
+    function currentHeatmap() {
+      const key = $("heatmapSelect").value;
+      const method = $("normalizationSelect")?.value || DATA.default_heatmap_normalization || "tic_log1p";
+      if (state.activeHeatmapWindow?.key === key && state.activeHeatmapWindow?.method === method) {
+        return state.activeHeatmapWindow.heatmap;
+      }
+      if (key === "cohort:all_samples") {
+        return dynamicCohortHeatmap(method);
+      }
+      if (key.startsWith("pair:")) {
+        const [, reference, sample] = key.split(":");
+        return dynamicPairHeatmap(reference, sample, method);
+      }
+      return DATA.heatmaps.find(h => (h.comparison_key || h.sample_id) === key && h.normalization_method === method)
+        || DATA.heatmaps.find(h => (h.comparison_key || h.sample_id) === key)
+        || DATA.heatmaps[0];
+    }
+
+    async function fetchJson(url) {
+      const response = await fetch(url, { cache:"no-store" });
+      if (!response.ok) throw new Error(`Failed to load ${url}: HTTP ${response.status}`);
+      return await response.json();
+    }
+    function apiUrl(path) {
+      const sep = path.includes("?") ? "&" : "?";
+      return `${path}${sep}comparison=${encodeURIComponent(CURRENT_COMPARISON || "")}`;
+    }
+
+    async function loadSavedFeaturesFromApi() {
+      const payload = await fetchJson(apiUrl(FEATURES_URL));
+      state.savedFeatures = Array.isArray(payload.features) ? payload.features : [];
+      renderSavedFeatures();
+    }
+
+    async function persistSavedFeatures() {
+      const response = await fetch(apiUrl(FEATURES_URL), {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body:JSON.stringify({ features: state.savedFeatures })
+      });
+      if (!response.ok) throw new Error(`Failed to save LCMSFeature regions: HTTP ${response.status}`);
+      const payload = await response.json();
+      if (Array.isArray(payload.features)) state.savedFeatures = payload.features;
+      renderSavedFeatures();
+      return payload;
+    }
+
+    async function ensureSpectraLoaded(samples) {
+      const missing = samples.filter(sample => !DATA.spectra?.[sample]);
+      await Promise.all(missing.map(async sample => {
+        DATA.spectra[sample] = await fetchJson(apiUrl(`/api/spectra?sample=${encodeURIComponent(sample)}`));
+      }));
+    }
+
+    function addOrReplaceHeatmap(heatmap) {
+      const key = heatmap.comparison_key || heatmap.sample_id;
+      const method = heatmap.normalization_method || "none";
+      const index = DATA.heatmaps.findIndex(item => (item.comparison_key || item.sample_id) === key && (item.normalization_method || "none") === method);
+      if (index >= 0) DATA.heatmaps[index] = heatmap;
+      else DATA.heatmaps.push(heatmap);
+      state.dynamicHeatmapCache?.clear();
+    }
+
+    async function ensureHeatmapLoaded(key, method) {
+      if (DATA.heatmaps.some(item => (item.comparison_key || item.sample_id) === key && (item.normalization_method || "none") === method)) {
+        return;
+      }
+      const fetchKey = key.startsWith("pair:") ? "cohort:all_samples" : key;
+      const heatmap = await fetchJson(apiUrl(`/api/heatmap?key=${encodeURIComponent(fetchKey)}&method=${encodeURIComponent(method)}`));
+      addOrReplaceHeatmap(heatmap);
+    }
+
+    async function ensureCurrentHeatmapLoaded() {
+      const key = $("heatmapSelect")?.value || "cohort:all_samples";
+      const method = $("normalizationSelect")?.value || DATA.default_heatmap_normalization || "tic_log1p";
+      await ensureHeatmapLoaded(key, method);
+    }
+
+    function clearHeatmapWindow() {
+      state.activeHeatmapWindow = null;
+    }
+
+    async function loadHeatmapWindowForZoom() {
+      if (!state.heatmapZoom) return;
+      const key = $("heatmapSelect")?.value || "cohort:all_samples";
+      const method = $("normalizationSelect")?.value || DATA.default_heatmap_normalization || "tic_log1p";
+      const fetchKey = key.startsWith("pair:") ? "cohort:all_samples" : key;
+      const zoom = state.heatmapZoom;
+      const cacheKey = `${key}|${method}|${nice(zoom.xmin, 6)}|${nice(zoom.xmax, 6)}|${nice(zoom.ymin, 6)}|${nice(zoom.ymax, 6)}`;
+      if (state.heatmapWindowCache.has(cacheKey)) {
+        state.activeHeatmapWindow = { key, method, heatmap: state.heatmapWindowCache.get(cacheKey) };
+        drawAll();
+        return;
+      }
+      $("heatmapInfo").textContent = "Loading RT-m/z window from local SQLite...";
+      const params = new URLSearchParams({
+        key: fetchKey,
+        method,
+        rt_min: String(zoom.xmin),
+        rt_max: String(zoom.xmax),
+        mz_min: String(zoom.ymin),
+        mz_max: String(zoom.ymax)
+      });
+      const windowHeatmap = await fetchJson(apiUrl(`/api/heatmap-window?${params.toString()}`));
+      let heatmap = windowHeatmap;
+      if (key.startsWith("pair:")) {
+        const [, reference, sample] = key.split(":");
+        heatmap = dynamicPairHeatmapFromCohort(reference, sample, method, windowHeatmap, windowHeatmap);
+        heatmap.window_source = "api/heatmap-window";
+      } else {
+        heatmap.window_source = "api/heatmap-window";
+      }
+      state.heatmapWindowCache.set(cacheKey, heatmap);
+      state.activeHeatmapWindow = { key, method, heatmap };
+      drawAll();
+    }
+
+    async function loadThenDraw() {
+      await ensureSpectraLoaded(selectedSampleIds());
+      await ensureCurrentHeatmapLoaded();
+      drawAll();
+    }
+
+    function rawHeatmapFor(heatmap) {
+      if (heatmap?.reference_raw_intensity_grid || heatmap?.sample_raw_intensity_grids) return heatmap;
+      return DATA.heatmaps.find(h =>
+        (h.comparison_key || h.sample_id) === (heatmap.comparison_key || heatmap.sample_id)
+        && (
+          (h.reference_raw_intensity_grid && h.sample_raw_intensity_grid)
+          || h.sample_raw_intensity_grids
+        )
+      ) || heatmap;
+    }
+
+    function heatmapLabel(h) {
+      return h?.comparison_label || `${h?.reference_sample || ""} vs ${h?.sample_id || ""}`;
+    }
+
+    function cohortHeatmap(method) {
+      return DATA.heatmaps.find(h => h.comparison_type === "cohort_cv" && h.normalization_method === method)
+        || DATA.heatmaps.find(h => h.comparison_type === "cohort_cv");
+    }
+
+    function rawCohortHeatmap() {
+      return DATA.heatmaps.find(h => h.comparison_type === "cohort_cv" && h.sample_raw_intensity_grids)
+        || cohortHeatmap(DATA.default_heatmap_normalization || "tic_log1p");
+    }
+
+    function cohortRegion(h, rtIdx, mzIdx, score, rawValues, normValues) {
+      const rtStep = (h.rt_max - h.rt_min) / h.rt_bin_count;
+      const mzStep = (h.mz_max - h.mz_min) / h.mz_bin_count;
+      const values = Object.values(normValues);
+      const positive = values.filter(value => value > 0);
+      const mean = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+      const cv = mean > 0 ? Math.sqrt(values.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0) / values.length) / mean : null;
+      const presence = Object.entries(rawValues).filter(([, value]) => value > 0).map(([sample]) => sample);
+      return {
+        rt: h.rt_min + (rtIdx + 0.5) * rtStep,
+        rt_start: h.rt_min + rtIdx * rtStep,
+        rt_end: h.rt_min + (rtIdx + 1) * rtStep,
+        mz: h.mz_min + (mzIdx + 0.5) * mzStep,
+        mz_start: h.mz_min + mzIdx * mzStep,
+        mz_end: h.mz_min + (mzIdx + 1) * mzStep,
+        score,
+        difference_score: 1 - score,
+        sample_intensities: Object.fromEntries(Object.keys(normValues).map(sample => [sample, { raw: rawValues[sample] || 0, normalized: normValues[sample] || 0 }])),
+        max_intensity: Math.max(0, ...Object.values(rawValues)),
+        sample_presence: presence,
+        group_mean_intensity: mean,
+        cv,
+        signal_status: presence.length === 0 ? "low_signal_background" : (presence.length < Object.keys(rawValues).length ? "presence_absence" : "high_confidence"),
+        fold_change: positive.length >= 2 ? (Math.max(...positive) + 1e-12) / (Math.min(...positive) + 1e-12) : null,
+        difference_type: presence.length > 0 && presence.length < Object.keys(rawValues).length ? "new_signal" : (score < 0.75 ? "intensity_changed" : "uncertain"),
+        rt_index: rtIdx,
+        mz_index: mzIdx,
+        saved_as_feature: false
+      };
+    }
+
+    function quantile(values, q) {
+      const sorted = values.filter(value => Number.isFinite(Number(value))).map(Number).sort((a, b) => a - b);
+      if (!sorted.length) return 0;
+      const pos = Math.max(0, Math.min(1, q)) * (sorted.length - 1);
+      const low = Math.floor(pos), high = Math.ceil(pos);
+      if (low === high) return sorted[low];
+      return sorted[low] * (1 - (pos - low)) + sorted[high] * (pos - low);
+    }
+
+    function applyAbundanceWeightToRegions(regions) {
+      const positiveMeans = regions.map(region => Number(region.group_mean_intensity || 0)).filter(value => value > 0);
+      const abundanceReference = quantile(positiveMeans, 0.90);
+      regions.forEach(region => {
+        const meanIntensity = Number(region.group_mean_intensity || 0);
+        const difference = Number(region.difference_score ?? (1 - Number(region.score || 0)));
+        const weight = abundanceReference > 0 && meanIntensity > 0 ? Math.min(1, Math.sqrt(meanIntensity / abundanceReference)) : 0;
+        region.abundance_weight = weight;
+        region.weighted_difference_score = difference * weight;
+        region.ranking_score = region.weighted_difference_score;
+      });
+      return regions;
+    }
+
+    function sortDifferenceRegions(regions) {
+      applyAbundanceWeightToRegions(regions);
+      regions.sort((a, b) =>
+        (Number(b.weighted_difference_score || 0) - Number(a.weighted_difference_score || 0))
+        || (Number(b.difference_score || 0) - Number(a.difference_score || 0))
+        || (Number(b.max_intensity || 0) - Number(a.max_intensity || 0))
+      );
+      return regions;
+    }
+
+    function dynamicCohortHeatmap(method) {
+      const selected = selectedSampleIds();
+      const key = `cohort:${selected.join("|")}:${method}`;
+      if (state.dynamicHeatmapCache.has(key)) return state.dynamicHeatmapCache.get(key);
+      const cohort = cohortHeatmap(method);
+      const raw = rawCohortHeatmap();
+      if (!cohort?.sample_intensity_grids || !raw?.sample_raw_intensity_grids) return cohort || DATA.heatmaps[0];
+      const sampleIds = selected.filter(sample => cohort.sample_intensity_grids[sample]);
+      if (sampleIds.length < 2) return cohort;
+      const scores = [];
+      const differences = [];
+      const neighborhood = heatmapNeighborhood(cohort);
+      const floors = cohort.signal_floor_by_sample || {};
+      for (let mzIdx=0; mzIdx<cohort.mz_bin_count; mzIdx++) {
+        const row = [];
+        for (let rtIdx=0; rtIdx<cohort.rt_bin_count; rtIdx++) {
+          const rawValues = Object.fromEntries(sampleIds.map(sample => {
+            let value = localMax(raw.sample_raw_intensity_grids?.[sample], mzIdx, rtIdx, neighborhood.mz, neighborhood.rt);
+            if (value < Number(floors[sample] || 0)) value = 0;
+            return [sample, value];
+          }));
+          if (Math.max(0, ...Object.values(rawValues)) <= 0) {
+            row.push(null);
+            continue;
+          }
+          const values = sampleIds.map(sample => (
+            rawValues[sample] <= 0
+              ? 0
+              : localMax(cohort.sample_intensity_grids?.[sample], mzIdx, rtIdx, neighborhood.mz, neighborhood.rt)
+          ));
+          const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+          const cv = mean > 0 ? Math.sqrt(values.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0) / values.length) / mean : Infinity;
+          const score = Number.isFinite(cv) ? 1 / (1 + cv) : 0;
+          row.push(score);
+          if (score < 0.75) {
+            const normValues = Object.fromEntries(sampleIds.map((sample, index) => [sample, values[index]]));
+            differences.push(cohortRegion(cohort, rtIdx, mzIdx, score, rawValues, normValues));
+          }
+        }
+        scores.push(row);
+      }
+      sortDifferenceRegions(differences);
+      const heatmap = {
+        ...cohort,
+        comparison_key: "cohort:all_samples",
+        comparison_label: `Selected samples consistency (${sampleIds.length})`,
+        sample_ids: sampleIds,
+        scores,
+        low_similarity_points: topSpatiallyDistinctRegions(differences, cohort.rt_neighborhood_bins || 1, cohort.mz_neighborhood_bins || 1, 80)
+      };
+      state.dynamicHeatmapCache.set(key, heatmap);
+      return heatmap;
+    }
+
+    function similarityScore(ref, sample) {
+      const a = Math.max(0, ref || 0);
+      const b = Math.max(0, sample || 0);
+      return Math.max(0, Math.min(1, 1 - Math.abs(a - b) / (a + b + 1e-9)));
+    }
+
+    function localMax(grid, mzIdx, rtIdx, mzRadius, rtRadius) {
+      if (!Array.isArray(grid)) return 0;
+      let best = 0;
+      const mzStart = Math.max(0, mzIdx - mzRadius);
+      const mzEnd = Math.min(grid.length, mzIdx + mzRadius + 1);
+      for (let m=mzStart; m<mzEnd; m++) {
+        const row = grid[m] || [];
+        const rtStart = Math.max(0, rtIdx - rtRadius);
+        const rtEnd = Math.min(row.length, rtIdx + rtRadius + 1);
+        for (let r=rtStart; r<rtEnd; r++) best = Math.max(best, Number(row[r] || 0));
+      }
+      return best;
+    }
+
+    function heatmapNeighborhood(h) {
+      return {
+        rt: Math.max(1, Number(h.rt_neighborhood_bins || 1)),
+        mz: Math.max(1, Number(h.mz_neighborhood_bins || 1))
+      };
+    }
+
+    function pairDifferenceType(refRaw, sampleRaw, refNorm, sampleNorm, score) {
+      if (refRaw <= 0 && sampleRaw > 0) return "new_signal";
+      if (refRaw > 0 && sampleRaw <= 0) return "missing_signal";
+      if (score > 0.75) return "uncertain";
+      const fold = (sampleNorm + 1e-12) / (refNorm + 1e-12);
+      if (fold >= 1.5) return "intensity_increased";
+      if (fold <= 1 / 1.5) return "intensity_decreased";
+      return "uncertain";
+    }
+
+    function pairDifferenceRegion(h, rtIdx, mzIdx, score, refRaw, sampleRaw, refNorm, sampleNorm) {
+      const rtStep = (h.rt_max - h.rt_min) / h.rt_bin_count;
+      const mzStep = (h.mz_max - h.mz_min) / h.mz_bin_count;
+      const samplePresence = [];
+      if (refRaw > 0) samplePresence.push(h.reference_sample);
+      if (sampleRaw > 0) samplePresence.push(h.sample_id);
+      return {
+        rt: h.rt_min + (rtIdx + 0.5) * rtStep,
+        rt_start: h.rt_min + rtIdx * rtStep,
+        rt_end: h.rt_min + (rtIdx + 1) * rtStep,
+        mz: h.mz_min + (mzIdx + 0.5) * mzStep,
+        mz_start: h.mz_min + mzIdx * mzStep,
+        mz_end: h.mz_min + (mzIdx + 1) * mzStep,
+        score,
+        difference_score: 1 - score,
+        reference_intensity: refNorm,
+        sample_intensity: sampleNorm,
+        reference_raw_intensity: refRaw,
+        sample_raw_intensity: sampleRaw,
+        max_intensity: Math.max(refRaw, sampleRaw),
+        sample_presence: samplePresence,
+        group_mean_intensity: (refNorm + sampleNorm) / 2,
+        fold_change: (sampleNorm + 1e-12) / (refNorm + 1e-12),
+        difference_type: pairDifferenceType(refRaw, sampleRaw, refNorm, sampleNorm, score),
+        rt_index: rtIdx,
+        mz_index: mzIdx,
+        saved_as_feature: false
+      };
+    }
+
+    function topSpatiallyDistinctRegions(regions, rtRadius, mzRadius, limit=80) {
+      const selected = [];
+      const minRtGap = Math.max(1, rtRadius * 2 + 1);
+      const minMzGap = Math.max(1, mzRadius * 2 + 1);
+      regions.forEach(region => {
+        if (selected.length >= limit) return;
+        const rtIndex = Number(region.rt_index ?? -100000);
+        const mzIndex = Number(region.mz_index ?? -100000);
+        const duplicate = selected.some(item =>
+          Math.abs(rtIndex - Number(item.rt_index ?? 100000)) < minRtGap
+          && Math.abs(mzIndex - Number(item.mz_index ?? 100000)) < minMzGap
+        );
+        if (!duplicate) {
+          selected.push({ ...region });
+        }
+      });
+      return selected.map(region => {
+        const cleaned = { ...region };
+        delete cleaned.rt_index;
+        delete cleaned.mz_index;
+        return cleaned;
+      });
+    }
+
+    function dynamicPairHeatmap(reference, sample, method) {
+      const key = `pair:${reference}:${sample}:${method}`;
+      if (state.dynamicHeatmapCache.has(key)) return state.dynamicHeatmapCache.get(key);
+      const cohort = cohortHeatmap(method);
+      const raw = rawCohortHeatmap();
+      const heatmap = dynamicPairHeatmapFromCohort(reference, sample, method, cohort, raw);
+      state.dynamicHeatmapCache.set(key, heatmap);
+      return heatmap;
+    }
+
+    function dynamicPairHeatmapFromCohort(reference, sample, method, cohort, raw=null) {
+      if (!cohort?.sample_intensity_grids?.[reference] || !cohort?.sample_intensity_grids?.[sample]) {
+        return DATA.heatmaps.find(h => h.reference_sample === reference && h.sample_id === sample && h.normalization_method === method)
+          || DATA.heatmaps[0];
+      }
+      raw = raw || cohort;
+      const refGrid = cohort.sample_intensity_grids[reference];
+      const sampleGrid = cohort.sample_intensity_grids[sample];
+      const refRawGrid = raw?.sample_raw_intensity_grids?.[reference] || refGrid;
+      const sampleRawGrid = raw?.sample_raw_intensity_grids?.[sample] || sampleGrid;
+      const scores = [];
+      const differences = [];
+      const pairContext = { ...cohort, reference_sample: reference, sample_id: sample };
+      const neighborhood = heatmapNeighborhood(cohort);
+      const floors = cohort.signal_floor_by_sample || {};
+      for (let mzIdx=0; mzIdx<cohort.mz_bin_count; mzIdx++) {
+        const row = [];
+        for (let rtIdx=0; rtIdx<cohort.rt_bin_count; rtIdx++) {
+          let refRaw = localMax(refRawGrid, mzIdx, rtIdx, neighborhood.mz, neighborhood.rt);
+          let sampleRaw = localMax(sampleRawGrid, mzIdx, rtIdx, neighborhood.mz, neighborhood.rt);
+          if (refRaw < Number(floors[reference] || 0)) refRaw = 0;
+          if (sampleRaw < Number(floors[sample] || 0)) sampleRaw = 0;
+          if (refRaw <= 0 && sampleRaw <= 0) {
+            row.push(null);
+            continue;
+          }
+          const refNorm = refRaw <= 0 ? 0 : localMax(refGrid, mzIdx, rtIdx, neighborhood.mz, neighborhood.rt);
+          const sampleNorm = sampleRaw <= 0 ? 0 : localMax(sampleGrid, mzIdx, rtIdx, neighborhood.mz, neighborhood.rt);
+          const score = similarityScore(refNorm, sampleNorm);
+          row.push(score);
+          if (score < 0.75) {
+            differences.push(pairDifferenceRegion(pairContext, rtIdx, mzIdx, score, refRaw, sampleRaw, refNorm, sampleNorm));
+          }
+        }
+        scores.push(row);
+      }
+      sortDifferenceRegions(differences);
+      const heatmap = {
+        comparison_type: "pair_dynamic",
+        comparison_key: `pair:${reference}:${sample}`,
+        comparison_label: `${reference} vs ${sample}`,
+        reference_sample: reference,
+        sample_id: sample,
+        sample_ids: [reference, sample],
+        normalization_method: method,
+        rt_min: cohort.rt_min,
+        rt_max: cohort.rt_max,
+        mz_min: cohort.mz_min,
+        mz_max: cohort.mz_max,
+        rt_bin_count: cohort.rt_bin_count,
+        mz_bin_count: cohort.mz_bin_count,
+        rt_neighborhood_bins: neighborhood.rt,
+        mz_neighborhood_bins: neighborhood.mz,
+        similarity_method: "local_neighborhood_max",
+        signal_floor_by_sample: {
+          [reference]: Number(floors[reference] || 0),
+          [sample]: Number(floors[sample] || 0)
+        },
+        scores,
+        reference_intensity_grid: refGrid,
+        sample_intensity_grid: sampleGrid,
+        reference_raw_intensity_grid: refRawGrid,
+        sample_raw_intensity_grid: sampleRawGrid,
+        low_similarity_points: topSpatiallyDistinctRegions(differences, neighborhood.rt, neighborhood.mz, 80)
+      };
+      return heatmap;
+    }
+
+    function heatmapSampleIntensityMap(h, raw, mzIdx, rtIdx) {
+      if (h.sample_intensity_grids) {
+        const rawGrids = raw.sample_raw_intensity_grids || {};
+        const values = {};
+        (h.sample_ids || DATA.sample_ids).forEach(sample => {
+          values[sample] = {
+            normalized: h.sample_intensity_grids?.[sample]?.[mzIdx]?.[rtIdx] || 0,
+            raw: rawGrids?.[sample]?.[mzIdx]?.[rtIdx] || 0
+          };
+        });
+        return values;
+      }
+      return {
+        [h.reference_sample]: {
+          normalized: h.reference_intensity_grid?.[mzIdx]?.[rtIdx] || 0,
+          raw: raw.reference_raw_intensity_grid?.[mzIdx]?.[rtIdx] || 0
+        },
+        [h.sample_id]: {
+          normalized: h.sample_intensity_grid?.[mzIdx]?.[rtIdx] || 0,
+          raw: raw.sample_raw_intensity_grid?.[mzIdx]?.[rtIdx] || 0
+        }
+      };
+    }
+
+    function scoredHeatmapSampleIntensityMap(h, raw, mzIdx, rtIdx) {
+      const neighborhood = heatmapNeighborhood(h);
+      const floors = h.signal_floor_by_sample || {};
+      if (h.sample_intensity_grids) {
+        const rawGrids = raw.sample_raw_intensity_grids || {};
+        const values = {};
+        (h.sample_ids || DATA.sample_ids).forEach(sample => {
+          let rawValue = localMax(rawGrids?.[sample], mzIdx, rtIdx, neighborhood.mz, neighborhood.rt);
+          if (rawValue < Number(floors[sample] || 0)) rawValue = 0;
+          values[sample] = {
+            normalized: rawValue <= 0 ? 0 : localMax(h.sample_intensity_grids?.[sample], mzIdx, rtIdx, neighborhood.mz, neighborhood.rt),
+            raw: rawValue
+          };
+        });
+        return values;
+      }
+      const ref = h.reference_sample;
+      const sample = h.sample_id;
+      let refRaw = localMax(raw.reference_raw_intensity_grid, mzIdx, rtIdx, neighborhood.mz, neighborhood.rt);
+      let sampleRaw = localMax(raw.sample_raw_intensity_grid, mzIdx, rtIdx, neighborhood.mz, neighborhood.rt);
+      if (refRaw < Number(floors[ref] || 0)) refRaw = 0;
+      if (sampleRaw < Number(floors[sample] || 0)) sampleRaw = 0;
+      return {
+        [ref]: {
+          normalized: refRaw <= 0 ? 0 : localMax(h.reference_intensity_grid, mzIdx, rtIdx, neighborhood.mz, neighborhood.rt),
+          raw: refRaw
+        },
+        [sample]: {
+          normalized: sampleRaw <= 0 ? 0 : localMax(h.sample_intensity_grid, mzIdx, rtIdx, neighborhood.mz, neighborhood.rt),
+          raw: sampleRaw
+        }
+      };
+    }
+
+    function intensitySummary(values, field="normalized") {
+      return Object.entries(values || {})
+        .map(([sample, item]) => `${sample}: ${nice(item?.[field] || 0, field === "raw" ? 2 : 6)}`)
+        .join("<br>");
+    }
+
+    function currentMzTolerance() {
+      const h = currentHeatmap();
+      return h ? Math.max((h.mz_max - h.mz_min) / h.mz_bin_count / 2, 0.1) : Math.max(DATA.spectrum_bin_width || 1, 0.1);
+    }
+
+    function drawHeatmap() {
+      const canvas = $("heatmapCanvas"), ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const h = currentHeatmap();
+      if (!h) return;
+      const domain = state.heatmapZoom || { xmin:h.rt_min, xmax:h.rt_max, ymin:h.mz_min, ymax:h.mz_max };
+      const plot = makePlot(canvas, domain);
+      drawAxes(ctx, plot, "aligned RT (min)", "m/z");
+      const rtStep = (h.rt_max - h.rt_min) / h.rt_bin_count;
+      const mzStep = (h.mz_max - h.mz_min) / h.mz_bin_count;
+      const raw = rawHeatmapFor(h);
+      const colorDomain = heatmapColorDomain(h);
+      const sparseFraction = 1 - colorDomain.valid / Math.max(1, h.rt_bin_count * h.mz_bin_count);
+      const drawAsPoints = sparseFraction > 0.75 && !h.window_source;
+      for (let mzIdx=0; mzIdx<h.mz_bin_count; mzIdx++) {
+        const mz0 = h.mz_min + mzIdx * mzStep;
+        const mz1 = mz0 + mzStep;
+        if (mz1 < plot.ymin || mz0 > plot.ymax) continue;
+        for (let rtIdx=0; rtIdx<h.rt_bin_count; rtIdx++) {
+          const rt0 = h.rt_min + rtIdx * rtStep;
+          const rt1 = rt0 + rtStep;
+          if (rt1 < plot.xmin || rt0 > plot.xmax) continue;
+          const color = heatColorFromValue(heatMetricValue(h, raw, mzIdx, rtIdx), colorDomain, h);
+          if (!color) continue;
+          ctx.fillStyle = color;
+          const x0 = plot.toX(rt0);
+          const x1 = plot.toX(rt1);
+          const y0 = plot.toY(mz0);
+          const y1 = plot.toY(mz1);
+          if (drawAsPoints) {
+            const cx = (x0 + x1) / 2;
+            const cy = (y0 + y1) / 2;
+            const size = Math.max(1.5, Math.min(4, Math.abs(x1 - x0), Math.abs(y1 - y0)));
+            ctx.fillRect(
+              Math.max(plot.left, cx - size / 2),
+              Math.max(plot.top, cy - size / 2),
+              size,
+              size
+            );
+          } else {
+            ctx.fillRect(
+              Math.max(plot.left, Math.min(x0, x1)),
+              Math.max(plot.top, Math.min(y0, y1)),
+              Math.ceil(Math.abs(x1 - x0)),
+              Math.ceil(Math.abs(y1 - y0))
+            );
+          }
+        }
+      }
+      drawHeatmapLegend(ctx, plot, colorDomain, h);
+      const windowNote = h.window_source ? `; local window ${h.rt_bin_count}x${h.mz_bin_count}` : "";
+      const binNote = `bin RT ${nice((h.rt_max - h.rt_min) / h.rt_bin_count, 4)} min, m/z ${nice((h.mz_max - h.mz_min) / h.mz_bin_count, 3)}`;
+      $("heatmapInfo").textContent = `${heatmapLabel(h)}; normalization ${h.normalization_method || "none"}; mode ${$("heatmapMode").value}${windowNote}; ${binNote}; valid bins ${colorDomain.valid}/${h.rt_bin_count * h.mz_bin_count}; view RT ${nice(plot.xmin, 3)}-${nice(plot.xmax, 3)}, m/z ${nice(plot.ymin, 1)}-${nice(plot.ymax, 1)}; selected RT ${nice(state.selectedRt, 3)}, m/z ${nice(state.selectedMz, 3)}`;
+      canvas._plot = plot;
+      renderDiffTable();
+      drawXic();
+      renderIntensityTable();
+    }
+
+    function heatmapBinAt(canvas, clientX, clientY) {
+      const h = currentHeatmap();
+      const plot = canvas._plot;
+      if (!h || !plot) return null;
+      const rect = canvas.getBoundingClientRect();
+      const x = (clientX - rect.left) * canvas.width / rect.width;
+      const y = (clientY - rect.top) * canvas.height / rect.height;
+      if (x < plot.left || x > plot.right || y < plot.top || y > plot.bottom) return null;
+      const rt = plot.fromX(x);
+      const mz = plot.fromY(y);
+      const rtIdx = Math.max(0, Math.min(h.rt_bin_count - 1, Math.floor((rt - h.rt_min) / ((h.rt_max - h.rt_min) / h.rt_bin_count))));
+      const mzIdx = Math.max(0, Math.min(h.mz_bin_count - 1, Math.floor((mz - h.mz_min) / ((h.mz_max - h.mz_min) / h.mz_bin_count))));
+      const rtStep = (h.rt_max - h.rt_min) / h.rt_bin_count;
+      const mzStep = (h.mz_max - h.mz_min) / h.mz_bin_count;
+      const score = h.scores[mzIdx][rtIdx];
+      if (score === null || score === undefined || !Number.isFinite(Number(score))) return null;
+      const raw = rawHeatmapFor(h);
+      const sampleIntensities = scoredHeatmapSampleIntensityMap(h, raw, mzIdx, rtIdx);
+      const pairValues = Object.values(sampleIntensities);
+      const normalizedValues = Object.values(sampleIntensities).map(item => Number(item.normalized || 0));
+      const rawValues = Object.values(sampleIntensities).map(item => Number(item.raw || 0));
+      const meanIntensity = normalizedValues.length ? normalizedValues.reduce((sum, value) => sum + value, 0) / normalizedValues.length : 0;
+      const cv = meanIntensity > 0
+        ? Math.sqrt(normalizedValues.reduce((sum, value) => sum + Math.pow(value - meanIntensity, 2), 0) / normalizedValues.length) / meanIntensity
+        : null;
+      const presentCount = rawValues.filter(value => value > 0).length;
+      const signalStatus = presentCount === 0 ? "low_signal_background" : (presentCount < rawValues.length ? "presence_absence" : "high_confidence");
+      return {
+        heatmap: h,
+        rt: h.rt_min + (rtIdx + 0.5) * rtStep,
+        mz: h.mz_min + (mzIdx + 0.5) * mzStep,
+        rt_start: h.rt_min + rtIdx * rtStep,
+        rt_end: h.rt_min + (rtIdx + 1) * rtStep,
+        mz_start: h.mz_min + mzIdx * mzStep,
+        mz_end: h.mz_min + (mzIdx + 1) * mzStep,
+        rtIdx,
+        mzIdx,
+        similarity: score,
+        difference: 1 - score,
+        meanIntensity,
+        cv,
+        signalStatus,
+        sampleIntensities,
+        referenceIntensity: sampleIntensities[h.reference_sample]?.normalized || pairValues[0]?.normalized || 0,
+        sampleIntensity: sampleIntensities[h.sample_id]?.normalized || pairValues[1]?.normalized || 0,
+        referenceRawIntensity: sampleIntensities[h.reference_sample]?.raw || pairValues[0]?.raw || 0,
+        sampleRawIntensity: sampleIntensities[h.sample_id]?.raw || pairValues[1]?.raw || 0
+      };
+    }
+
+    function selectHeatmapBin(bin) {
+      if (!bin) return;
+      state.selectedRt = bin.rt;
+      state.selectedMz = bin.mz;
+      state.rtRange = [bin.rt_start, bin.rt_end];
+      $("spectrumMode").value = "sum";
+      state.xicZoom = null;
+      $("rtStartInput").value = nice(state.rtRange[0], 3);
+      $("rtEndInput").value = nice(state.rtRange[1], 3);
+      const span = Math.max(80, (bin.mz_end - bin.mz_start) * 8);
+      const xmin = bin.mz - span;
+      const xmax = bin.mz + span;
+      state.specZoom = { xmin, xmax, ymin: 0, ymax: spectrumYMaxForWindow(xmin, xmax) * 1.05 };
+      drawAll();
+    }
+
+    function renderDiffTable() {
+      const h = currentHeatmap();
+      const rows = (h?.low_similarity_points || []).slice(0, 40).map((p, index) => {
+        const presence = Array.isArray(p.sample_presence) ? p.sample_presence.join(" / ") : String(p.sample_presence || "");
+        const fold = Number.isFinite(p.fold_change) ? nice(p.fold_change, 3) : "";
+        const difference = Number(p.difference_score ?? (1 - p.score));
+        const priority = Number(p.weighted_difference_score ?? p.ranking_score ?? difference);
+        return `<tr data-rt="${p.rt}" data-mz="${p.mz}"><td>${index + 1}</td><td>${nice(p.rt, 3)}</td><td>${nice(p.mz, 2)}</td><td>${nice(priority, 3)}</td><td>${nice(difference, 3)}</td><td>${nice(p.score, 3)}</td><td>${nice(p.abundance_weight ?? 1, 3)}</td><td>${nice(p.max_intensity || 0, 0)}</td><td>${presence}</td><td>${nice(p.group_mean_intensity || 0, 4)}</td><td>${fold}</td><td>${p.difference_type || ""}</td></tr>`;
+      });
+      $("diffTable").innerHTML = `<tr><th>rank</th><th>aligned RT</th><th>m/z</th><th>priority</th><th>difference</th><th>similarity</th><th>weight</th><th>max raw</th><th>presence</th><th>mean normalized</th><th>fold</th><th>type</th></tr>${rows.join("")}`;
+      document.querySelectorAll("#diffTable tr[data-rt]").forEach(row => {
+        row.addEventListener("click", () => {
+          selectHeatmapBin(heatmapBinFromValues(Number(row.dataset.rt), Number(row.dataset.mz)));
+        });
+      });
+    }
+
+    function extractXic(sample, targetMz, tolerance) {
+      return (DATA.spectra[sample] || []).map(scan => {
+        let intensity = 0;
+        scan.mz.forEach((mz, index) => {
+          if (Math.abs(mz - targetMz) <= tolerance) intensity += scan.intensity[index];
+        });
+        return [scan.rt + rtShift(sample), intensity];
+      });
+    }
+
+    function drawXic() {
+      const canvas = $("xicCanvas"), ctx = canvas.getContext("2d");
+      if (!canvas) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const tolerance = currentMzTolerance();
+      const series = selectedSampleIds().map(sample => {
+        const points = extractXic(sample, state.selectedMz, tolerance);
+        return { sample, color: traceColor(sample), x: points.map(p => p[0]), y: points.map(p => p[1]) };
+      });
+      const domain = { ...(state.xicZoom || domainFromSeries(series)) };
+      const plot = makePlot(canvas, domain);
+      drawAxes(ctx, plot, "aligned RT (min)", "XIC intensity");
+      series.forEach((s, idx) => {
+        ctx.strokeStyle = s.color; ctx.lineWidth = 1.4; ctx.beginPath();
+        s.x.forEach((x, i) => {
+          const px = plot.toX(x), py = plot.toY(s.y[i]);
+          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        });
+        ctx.stroke();
+        ctx.fillStyle = s.color; ctx.fillText(s.sample, plot.left + 8, plot.top + 16 + idx * 15);
+      });
+      const x0 = plot.toX(state.rtRange[0]), x1 = plot.toX(state.rtRange[1]);
+      ctx.fillStyle = "rgba(37,99,235,.10)";
+      ctx.fillRect(Math.min(x0, x1), plot.top, Math.abs(x1 - x0), plot.bottom - plot.top);
+      $("xicInfo").textContent = `XIC at m/z ${nice(state.selectedMz, 4)} +/- ${nice(tolerance, 4)}; RT ${nice(state.rtRange[0], 3)}-${nice(state.rtRange[1], 3)} min`;
+      canvas._plot = plot;
+    }
+
+    function intensityAt(sample, targetRt, targetMz) {
+      const tolerance = currentMzTolerance();
+      const scan = nearestScan(sample, DATA.spectra[sample] || [], targetRt);
+      let intensity = 0;
+      if (scan) {
+        scan.mz.forEach((mz, index) => {
+          if (Math.abs(mz - targetMz) <= tolerance) intensity += scan.intensity[index];
+        });
+      }
+      return intensity;
+    }
+
+    function intensityTraceAt(sample, targetRt, targetMz) {
+      const tolerance = currentMzTolerance();
+      const scan = nearestScan(sample, DATA.spectra[sample] || [], targetRt);
+      let intensity = 0;
+      if (scan) {
+        scan.mz.forEach((mz, index) => {
+          if (Math.abs(mz - targetMz) <= tolerance) intensity += scan.intensity[index];
+        });
+      }
+      const alignedRt = scan ? scan.rt + rtShift(sample) : null;
+      return {
+        scan_id: scan?.scan_id || "",
+        raw_file_id: scan?.raw_file_id || "",
+        raw_rt: scan ? scan.rt : null,
+        aligned_rt: alignedRt,
+        rt_delta: alignedRt === null ? null : alignedRt - targetRt,
+        mz_tolerance: tolerance,
+        intensity
+      };
+    }
+
+    function sourceTraceForBin(bin, sampleIds=null) {
+      const ids = sampleIds || bin?.heatmap?.sample_ids || (selectedSampleIds().length ? selectedSampleIds() : DATA.sample_ids);
+      const rt = bin?.rt ?? state.selectedRt;
+      const mz = bin?.mz ?? state.selectedMz;
+      const traces = {};
+      ids.forEach(sample => {
+        traces[sample] = intensityTraceAt(sample, rt, mz);
+      });
+      return traces;
+    }
+
+    function selectedIntensityRows() {
+      const bin = heatmapBinFromValues(state.selectedRt, state.selectedMz);
+      const sampleIds = selectedSampleIds().length ? selectedSampleIds() : DATA.sample_ids;
+      const sourceScans = sourceTraceForBin(bin, sampleIds);
+      const values = sampleIds.map(sample => {
+        const fromBin = bin?.sampleIntensities?.[sample] || {};
+        const trace = sourceScans[sample] || {};
+        const scanRaw = Number(trace.intensity || 0);
+        const heatmapRaw = Number(fromBin.raw || 0);
+        const normalized = Number(fromBin.normalized || 0);
+        return {
+          sample,
+          trace,
+          scanRaw,
+          heatmapRaw,
+          normalized,
+          present: heatmapRaw > 0 || scanRaw > 0
+        };
+      });
+      const maxRaw = Math.max(1, ...values.map(item => item.heatmapRaw || item.scanRaw));
+      const maxNormalized = Math.max(1e-12, ...values.map(item => item.normalized));
+      return {
+        bin,
+        sourceScans,
+        maxRaw,
+        maxNormalized,
+        values: values.map(item => ({
+          ...item,
+          rawRelativePct: (item.heatmapRaw || item.scanRaw) / maxRaw * 100,
+          normalizedRelativePct: item.normalized / maxNormalized * 100
+        }))
+      };
+    }
+
+    function renderIntensityTable() {
+      const { bin, values } = selectedIntensityRows();
+      const presentCount = values.filter(item => item.present).length;
+      const fold = values.filter(item => item.normalized > 0);
+      const foldChange = fold.length >= 2 ? Math.max(...fold.map(item => item.normalized)) / Math.min(...fold.map(item => item.normalized)) : 1;
+      $("intensityTable").innerHTML = `<tr><th>sample</th><th>scan_id</th><th>raw RT</th><th>aligned RT</th><th>RT delta</th><th>m/z</th><th>scan raw</th><th>heatmap raw</th><th>normalized</th><th>raw relative %</th><th>norm relative %</th><th>status</th></tr>` +
+        values.map(item => `<tr><td>${item.sample}</td><td>${item.trace.scan_id || ""}</td><td>${nice(item.trace.raw_rt, 4)}</td><td>${nice(item.trace.aligned_rt, 4)}</td><td>${nice(item.trace.rt_delta, 5)}</td><td>${nice(state.selectedMz, 4)}</td><td>${nice(item.scanRaw, 2)}</td><td>${nice(item.heatmapRaw, 2)}</td><td>${nice(item.normalized, 6)}</td><td>${nice(item.rawRelativePct, 2)}</td><td>${nice(item.normalizedRelativePct, 2)}</td><td>${item.present ? "present" : "missing"}</td></tr>`).join("") +
+        `<tr><td colspan="12" class="note">selected bin similarity ${nice(bin?.similarity ?? 0, 4)}, difference ${nice(bin?.difference ?? 0, 4)}, present ${presentCount}/${values.length}, normalized fold ${nice(foldChange, 3)}</td></tr>`;
+    }
+
+    function exportSelectedIntensityCsv() {
+      const { bin, values } = selectedIntensityRows();
+      const rows = [[
+        "sample", "scan_id", "raw_file_id", "scan_raw_rt", "scan_aligned_rt", "scan_rt_delta",
+        "aligned_rt", "mz", "rt_start", "rt_end", "mz_start", "mz_end",
+        "similarity_score", "difference_score", "scan_raw_intensity", "heatmap_raw_intensity",
+        "normalized_intensity", "raw_relative_pct", "normalized_relative_pct", "mz_tolerance", "status"
+      ]];
+      const h = bin?.heatmap || currentHeatmap();
+      const rtStep = h ? (h.rt_max - h.rt_min) / h.rt_bin_count : 0;
+      const mzStep = h ? (h.mz_max - h.mz_min) / h.mz_bin_count : 0;
+      values.forEach(item => rows.push([
+        item.sample,
+        item.trace.scan_id || "",
+        item.trace.raw_file_id || "",
+        nice(item.trace.raw_rt, 6),
+        nice(item.trace.aligned_rt, 6),
+        nice(item.trace.rt_delta, 8),
+        nice(bin?.rt ?? state.selectedRt, 6),
+        nice(bin?.mz ?? state.selectedMz, 6),
+        nice((bin?.rt ?? state.selectedRt) - rtStep / 2, 6),
+        nice((bin?.rt ?? state.selectedRt) + rtStep / 2, 6),
+        nice((bin?.mz ?? state.selectedMz) - mzStep / 2, 6),
+        nice((bin?.mz ?? state.selectedMz) + mzStep / 2, 6),
+        nice(bin?.similarity ?? 0, 6),
+        nice(bin?.difference ?? 0, 6),
+        nice(item.scanRaw, 6),
+        nice(item.heatmapRaw, 6),
+        nice(item.normalized, 8),
+        nice(item.rawRelativePct, 6),
+        nice(item.normalizedRelativePct, 6),
+        nice(item.trace.mz_tolerance, 6),
+        item.present ? "present" : "missing"
+      ]));
+      const csv = rows.map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\n");
+      const blob = new Blob([csv], { type:"text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "selected_rt_mz_intensity.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function heatmapBinFromValues(rt, mz) {
+      const h = currentHeatmap();
+      if (!h) return null;
+      const fakeCanvas = $("heatmapCanvas");
+      const rtStep = (h.rt_max - h.rt_min) / h.rt_bin_count;
+      const mzStep = (h.mz_max - h.mz_min) / h.mz_bin_count;
+      const rtIdx = Math.max(0, Math.min(h.rt_bin_count - 1, Math.floor((rt - h.rt_min) / rtStep)));
+      const mzIdx = Math.max(0, Math.min(h.mz_bin_count - 1, Math.floor((mz - h.mz_min) / mzStep)));
+      const score = h.scores[mzIdx][rtIdx];
+      if (score === null || score === undefined || !Number.isFinite(Number(score))) return null;
+      const raw = rawHeatmapFor(h);
+      const sampleIntensities = scoredHeatmapSampleIntensityMap(h, raw, mzIdx, rtIdx);
+      const pairValues = Object.values(sampleIntensities);
+      return {
+        heatmap: h,
+        rt: h.rt_min + (rtIdx + 0.5) * rtStep,
+        mz: h.mz_min + (mzIdx + 0.5) * mzStep,
+        rt_start: h.rt_min + rtIdx * rtStep,
+        rt_end: h.rt_min + (rtIdx + 1) * rtStep,
+        mz_start: h.mz_min + mzIdx * mzStep,
+        mz_end: h.mz_min + (mzIdx + 1) * mzStep,
+        rtIdx,
+        mzIdx,
+        similarity: score,
+        difference: 1 - score,
+        sampleIntensities,
+        referenceIntensity: sampleIntensities[h.reference_sample]?.normalized || pairValues[0]?.normalized || 0,
+        sampleIntensity: sampleIntensities[h.sample_id]?.normalized || pairValues[1]?.normalized || 0,
+        referenceRawIntensity: sampleIntensities[h.reference_sample]?.raw || pairValues[0]?.raw || 0,
+        sampleRawIntensity: sampleIntensities[h.sample_id]?.raw || pairValues[1]?.raw || 0
+      };
+    }
+
+    function featureRegionFromBin(bin) {
+      if (!bin) return null;
+      const h = bin.heatmap;
+      const rtStep = (h.rt_max - h.rt_min) / h.rt_bin_count;
+      const mzStep = (h.mz_max - h.mz_min) / h.mz_bin_count;
+      const sampleIntensities = bin.sampleIntensities || {};
+      const normalizedValues = Object.values(sampleIntensities).map(item => item.normalized || 0).filter(value => value > 0);
+      const fold = normalizedValues.length >= 2 ? (Math.max(...normalizedValues) + 1e-12) / (Math.min(...normalizedValues) + 1e-12) : (bin.sampleIntensity + 1e-12) / (bin.referenceIntensity + 1e-12);
+      const presence = Object.entries(sampleIntensities).filter(([, item]) => (item.raw || 0) > 0).map(([sample]) => sample);
+      const sourceRegion = (h.low_similarity_points || []).find(point =>
+        Math.abs(Number(point.rt) - bin.rt) < rtStep / 2
+        && Math.abs(Number(point.mz) - bin.mz) < mzStep / 2
+      ) || {};
+      let type = "uncertain";
+      if (presence.length > 0 && presence.length < Object.keys(sampleIntensities).length) type = "new_signal";
+      else if (fold >= 1.5) type = "intensity_increased";
+      else if (fold <= 1 / 1.5) type = "intensity_decreased";
+      return {
+        region_id: `LCMSF_${state.savedFeatures.length + 1}_${Date.now()}`,
+        heatmap_id: `${h.comparison_key || `${h.reference_sample}_vs_${h.sample_id}`}_${h.normalization_method || "none"}`,
+        comparison_type: h.comparison_type || "pair",
+        comparison_label: heatmapLabel(h),
+        sample_ids: h.sample_ids || [h.reference_sample, h.sample_id],
+        reference_sample_id: h.reference_sample,
+        compared_sample_id: h.sample_id,
+        normalization_method: h.normalization_method || "none",
+        aligned_rt: bin.rt,
+        rt_start: h.rt_min + bin.rtIdx * rtStep,
+        rt_end: h.rt_min + (bin.rtIdx + 1) * rtStep,
+        mz: bin.mz,
+        mz_start: h.mz_min + bin.mzIdx * mzStep,
+        mz_end: h.mz_min + (bin.mzIdx + 1) * mzStep,
+        similarity_score: bin.similarity,
+        difference_score: bin.difference,
+        weighted_difference_score: sourceRegion.weighted_difference_score ?? sourceRegion.ranking_score ?? bin.difference,
+        abundance_weight: sourceRegion.abundance_weight ?? 1,
+        group_mean_intensity: sourceRegion.group_mean_intensity ?? null,
+        max_intensity: sourceRegion.max_intensity ?? null,
+        sample_intensities: sampleIntensities,
+        source_scans: sourceTraceForBin(bin, h.sample_ids || [h.reference_sample, h.sample_id]),
+        sample_presence: presence,
+        fold_change: fold,
+        difference_type: type,
+        saved_as_feature: true
+      };
+    }
+
+    async function saveCurrentFeature() {
+      const feature = featureRegionFromBin(heatmapBinFromValues(state.selectedRt, state.selectedMz));
+      if (!feature) return;
+      if (!addSavedFeature(feature)) {
+        $("featureMatrixInfo").textContent = "This LCMSFeature region is already saved.";
+        return;
+      }
+      renderSavedFeatures();
+      const payload = await persistSavedFeatures();
+      $("featureMatrixInfo").textContent = `Saved current LCMSFeature region to SQLite; total saved ${payload.saved_count}.`;
+    }
+
+    function addSavedFeature(feature) {
+      const duplicate = state.savedFeatures.some(item =>
+        item.heatmap_id === feature.heatmap_id
+        && Math.abs(item.aligned_rt - feature.aligned_rt) < 1e-9
+        && Math.abs(item.mz - feature.mz) < 1e-9
+      );
+      if (!duplicate) state.savedFeatures.push(feature);
+      return !duplicate;
+    }
+
+    async function saveTopDifferenceFeatures() {
+      const h = currentHeatmap();
+      const points = (h?.low_similarity_points || []).slice(0, 20);
+      let added = 0;
+      points.forEach(point => {
+        const feature = featureRegionFromBin(heatmapBinFromValues(Number(point.rt), Number(point.mz)));
+        if (feature && addSavedFeature(feature)) added += 1;
+      });
+      renderSavedFeatures();
+      const payload = await persistSavedFeatures();
+      $("featureMatrixInfo").textContent = `Saved ${added} new feature regions from ${heatmapLabel(h)} to SQLite; total saved ${payload.saved_count}.`;
+    }
+
+    function renderSavedFeatures() {
+      const rows = state.savedFeatures.map((feature, index) => {
+        const rawSummary = Object.entries(feature.sample_intensities || {})
+          .map(([sample, item]) => `${sample}:${nice(item.raw || 0, 1)}`)
+          .join(" | ");
+        return `<tr><td>${index + 1}</td><td>${feature.region_id}</td><td>${feature.comparison_label || `${feature.reference_sample_id} vs ${feature.compared_sample_id}`}</td><td>${feature.normalization_method}</td><td>${nice(feature.aligned_rt, 4)}</td><td>${nice(feature.mz, 4)}</td><td>${nice(feature.difference_score, 4)}</td><td>${feature.difference_type}</td><td>${rawSummary}</td></tr>`;
+      });
+      $("savedFeatureTable").innerHTML = `<tr><th>#</th><th>region_id</th><th>comparison</th><th>norm</th><th>aligned RT</th><th>m/z</th><th>difference</th><th>type</th><th>raw intensities</th></tr>${rows.join("") || `<tr><td colspan="9" class="note">No saved feature regions yet.</td></tr>`}`;
+      renderFeatureMatrix();
+    }
+
+    function featureMatrixColumns() {
+      return DATA.sample_ids.flatMap(sample => [`${sample} raw`, `${sample} normalized`, `${sample} present`]);
+    }
+
+    function featureMatrixRows() {
+      return state.savedFeatures.map((feature, index) => {
+        const cells = DATA.sample_ids.flatMap(sample => {
+          const item = feature.sample_intensities?.[sample] || {};
+          const raw = Number(item.raw || 0);
+          const normalized = Number(item.normalized || 0);
+          return [raw, normalized, raw > 0 ? "present" : "missing"];
+        });
+        return {
+          feature,
+          values: [
+            index + 1,
+            feature.region_id,
+            feature.comparison_label || "",
+            feature.normalization_method,
+            nice(feature.aligned_rt, 6),
+            nice(feature.rt_start, 6),
+            nice(feature.rt_end, 6),
+            nice(feature.mz, 6),
+            nice(feature.mz_start, 6),
+            nice(feature.mz_end, 6),
+            nice(feature.similarity_score, 6),
+            nice(feature.difference_score, 6),
+            Number.isFinite(feature.fold_change) ? nice(feature.fold_change, 6) : "",
+            feature.difference_type,
+            feature.sample_presence.join("|"),
+            ...cells
+          ]
+        };
+      });
+    }
+
+    function renderFeatureMatrix() {
+      const fixedHeaders = [
+        "#", "feature_id", "comparison", "norm", "aligned RT", "rt_start", "rt_end",
+        "m/z", "mz_start", "mz_end", "similarity", "difference", "fold", "type", "presence"
+      ];
+      const headers = [...fixedHeaders, ...featureMatrixColumns()];
+      const rows = featureMatrixRows().map(row =>
+        `<tr>${row.values.map((value, index) => `<td>${index === 1 ? String(value) : value}</td>`).join("")}</tr>`
+      );
+      $("featureMatrixTable").innerHTML = `<tr>${headers.map(header => `<th>${header}</th>`).join("")}</tr>${rows.join("") || `<tr><td colspan="${headers.length}" class="note">Save feature regions to build a sample x feature matrix.</td></tr>`}`;
+      if (!state.savedFeatures.length) {
+        $("featureMatrixInfo").textContent = "No saved feature regions yet.";
+      } else {
+        $("featureMatrixInfo").textContent = `${state.savedFeatures.length} saved feature regions; matrix columns contain raw intensity, normalized intensity, and missing/present status for every sample.`;
+      }
+    }
+
+    function exportSavedFeaturesCsv() {
+      const rows = [[
+        "region_id", "heatmap_id", "comparison_type", "comparison_label", "sample_ids", "reference_sample", "compared_sample", "normalization",
+        "aligned_rt", "rt_start", "rt_end", "mz", "mz_start", "mz_end",
+        "similarity_score", "difference_score", "fold_change", "difference_type",
+        "sample_presence", "sample_intensities_json", "source_scans_json"
+      ]];
+      state.savedFeatures.forEach(feature => {
+        rows.push([
+          feature.region_id,
+          feature.heatmap_id,
+          feature.comparison_type || "pair",
+          feature.comparison_label || "",
+          (feature.sample_ids || []).join("|"),
+          feature.reference_sample_id,
+          feature.compared_sample_id,
+          feature.normalization_method,
+          nice(feature.aligned_rt, 6),
+          nice(feature.rt_start, 6),
+          nice(feature.rt_end, 6),
+          nice(feature.mz, 6),
+          nice(feature.mz_start, 6),
+          nice(feature.mz_end, 6),
+          nice(feature.similarity_score, 6),
+          nice(feature.difference_score, 6),
+          nice(feature.fold_change, 6),
+          feature.difference_type,
+          feature.sample_presence.join("|"),
+          JSON.stringify(feature.sample_intensities || {}),
+          JSON.stringify(feature.source_scans || {})
+        ]);
+      });
+      const csv = rows.map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\n");
+      const blob = new Blob([csv], { type:"text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "saved_lcms_features.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function downloadCsvBlob(csv, fileName) {
+      const blob = new Blob([csv], { type:"text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    async function exportFeatureMatrixCsv() {
+      try {
+        const response = await fetch(apiUrl("/api/feature-matrix.csv"), { cache:"no-store" });
+        if (response.ok) {
+          downloadCsvBlob(await response.text(), "lcms_feature_matrix.csv");
+          return;
+        }
+      } catch (error) {
+        console.warn("Falling back to browser-side feature matrix export", error);
+      }
+      const headers = [
+        "#", "feature_id", "comparison", "normalization", "aligned_rt", "rt_start", "rt_end",
+        "mz", "mz_start", "mz_end", "similarity_score", "difference_score", "fold_change",
+        "difference_type", "sample_presence", ...featureMatrixColumns()
+      ];
+      const rows = [headers];
+      featureMatrixRows().forEach(row => rows.push(row.values));
+      const csv = rows.map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\n");
+      downloadCsvBlob(csv, "lcms_feature_matrix.csv");
+    }
+
+    function exportTopMzCsv() {
+      const canvas = $("spectrumCanvas");
+      const plot = canvas._plot || { xmin:DATA.mz_min, xmax:DATA.mz_max };
+      const peaks = topSpectrumPeaks(currentSpectrumSeries(), plot, Math.max(1, topMzCount() || 20));
+      const maxIntensity = Math.max(1, ...peaks.map(peak => peak.intensity));
+      const rows = [
+        ["sample", "spectrum_type", "aligned_rt", "rt_start", "rt_end", "scan_count", "mz", "intensity", "relative_intensity_pct"]
+      ];
+      peaks.forEach(peak => {
+        rows.push([
+          peak.sample,
+          peak.spectrumType || $("spectrumMode").value,
+          nice(peak.labelRt, 5),
+          nice(peak.rtStart, 5),
+          nice(peak.rtEnd, 5),
+          peak.scanCount || 0,
+          nice(peak.mz, 6),
+          nice(peak.intensity, 4),
+          nice(peak.intensity / maxIntensity * 100, 4)
+        ]);
+      });
+      const csv = rows.map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\n");
+      const blob = new Blob([csv], { type:"text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `top_mz_${$("spectrumMode").value}_${nice(state.selectedRt, 3)}min.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function renderSources() {
+      $("sourceTable").innerHTML = `<tr><th>sample</th><th>role</th><th>file</th><th>parser</th><th>scans</th><th>RT shift</th><th>main apex</th><th>aligned apex</th><th>landmarks</th><th>method</th></tr>` +
+        DATA.raw_files.map(f => {
+          const peak = DATA.alignment.main_peak_by_sample[f.sample_id] || {};
+          const shift = state.rtShifts.get(f.sample_id) || 0;
+          const apex = Number(peak.apex_time_min || 0);
+          const role = f.sample_id === state.referenceSample ? "reference" : "sample";
+          const landmarkCount = DATA.alignment.alignment_landmark_count_by_sample?.[f.sample_id] ?? peak.landmark_count ?? "";
+          return `<tr><td>${f.sample_id}</td><td>${role}</td><td>${f.file_name}</td><td>${f.parser_status}</td><td>${f.scan_count}</td><td>${nice(shift, 4)}</td><td>${nice(apex, 4)}</td><td>${nice(apex + shift, 4)}</td><td>${landmarkCount}</td><td>${peak.match_method || ""}</td></tr>`;
+        }).join("");
+    }
+
+    function drawAll() { drawChromatogram(); drawSpectrum(); drawHeatmap(); }
+
+    function renderSampleList() {
+      const rows = [];
+      state.sampleOrder.forEach(sample => {
+        const checked = state.selectedSamples.has(sample) ? "checked" : "";
+        const color = traceColor(sample);
+        const shift = state.rtShifts.get(sample) || 0;
+        const palette = colors.map(value => `<button type="button" class="color-swatch${value.toLowerCase() === color.toLowerCase() ? " active" : ""}" style="background:${value}" data-sample="${sample}" data-color="${value}" title="${value}"></button>`).join("");
+        rows.push(`
+          <div class="sample-row" draggable="true" data-sample="${sample}">
+            <button type="button" class="sample-handle" title="Drag to reorder curves">|||</button>
+            <button type="button" class="color-picker-button" data-sample="${sample}" style="background:${color}" title="Change color"></button>
+            <label class="sample-name"><input type="checkbox" data-sample="${sample}" ${checked}> ${sample}</label>
+            <input class="shift-input" data-sample="${sample}" value="${shift.toFixed(3)}" title="RT shift (min)">
+          </div>
+          ${state.openPaletteSample === sample ? `<div class="sample-palette open" data-palette="${sample}">${palette}</div>` : ""}
+        `);
+      });
+      $("sampleChecks").innerHTML = rows.join("");
+      $("sampleStatus").textContent = `${state.selectedSamples.size} selected; reference ${state.referenceSample}; alignment signal ${DATA.alignment.alignment_signal?.toUpperCase() || "BPC"}, range ${DATA.alignment.alignment_rt_start ?? ""}-${DATA.alignment.alignment_rt_end ?? "end"} min, match window ${DATA.alignment.alignment_match_window_min ?? ""} min.`;
+      document.querySelectorAll("#sampleChecks input[type='checkbox']").forEach(input => {
+        input.addEventListener("change", () => {
+          if (input.checked) state.selectedSamples.add(input.dataset.sample);
+          else state.selectedSamples.delete(input.dataset.sample);
+          state.dynamicHeatmapCache.clear();
+          clearHeatmapWindow();
+          rebuildHeatmapSelect();
+          renderSampleList();
+          loadThenDraw().catch(console.error);
+        });
+      });
+      document.querySelectorAll(".shift-input").forEach(input => {
+        input.addEventListener("change", () => {
+          state.rtShifts.set(input.dataset.sample, Number(input.value) || 0);
+          renderSampleList();
+          renderSources();
+          drawAll();
+        });
+      });
+      document.querySelectorAll(".color-picker-button").forEach(button => {
+        button.addEventListener("click", () => {
+          state.openPaletteSample = state.openPaletteSample === button.dataset.sample ? null : button.dataset.sample;
+          renderSampleList();
+        });
+      });
+      document.querySelectorAll(".color-swatch").forEach(button => {
+        button.addEventListener("click", () => {
+          state.sampleColors.set(button.dataset.sample, button.dataset.color);
+          state.openPaletteSample = null;
+          renderSampleList();
+          drawAll();
+        });
+      });
+      let dragged = null;
+      document.querySelectorAll(".sample-row").forEach(row => {
+        row.addEventListener("dragstart", event => {
+          dragged = row.dataset.sample;
+          event.dataTransfer.effectAllowed = "move";
+        });
+        row.addEventListener("dragover", event => {
+          event.preventDefault();
+          row.classList.add("drag-over");
+        });
+        row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
+        row.addEventListener("drop", event => {
+          event.preventDefault();
+          row.classList.remove("drag-over");
+          const target = row.dataset.sample;
+          if (!dragged || dragged === target) return;
+          state.sampleOrder = state.sampleOrder.filter(sample => sample !== dragged);
+          const targetIndex = state.sampleOrder.indexOf(target);
+          state.sampleOrder.splice(Math.max(0, targetIndex), 0, dragged);
+          renderSampleList();
+          drawAll();
+        });
+      });
+    }
+
+    function fullChromXBounds() {
+      const ids = selectedSampleIds();
+      if (!ids.length) return { xmin: DATA.rt_min, xmax: DATA.rt_max };
+      let xmin = Infinity, xmax = -Infinity;
+      ids.forEach(sample => {
+        const shift = rtShift(sample);
+        const points = DATA.chromatograms[sample].raw;
+        if (!points.length) return;
+        xmin = Math.min(xmin, points[0][0] + shift);
+        xmax = Math.max(xmax, points[points.length - 1][0] + shift);
+      });
+      if (!Number.isFinite(xmin) || !Number.isFinite(xmax) || xmin >= xmax) return { xmin: DATA.rt_min, xmax: DATA.rt_max };
+      return { xmin, xmax };
+    }
+
+    function ensureChromZoomForPan() {
+      if (state.chromZoom) return;
+      const full = fullChromXBounds();
+      const width = Math.max((full.xmax - full.xmin) / 4, 0.5);
+      const current = $("chromCanvas")._plot;
+      state.chromZoom = {
+        xmin: full.xmin,
+        xmax: Math.min(full.xmax, full.xmin + width),
+        ymin: current ? current.ymin : 0,
+        ymax: current ? current.ymax : 1
+      };
+    }
+
+    function syncXPanSlider() {
+      const full = fullChromXBounds();
+      if (!state.chromZoom) {
+        $("xPanSlider").value = "0";
+        $("xPanValue").textContent = "Create window";
+        return;
+      }
+      const width = Math.min(state.chromZoom.xmax - state.chromZoom.xmin, full.xmax - full.xmin);
+      const travel = Math.max(0, full.xmax - full.xmin - width);
+      const value = travel > 0 ? ((state.chromZoom.xmin - full.xmin) / travel) * 1000 : 0;
+      $("xPanSlider").value = String(Math.max(0, Math.min(1000, Math.round(value))));
+      $("xPanValue").textContent = `${state.chromZoom.xmin.toFixed(2)}-${state.chromZoom.xmax.toFixed(2)} min`;
+    }
+
+    function panChromX() {
+      ensureChromZoomForPan();
+      const full = fullChromXBounds();
+      const width = Math.min(state.chromZoom.xmax - state.chromZoom.xmin, full.xmax - full.xmin);
+      const travel = Math.max(0, full.xmax - full.xmin - width);
+      const ratio = Number($("xPanSlider").value) / 1000;
+      const xmin = full.xmin + travel * ratio;
+      state.chromZoom = { ...state.chromZoom, xmin, xmax: xmin + width };
+      syncXPanSlider();
+      drawAll();
+    }
+
+    function rebuildHeatmapSelect(preferredKey=null) {
+      const options = [];
+      const hasCohort = (DATA.heatmaps || []).some(h => h.comparison_type === "cohort_cv")
+        || (DATA.heatmap_catalog || []).some(h => h.comparison_type === "cohort_cv");
+      if (hasCohort) {
+        options.push({ key:"cohort:all_samples", label:"All selected samples consistency" });
+      }
+      const selected = Array.from(state.selectedSamples || []);
+      if (selected.length === 2) {
+        const reference = selected.includes(state.referenceSample) ? state.referenceSample : selected[0];
+        const sample = selected.find(item => item !== reference);
+        options.push({ key:`pair:${reference}:${sample}`, label:`Selected pair directional difference (${reference} vs ${sample})` });
+      }
+      const previous = preferredKey || $("heatmapSelect").value;
+      $("heatmapSelect").innerHTML = options.map(item => `<option value="${item.key}">${item.label}</option>`).join("");
+      const keys = options.map(item => item.key);
+      $("heatmapSelect").value = keys.includes(previous) ? previous : keys[0];
+      state.dynamicHeatmapCache.clear();
+    }
+
+    function changeReference(sample) {
+      state.referenceSample = sample;
+      applyReferenceAlignment();
+      state.heatmapZoom = null;
+      state.heatmapZoomHistory = [];
+      clearHeatmapWindow();
+      rebuildHeatmapSelect();
+      renderSampleList();
+      renderSources();
+      syncXPanSlider();
+      loadThenDraw().catch(console.error);
+    }
+
+    function setupControls() {
+      $("referenceSelect").innerHTML = DATA.sample_ids.map(s => `<option value="${s}" ${s === DATA.reference_sample ? "selected" : ""}>${s}</option>`).join("");
+      const normalizationMethods = DATA.heatmap_normalization_methods || [...new Set(DATA.heatmaps.map(h => h.normalization_method || "none"))];
+      $("normalizationSelect").innerHTML = normalizationMethods.map(method => `<option value="${method}" ${method === (DATA.default_heatmap_normalization || "tic_log1p") ? "selected" : ""}>${method}</option>`).join("");
+      rebuildHeatmapSelect();
+      renderSampleList();
+      $("rtStartInput").value = nice(state.rtRange[0], 3);
+      $("rtEndInput").value = nice(state.rtRange[1], 3);
+      $("referenceSelect").addEventListener("change", () => changeReference($("referenceSelect").value));
+      ["heatmapSelect", "normalizationSelect"].forEach(id => $(id).addEventListener("change", () => {
+        state.heatmapZoom = null;
+        state.heatmapZoomHistory = [];
+        clearHeatmapWindow();
+        loadThenDraw().catch(console.error);
+      }));
+      ["useAligned", "chromMode", "spectrumMode", "heatmapMode", "overlayXic"].forEach(id => $(id).addEventListener("change", drawAll));
+      $("topMzInput").addEventListener("change", drawAll);
+      $("exportTopMz").addEventListener("click", exportTopMzCsv);
+      $("rtStartInput").addEventListener("change", () => { state.rtRange[0] = Number($("rtStartInput").value); drawAll(); });
+      $("rtEndInput").addEventListener("change", () => { state.rtRange[1] = Number($("rtEndInput").value); drawAll(); });
+      $("resetChrom").addEventListener("click", () => { if (state.chromZoom) state.chromZoomHistory.push({ ...state.chromZoom }); state.chromZoom = null; syncXPanSlider(); drawAll(); });
+      $("undoChrom").addEventListener("click", () => { if (state.chromZoomHistory.length) state.chromZoom = state.chromZoomHistory.pop(); syncXPanSlider(); drawAll(); });
+      $("resetSpec").addEventListener("click", () => { if (state.specZoom) state.specZoomHistory.push({ ...state.specZoom }); state.specZoom = null; drawAll(); });
+      $("undoSpec").addEventListener("click", () => { if (state.specZoomHistory.length) state.specZoom = state.specZoomHistory.pop(); drawAll(); });
+      $("resetXic").addEventListener("click", () => { if (state.xicZoom) state.xicZoomHistory.push({ ...state.xicZoom }); state.xicZoom = null; drawAll(); });
+      $("undoXic").addEventListener("click", () => { if (state.xicZoomHistory.length) state.xicZoom = state.xicZoomHistory.pop(); drawAll(); });
+      $("resetHeatmap").addEventListener("click", () => { if (state.heatmapZoom) state.heatmapZoomHistory.push({ ...state.heatmapZoom }); state.heatmapZoom = null; clearHeatmapWindow(); drawAll(); });
+      $("undoHeatmap").addEventListener("click", () => {
+        if (state.heatmapZoomHistory.length) state.heatmapZoom = state.heatmapZoomHistory.pop();
+        clearHeatmapWindow();
+        if (state.heatmapZoom) loadHeatmapWindowForZoom().catch(console.error);
+        else drawAll();
+      });
+      $("saveFeature").addEventListener("click", () => saveCurrentFeature().catch(error => {
+        $("featureMatrixInfo").textContent = `Failed to save LCMSFeature region: ${error.message || error}`;
+      }));
+      $("saveTopFeatures").addEventListener("click", () => saveTopDifferenceFeatures().catch(error => {
+        $("featureMatrixInfo").textContent = `Failed to save Top difference regions: ${error.message || error}`;
+      }));
+      $("exportFeatures").addEventListener("click", exportSavedFeaturesCsv);
+      $("exportFeatureMatrix").addEventListener("click", () => exportFeatureMatrixCsv().catch(error => {
+        $("featureMatrixInfo").textContent = `Failed to export feature matrix: ${error.message || error}`;
+      }));
+      $("exportSelectedIntensity").addEventListener("click", exportSelectedIntensityCsv);
+      $("selectAll").addEventListener("click", () => { state.selectedSamples = new Set(DATA.sample_ids); state.dynamicHeatmapCache.clear(); clearHeatmapWindow(); rebuildHeatmapSelect(); renderSampleList(); loadThenDraw().catch(console.error); });
+      $("selectNone").addEventListener("click", () => { state.selectedSamples.clear(); state.dynamicHeatmapCache.clear(); clearHeatmapWindow(); rebuildHeatmapSelect(); renderSampleList(); drawAll(); });
+      $("autoAlign").addEventListener("click", () => {
+        applyReferenceAlignment();
+        $("useAligned").checked = true;
+        renderSampleList();
+        renderSources();
+        drawAll();
+      });
+      $("clearAlign").addEventListener("click", () => {
+        DATA.sample_ids.forEach(sample => state.rtShifts.set(sample, 0));
+        renderSampleList();
+        renderSources();
+        drawAll();
+      });
+      $("verticalOffset").addEventListener("input", () => {
+        state.verticalOffset = Number($("verticalOffset").value) || 0;
+        $("offsetValue").textContent = state.verticalOffset.toFixed(2);
+        drawAll();
+      });
+      $("spectrumOffset").addEventListener("input", () => {
+        state.spectrumOffset = Number($("spectrumOffset").value) || 0;
+        $("spectrumOffsetValue").textContent = state.spectrumOffset.toFixed(2);
+        drawSpectrum();
+      });
+      $("xPanSlider").addEventListener("input", panChromX);
+      attachZoom($("chromCanvas"), "chrom");
+      attachZoom($("spectrumCanvas"), "spectrum");
+      attachZoom($("heatmapCanvas"), "heatmap");
+      attachZoom($("xicCanvas"), "xic");
+      $("spectrumCanvas").addEventListener("mousemove", e => {
+        const canvas = $("spectrumCanvas");
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * canvas.width / rect.width;
+        const y = (e.clientY - rect.top) * canvas.height / rect.height;
+        const hit = nearestSpectrumPeak(canvas, x, y);
+        const tooltip = $("tooltip");
+        if (!hit) {
+          tooltip.style.display = "none";
+          return;
+        }
+        const maxY = Math.max(1, spectrumYMaxForWindow(canvas._plot.xmin, canvas._plot.xmax));
+        tooltip.innerHTML = `<strong>${hit.sample}</strong><br>RT ${nice(hit.labelRt, 4)} min<br>m/z ${nice(hit.mz, 6)}<br>intensity ${nice(hit.intensity, 2)}<br>relative ${nice(hit.intensity / maxY * 100, 2)}%`;
+        tooltip.style.left = `${Math.min(window.innerWidth - 300, e.clientX + 14)}px`;
+        tooltip.style.top = `${Math.min(window.innerHeight - 180, e.clientY + 14)}px`;
+        tooltip.style.display = "block";
+      });
+      $("spectrumCanvas").addEventListener("mouseleave", () => { $("tooltip").style.display = "none"; });
+      $("heatmapCanvas").addEventListener("mousemove", e => {
+        const bin = heatmapBinAt($("heatmapCanvas"), e.clientX, e.clientY);
+        const tooltip = $("tooltip");
+        if (!bin) {
+          tooltip.style.display = "none";
+          return;
+        }
+        tooltip.innerHTML = `<strong>${heatmapLabel(bin.heatmap)}</strong><br>normalization ${bin.heatmap.normalization_method || "none"}<br>RT ${nice(bin.rt, 4)} min<br>m/z ${nice(bin.mz, 4)}<br>similarity ${nice(bin.similarity, 4)}<br>difference ${nice(bin.difference, 4)}<br>mean normalized ${nice(bin.meanIntensity, 6)}<br>CV ${bin.cv === null ? "" : nice(bin.cv, 4)}<br>status ${bin.signalStatus}<br><span class="note">normalized</span><br>${intensitySummary(bin.sampleIntensities, "normalized")}<br><span class="note">raw</span><br>${intensitySummary(bin.sampleIntensities, "raw")}`;
+        tooltip.style.left = `${Math.min(window.innerWidth - 300, e.clientX + 14)}px`;
+        tooltip.style.top = `${Math.min(window.innerHeight - 180, e.clientY + 14)}px`;
+        tooltip.style.display = "block";
+      });
+      $("heatmapCanvas").addEventListener("mouseleave", () => { $("tooltip").style.display = "none"; });
+      syncXPanSlider();
+      renderSavedFeatures();
+    }
+
+    function attachZoom(canvas, kind) {
+      let start = null;
+      canvas.addEventListener("mousedown", e => {
+        const rect = canvas.getBoundingClientRect();
+        start = { x:(e.clientX-rect.left)*canvas.width/rect.width, y:(e.clientY-rect.top)*canvas.height/rect.height };
+      });
+      canvas.addEventListener("mouseup", e => {
+        if (!start || !canvas._plot) return;
+        const rect = canvas.getBoundingClientRect();
+        const end = { x:(e.clientX-rect.left)*canvas.width/rect.width, y:(e.clientY-rect.top)*canvas.height/rect.height };
+        const dx = Math.abs(end.x - start.x), dy = Math.abs(end.y - start.y);
+        const plot = canvas._plot;
+        if (dx < 4 && dy < 4) {
+          if (kind === "chrom") state.selectedRt = plot.fromX(end.x);
+          if (kind === "spectrum") selectSpectrumPeak(canvas, end.x, end.y);
+          if (kind === "heatmap") selectHeatmapBin(heatmapBinAt(canvas, e.clientX, e.clientY));
+          if (kind === "xic") state.selectedRt = plot.fromX(end.x);
+        } else {
+          const xmin = Math.min(plot.fromX(start.x), plot.fromX(end.x));
+          const xmax = Math.max(plot.fromX(start.x), plot.fromX(end.x));
+          const ymin = Math.min(plot.fromY(start.y), plot.fromY(end.y));
+          const ymax = Math.max(plot.fromY(start.y), plot.fromY(end.y));
+          if (kind === "chrom") {
+            state.chromZoomHistory.push(state.chromZoom ? { ...state.chromZoom } : null);
+            state.chromZoom = { xmin, xmax, ymin: Math.max(0, ymin), ymax };
+            state.rtRange = [xmin, xmax];
+            $("rtStartInput").value = nice(xmin, 3);
+            $("rtEndInput").value = nice(xmax, 3);
+            syncXPanSlider();
+          } else if (kind === "spectrum") {
+            state.specZoomHistory.push(state.specZoom ? { ...state.specZoom } : null);
+            state.specZoom = { xmin, xmax, ymin: Math.max(0, ymin), ymax };
+          } else if (kind === "heatmap") {
+            state.heatmapZoomHistory.push(state.heatmapZoom ? { ...state.heatmapZoom } : null);
+            state.heatmapZoom = { xmin, xmax, ymin, ymax };
+            clearHeatmapWindow();
+            state.selectedRt = (xmin + xmax) / 2;
+            state.selectedMz = (ymin + ymax) / 2;
+            state.rtRange = [xmin, xmax];
+            $("spectrumMode").value = "sum";
+            state.xicZoom = null;
+            $("rtStartInput").value = nice(xmin, 3);
+            $("rtEndInput").value = nice(xmax, 3);
+            state.specZoom = { xmin: state.selectedMz - 80, xmax: state.selectedMz + 80, ymin: 0, ymax: spectrumYMaxForWindow(state.selectedMz - 80, state.selectedMz + 80) * 1.05 };
+          } else if (kind === "xic") {
+            state.xicZoomHistory.push(state.xicZoom ? { ...state.xicZoom } : null);
+            state.xicZoom = { xmin, xmax, ymin: Math.max(0, ymin), ymax };
+          }
+        }
+        start = null;
+        if (kind === "heatmap" && state.heatmapZoom) loadHeatmapWindowForZoom().catch(console.error);
+        else drawAll();
+      });
+    }
+
+    async function loadWorkbenchData() {
+      return await fetchJson(apiUrl(BOOTSTRAP_URL));
+    }
+
+    async function boot() {
+      const comparisonPayload = await fetchJson("/api/comparisons");
+      COMPARISONS = comparisonPayload.comparisons || [];
+      CURRENT_COMPARISON = comparisonPayload.default_comparison || COMPARISONS[0]?.id || "";
+      $("comparisonSelect").innerHTML = COMPARISONS.map(item => `<option value="${item.id}">${item.label}</option>`).join("");
+      $("comparisonSelect").value = CURRENT_COMPARISON;
+      $("comparisonSelect").onchange = async () => {
+        CURRENT_COMPARISON = $("comparisonSelect").value;
+        await loadComparison();
+      };
+      await loadComparison();
+    }
+
+    async function loadComparison() {
+      DATA = await loadWorkbenchData();
+      DATA.spectra = DATA.spectra || {};
+      DATA.heatmaps = DATA.heatmaps || [];
+      state = createInitialState();
+      setupControls();
+      renderSources();
+      await loadThenDraw();
+      try {
+        await loadSavedFeaturesFromApi();
+      } catch (error) {
+        renderSavedFeatures();
+        $("featureMatrixInfo").textContent = `Saved LCMSFeature regions could not be loaded: ${error.message || error}`;
+      }
+    }
+
+    boot().catch(error => {
+      document.body.innerHTML = `<div style="padding:24px;font-family:Arial,Microsoft YaHei,sans-serif"><h2>LC-MS workbench data is not available</h2><p>${String(error.message || error)}</p><p>Start the local server with <code>python lcms_feature_mvp/serve_xcalibur_workbench.py --output-dir lcms_feature_mvp/outputs_workbench</code>, then open the shown localhost URL.</p></div>`;
+      console.error(error);
+    });
+  </script>
+</body>
+</html>
+"""
+
+
+def heatmap_identifier(heatmap: dict[str, object]) -> str:
+    key = heatmap.get("comparison_key") or f"{heatmap.get('reference_sample')}_vs_{heatmap.get('sample_id')}"
+    return f"{key}_{heatmap.get('normalization_method') or 'none'}"
+
+
+def region_sample_intensities(
+    heatmap: dict[str, object],
+    region: dict[str, object],
+    sample_ids: list[str],
+) -> dict[str, dict[str, float]]:
+    if isinstance(region.get("sample_intensities"), dict):
+        values = region["sample_intensities"]
+        assert isinstance(values, dict)
+        return {
+            sample_id: {
+                "raw": float((values.get(sample_id) or {}).get("raw", 0.0)),
+                "normalized": float((values.get(sample_id) or {}).get("normalized", 0.0)),
+            }
+            for sample_id in sample_ids
+        }
+    reference_sample = str(heatmap.get("reference_sample") or "")
+    compared_sample = str(heatmap.get("sample_id") or "")
+    intensities = {
+        sample_id: {"raw": 0.0, "normalized": 0.0}
+        for sample_id in sample_ids
+    }
+    if reference_sample in intensities:
+        intensities[reference_sample] = {
+            "raw": float(region.get("reference_raw_intensity") or 0.0),
+            "normalized": float(region.get("reference_intensity") or 0.0),
+        }
+    if compared_sample in intensities:
+        intensities[compared_sample] = {
+            "raw": float(region.get("sample_raw_intensity") or 0.0),
+            "normalized": float(region.get("sample_intensity") or 0.0),
+        }
+    return intensities
+
+
+def auto_feature_regions_from_payload(
+    payload: dict[str, object],
+    top_n_per_heatmap: int = 20,
+    normalization_method: str | None = None,
+) -> list[dict[str, object]]:
+    sample_ids = [str(item) for item in payload.get("sample_ids", [])]
+    selected_method = normalization_method or str(payload.get("default_heatmap_normalization") or "")
+    regions: list[dict[str, object]] = []
+    seen: set[tuple[str, float, float]] = set()
+    for heatmap in payload.get("heatmaps", []):
+        assert isinstance(heatmap, dict)
+        if selected_method and heatmap.get("normalization_method") != selected_method:
+            continue
+        heatmap_id = heatmap_identifier(heatmap)
+        comparison_type = str(heatmap.get("comparison_type") or "pair")
+        comparison_label = str(heatmap.get("comparison_label") or f"{heatmap.get('reference_sample')} vs {heatmap.get('sample_id')}")
+        for rank, region in enumerate(heatmap.get("low_similarity_points", [])[:top_n_per_heatmap], start=1):
+            assert isinstance(region, dict)
+            rt = float(region.get("rt") or 0.0)
+            mz = float(region.get("mz") or 0.0)
+            key = (heatmap_id, round(rt, 9), round(mz, 9))
+            if key in seen:
+                continue
+            seen.add(key)
+            sample_intensities = region_sample_intensities(heatmap, region, sample_ids)
+            sample_presence = [
+                sample_id for sample_id in sample_ids
+                if sample_intensities[sample_id]["raw"] > 0
+            ]
+            regions.append(
+                {
+                    "region_id": f"LCMSF_AUTO_{len(regions) + 1:05d}",
+                    "source_rank": rank,
+                    "heatmap_id": heatmap_id,
+                    "comparison_type": comparison_type,
+                    "comparison_label": comparison_label,
+                    "sample_ids": sample_ids,
+                    "reference_sample_id": heatmap.get("reference_sample"),
+                    "compared_sample_id": heatmap.get("sample_id"),
+                    "normalization_method": heatmap.get("normalization_method"),
+                    "aligned_rt": rt,
+                    "rt_start": float(region.get("rt_start") or rt),
+                    "rt_end": float(region.get("rt_end") or rt),
+                    "mz": mz,
+                    "mz_start": float(region.get("mz_start") or mz),
+                    "mz_end": float(region.get("mz_end") or mz),
+                    "similarity_score": float(region.get("score") or 0.0),
+                    "difference_score": float(region.get("difference_score") or (1.0 - float(region.get("score") or 0.0))),
+                    "weighted_difference_score": float(region.get("weighted_difference_score") or region.get("ranking_score") or region.get("difference_score") or (1.0 - float(region.get("score") or 0.0))),
+                    "abundance_weight": float(region.get("abundance_weight") if region.get("abundance_weight") is not None else 1.0),
+                    "max_intensity": float(region.get("max_intensity") or 0.0),
+                    "group_mean_intensity": float(region.get("group_mean_intensity") or 0.0),
+                    "fold_change": region.get("fold_change"),
+                    "difference_type": region.get("difference_type") or "uncertain",
+                    "sample_presence": sample_presence,
+                    "sample_intensities": sample_intensities,
+                    "saved_as_feature": True,
+                }
+            )
+    return regions
+
+
+def feature_matrix_header(sample_ids: list[str]) -> list[str]:
+    sample_columns = []
+    for sample_id in sample_ids:
+        sample_columns.extend([f"{sample_id} raw", f"{sample_id} normalized", f"{sample_id} present"])
+    return [
+        "feature_id",
+        "source_rank",
+        "heatmap_id",
+        "comparison_type",
+        "comparison_label",
+        "normalization",
+        "aligned_rt",
+        "rt_start",
+        "rt_end",
+        "mz",
+        "mz_start",
+        "mz_end",
+        "similarity_score",
+        "difference_score",
+        "fold_change",
+        "difference_type",
+        "sample_presence",
+        *sample_columns,
+    ]
+
+
+def feature_matrix_rows_from_regions(
+    regions: list[dict[str, object]],
+    sample_ids: list[str],
+) -> list[list[object]]:
+    rows: list[list[object]] = []
+    for region in regions:
+        sample_intensities = region.get("sample_intensities") or {}
+        assert isinstance(sample_intensities, dict)
+        sample_columns: list[object] = []
+        for sample_id in sample_ids:
+            values = sample_intensities.get(sample_id) or {}
+            raw = float(values.get("raw") or 0.0)
+            normalized = float(values.get("normalized") or 0.0)
+            sample_columns.extend([raw, normalized, "present" if raw > 0 else "missing"])
+        rows.append(
+            [
+                region.get("region_id"),
+                region.get("source_rank"),
+                region.get("heatmap_id"),
+                region.get("comparison_type"),
+                region.get("comparison_label"),
+                region.get("normalization_method"),
+                region.get("aligned_rt"),
+                region.get("rt_start"),
+                region.get("rt_end"),
+                region.get("mz"),
+                region.get("mz_start"),
+                region.get("mz_end"),
+                region.get("similarity_score"),
+                region.get("difference_score"),
+                region.get("fold_change") if region.get("fold_change") is not None else "",
+                region.get("difference_type"),
+                "|".join(str(item) for item in region.get("sample_presence", [])),
+                *sample_columns,
+            ]
+        )
+    return rows
+
+
+def difference_region_header() -> list[str]:
+    return [
+        "region_id",
+        "source_rank",
+        "heatmap_id",
+        "comparison_type",
+        "comparison_label",
+        "normalization",
+        "aligned_rt",
+        "rt_start",
+        "rt_end",
+        "mz",
+        "mz_start",
+        "mz_end",
+        "similarity_score",
+        "difference_score",
+        "weighted_difference_score",
+        "abundance_weight",
+        "max_intensity",
+        "group_mean_intensity",
+        "fold_change",
+        "difference_type",
+        "sample_presence",
+        "sample_intensities_json",
+    ]
+
+
+def difference_region_rows_from_regions(regions: list[dict[str, object]]) -> list[list[object]]:
+    rows: list[list[object]] = []
+    for region in regions:
+        rows.append(
+            [
+                region.get("region_id"),
+                region.get("source_rank"),
+                region.get("heatmap_id"),
+                region.get("comparison_type"),
+                region.get("comparison_label"),
+                region.get("normalization_method"),
+                region.get("aligned_rt"),
+                region.get("rt_start"),
+                region.get("rt_end"),
+                region.get("mz"),
+                region.get("mz_start"),
+                region.get("mz_end"),
+                region.get("similarity_score"),
+                region.get("difference_score"),
+                region.get("weighted_difference_score"),
+                region.get("abundance_weight"),
+                region.get("max_intensity"),
+                region.get("group_mean_intensity"),
+                region.get("fold_change") if region.get("fold_change") is not None else "",
+                region.get("difference_type"),
+                "|".join(str(item) for item in region.get("sample_presence", [])),
+                json.dumps(region.get("sample_intensities") or {}, ensure_ascii=False, separators=(",", ":")),
+            ]
+        )
+    return rows
+
+
+def write_rows_csv(path: Path, header: list[str], rows: list[list[object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def write_auto_feature_outputs(
+    output_dir: Path,
+    payload: dict[str, object],
+    top_n_per_heatmap: int,
+    normalization_method: str | None = None,
+) -> list[dict[str, object]]:
+    sample_ids = [str(item) for item in payload.get("sample_ids", [])]
+    regions = auto_feature_regions_from_payload(payload, top_n_per_heatmap, normalization_method)
+    feature_header = feature_matrix_header(sample_ids)
+    feature_rows = feature_matrix_rows_from_regions(regions, sample_ids)
+    write_rows_csv(output_dir / "lcms_auto_feature_matrix.csv", feature_header, feature_rows)
+    write_rows_csv(
+        output_dir / "lcms_auto_difference_regions.csv",
+        difference_region_header(),
+        difference_region_rows_from_regions(regions),
+    )
+    (output_dir / "lcms_auto_difference_regions.json").write_text(
+        json.dumps(
+            {
+                "sample_ids": sample_ids,
+                "top_n_per_heatmap": top_n_per_heatmap,
+                "normalization_method": normalization_method or payload.get("default_heatmap_normalization"),
+                "regions": regions,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return regions
+
+
+def write_workbench_sqlite(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    spectra = payload.get("spectra") or {}
+    heatmaps = payload.get("heatmaps") or []
+    bootstrap = dict(payload)
+    bootstrap["spectra"] = {}
+    bootstrap["heatmaps"] = []
+    bootstrap["heatmap_catalog"] = [
+        {
+            "comparison_type": heatmap.get("comparison_type", "pair"),
+            "comparison_key": heatmap.get("comparison_key") or heatmap.get("sample_id"),
+            "comparison_label": heatmap.get("comparison_label"),
+            "reference_sample": heatmap.get("reference_sample"),
+            "sample_id": heatmap.get("sample_id"),
+            "sample_ids": heatmap.get("sample_ids"),
+            "normalization_method": heatmap.get("normalization_method"),
+            "rt_min": heatmap.get("rt_min"),
+            "rt_max": heatmap.get("rt_max"),
+            "mz_min": heatmap.get("mz_min"),
+            "mz_max": heatmap.get("mz_max"),
+            "rt_bin_count": heatmap.get("rt_bin_count"),
+            "mz_bin_count": heatmap.get("mz_bin_count"),
+        }
+        for heatmap in heatmaps
+    ]
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA journal_mode=DELETE")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workbench_artifacts (
+                artifact_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workbench_metadata (
+                metadata_key TEXT PRIMARY KEY,
+                metadata_value TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS saved_lcms_features (
+                feature_id TEXT PRIMARY KEY,
+                feature_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute("DELETE FROM workbench_artifacts")
+        connection.execute("DELETE FROM workbench_metadata")
+        now = time.time()
+        connection.execute(
+            """
+            INSERT INTO workbench_artifacts (artifact_key, payload_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(artifact_key) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            ("bootstrap", json.dumps(bootstrap, ensure_ascii=False, separators=(",", ":")), now),
+        )
+        assert isinstance(spectra, dict)
+        for sample_id, sample_spectra in spectra.items():
+            connection.execute(
+                """
+                INSERT INTO workbench_artifacts (artifact_key, payload_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(artifact_key) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (f"spectra:{sample_id}", json.dumps(sample_spectra, ensure_ascii=False, separators=(",", ":")), now),
+            )
+        for heatmap in heatmaps:
+            assert isinstance(heatmap, dict)
+            key = heatmap.get("comparison_key") or heatmap.get("sample_id")
+            method = heatmap.get("normalization_method") or "none"
+            connection.execute(
+                """
+                INSERT INTO workbench_artifacts (artifact_key, payload_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(artifact_key) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (f"heatmap:{key}:{method}", json.dumps(heatmap, ensure_ascii=False, separators=(",", ":")), now),
+            )
+        metadata = {
+            "sample_count": str(len(payload.get("sample_ids", []))),
+            "heatmap_count": str(len(payload.get("heatmaps", []))),
+            "reference_sample": str(payload.get("reference_sample", "")),
+            "default_heatmap_normalization": str(payload.get("default_heatmap_normalization", "")),
+        }
+        for key, value in metadata.items():
+            connection.execute(
+                """
+                INSERT INTO workbench_metadata (metadata_key, metadata_value)
+                VALUES (?, ?)
+                ON CONFLICT(metadata_key) DO UPDATE SET
+                    metadata_value = excluded.metadata_value
+                """,
+                (key, value),
+            )
+        connection.commit()
+        connection.execute("VACUUM")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate an Xcalibur-style LC-MS workbench.")
+    parser.add_argument("--input-dir", default="lcms_feature_mvp/data/converted/mzML")
+    parser.add_argument("--output-dir", default="lcms_feature_mvp/outputs_workbench")
+    parser.add_argument("--project-id", default="zenodo_5005513")
+    parser.add_argument("--reference-sample", default="")
+    parser.add_argument("--reference-prefix", default="MabThera")
+    parser.add_argument("--rt-min", type=float, default=0.0)
+    parser.add_argument("--rt-max", type=float, default=60.0)
+    parser.add_argument("--mz-min", type=float, default=2500.0)
+    parser.add_argument("--mz-max", type=float, default=8000.0)
+    parser.add_argument("--alignment-rt-start", type=float, default=2.0)
+    parser.add_argument("--alignment-rt-end", type=float, default=None)
+    parser.add_argument("--alignment-signal", choices=["tic", "bpc"], default="bpc")
+    parser.add_argument("--alignment-match-window-min", type=float, default=3.0)
+    parser.add_argument("--max-peaks-per-scan", type=int, default=180)
+    parser.add_argument("--spectrum-min-intensity", type=float, default=0.0)
+    parser.add_argument("--rt-bin-count", type=int, default=180)
+    parser.add_argument("--mz-bin-count", type=int, default=160)
+    parser.add_argument("--heatmap-normalization-methods", default="tic_log1p")
+    parser.add_argument("--default-heatmap-normalization", default="tic_log1p")
+    parser.add_argument("--auto-feature-top-n", type=int, default=20)
+    parser.add_argument("--sqlite-name", default="lcms_workbench.sqlite")
+    return parser.parse_args()
+
+
+def choose_reference(sample_ids: list[str], explicit: str, prefix: str) -> str:
+    if explicit:
+        if explicit not in sample_ids:
+            raise ValueError(f"Reference sample not found: {explicit}")
+        return explicit
+    preferred = ["MabThera_1", "MabThera_Untreated_1", "MabThera_Control"]
+    for sample_id in preferred:
+        if sample_id in sample_ids:
+            return sample_id
+    for sample_id in sample_ids:
+        if sample_id.startswith(prefix):
+            return sample_id
+    return sample_ids[0]
+
+
+def main() -> int:
+    args = parse_args()
+    raw_files, scans_by_sample = load_lcms_directory(Path(args.input_dir), args.project_id)
+    sample_ids = [raw_file.sample_id for raw_file in raw_files]
+    reference = choose_reference(sample_ids, args.reference_sample, args.reference_prefix)
+    heatmap_methods = [item.strip() for item in args.heatmap_normalization_methods.split(",") if item.strip()]
+    if args.default_heatmap_normalization not in heatmap_methods:
+        heatmap_methods.insert(0, args.default_heatmap_normalization)
+    payload = prepare_workbench_payload(
+        raw_files=raw_files,
+        scans_by_sample=scans_by_sample,
+        reference_sample=reference,
+        rt_min=args.rt_min,
+        rt_max=args.rt_max,
+        mz_min=args.mz_min,
+        mz_max=args.mz_max,
+        alignment_rt_start=args.alignment_rt_start,
+        alignment_rt_end=args.alignment_rt_end,
+        alignment_signal=args.alignment_signal,
+        alignment_match_window_min=args.alignment_match_window_min,
+        max_peaks_per_scan=args.max_peaks_per_scan,
+        spectrum_min_intensity=args.spectrum_min_intensity,
+        rt_bin_count=args.rt_bin_count,
+        mz_bin_count=args.mz_bin_count,
+        heatmap_normalization_methods=heatmap_methods,
+    )
+    payload["spectrum_bin_width"] = max((args.mz_max - args.mz_min) / args.mz_bin_count / 4.0, 0.1)
+    payload["heatmap_normalization_methods"] = heatmap_methods
+    payload["default_heatmap_normalization"] = args.default_heatmap_normalization
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    html_path = output_dir / "lcms_xcalibur_workbench.html"
+    sqlite_path = output_dir / args.sqlite_name
+    legacy_json_path = output_dir / "lcms_workbench_payload.json"
+    if legacy_json_path.exists():
+        legacy_json_path.unlink()
+    write_workbench_sqlite(sqlite_path, payload)
+    auto_regions = write_auto_feature_outputs(
+        output_dir,
+        payload,
+        max(0, args.auto_feature_top_n),
+        args.default_heatmap_normalization,
+    )
+    html_path.write_text(WORKBENCH_TEMPLATE, encoding="utf-8")
+    print(f"Samples: {len(sample_ids)}")
+    print(f"Reference: {reference}")
+    print(f"Heatmaps: {len(payload['heatmaps'])}")
+    print(f"Auto feature regions: {len(auto_regions)}")
+    print(f"SQLite: {sqlite_path.resolve()}")
+    print(f"Workbench: {html_path.resolve()}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

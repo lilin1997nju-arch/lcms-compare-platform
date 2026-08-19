@@ -1,0 +1,21 @@
+{
+  "package_name": "lcms_secondary_chromatography_base",
+  "package_version": "2026.08.12",
+  "source_repository": "https://github.com/lilin1997nju-arch/lcms-compare-platform.git",
+  "source_branch": "main",
+  "source_commit": "74ea4a9",
+  "python_minimum": "3.10",
+  "runtime_dependencies": [
+    "Python standard library",
+    "Bundled self-contained ThermoRawFileParser for Thermo RAW conversion (or an external authorized executable)",
+    "PowerShell 5.1+ for Windows wrapper scripts"
+  ],
+  "excluded_runtime_data": [
+    "RAW",
+    "mzML",
+    "SQLite result databases",
+    "task jobs",
+    "logs",
+    "cache"
+  ]
+}
