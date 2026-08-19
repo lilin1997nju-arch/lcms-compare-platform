@@ -1,0 +1,12 @@
+jobs/
+state/
+__pycache__/
+*.py[cod]
+*.raw
+*.RAW
+*.mzML
+*.mzXML
+*.sqlite
+*.sqlite3
+*.db
+*.log

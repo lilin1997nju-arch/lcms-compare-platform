@@ -2,6 +2,47 @@
 
 This directory is an isolated LC-MS prototype. It does not modify the existing Empower chromatogram app.
 
+## Vedolizumab peptide-map LC-MS/MS
+
+The current project extends the Peak-first MS1 comparison with a standard-library MS/MS search:
+
+```text
+Peak-first differential Feature
+-> MS2 precursor/RT link
+-> verified FASTA tryptic peptide
+-> b/y fragment match
+-> common PTM candidate
+-> target-decoy q-value
+-> JSON/CSV/HTML evidence report
+```
+
+Peak-first MS1 feature areas are normalized per run to the median total-TIC area before difference typing. Quantitative presence is determined from the normalized area ratio, while S/N-based detection is retained as a separate confidence field. With the defaults, `common_feature` is below 2-fold, `moderate_difference` is 2-fold to below 4-fold, `area_changed` is at least 4-fold, and only an at-most-2% weak side is `presence_absence`. If comparable areas are present but one side misses the S/N threshold, the fold-based type is retained and ranking is multiplied by 0.35. The report's fold column is the true symmetric normalized-area ratio rather than a ratio of log-transformed values. These settings are configurable with `--feature-presence-relative-area-fraction`, `--feature-common-fold-change-threshold`, `--feature-strong-fold-change-threshold`, and `--feature-partial-detection-rank-weight`.
+
+The RT-m/z feature heatmap defaults to a selected reference/test pair. Red means the test sample is higher and blue means it is lower; color depth uses the capped signed `ln(test/reference)`. Square area is independent of fold change and represents the higher normalized abundance in the selected sample pair. Abundance is transformed with `ln(1 + area)` and scaled between the 5th and 95th percentiles, preventing a few extreme signals from making all other Features invisible. Reference and test can be selected independently (or swapped), so the same cohort result supports pairwise views when more than two samples are loaded. The optional fold-magnitude mode retains the unsigned `ln(fold) / ln(max fold)` color palette while keeping abundance-driven square sizes. Both the local and global Feature tables show the pairwise type, signed direction, and sample-colored abundance-order dots; clicking any sortable header toggles ascending/descending order.
+
+`core/lcms_parser.py` keeps MS1-only behavior by default and can now read selected MS levels plus precursor m/z, charge, isolation window, activation method, and collision energy. `core/lcms_msms.py` implements tryptic digestion, configurable carbamidomethyl Cys, one variable PTM per peptide, target-decoy competition, fragment scoring, and Peak-first Feature linking. The linker now maps direct precursors, charge-state envelopes, and `1.003355 / z` isotope envelopes separately, so isotope/charge peaks are not mislabeled as independent modifications. An MS1-first evidence table reports every significant Feature as direct identification, isotope/charge inference, selected-but-unidentified precursor, co-isolated unresolved MS2, or no acquired MS2. Use `--no-carbamidomethyl-cys` when the confirmed sample preparation did not alkylate Cys.
+
+The antibody-focused candidate catalog covers Met/Trp oxidation and dioxidation, Asn/Gln deamidation, Asn succinimide, N-terminal pyroglutamate, Lys/N-terminal glycation, Fc-sequon G0F/G1F/G2F glycopeptides, and heavy-chain C-terminal Lys clipping. Isolation-window-guided re-search is permitted only for unresolved significant MS1 Features and is capped at tentative confidence because co-isolation can produce chimeric spectra. The generated `lcms_ms1_ms2_feature_evidence.csv` is the traceable Feature-first export.
+
+Unidentified MS1 component groups can also be searched jointly. Candidate peptides are first restricted by the component neutral mass (20 ppm in the current workflow), then b/y evidence is combined across selected precursor scans assigned to different charge-state or isotope members. Isolation-window-only scans are not used. A joint result requires target-decoy q <= 1%, score >= 45, at least five unique matched ions, at least 15% fragment coverage, and support from at least two scans and two member Features. It is reported as `tentative_component_consensus_identification`, never as a direct identification. Features already supported at B/C confidence are skipped; D-level single-spectrum links remain eligible so independent group members can rescue an otherwise insufficient spectrum.
+
+Components still unexplained by the strict neutral-mass search enter a separate open sequence-tag search. Its sequence catalog includes fully tryptic peptides with up to four missed cleavages plus explicit one-direction N- or C-terminal truncations of up to 20 residues. A component mass offset from -250 to +2500 Da is allowed, and regular/offset b/y ions are combined across genuinely selected charge-state or isotope-member spectra. Acceptance requires q <= 1%, score >= 45, at least five ions, at least 6% coverage, a sequence tag of at least two residues, two scans, two component members, and a score margin of at least three over competing sequences/sites. A peptide shorter than eight residues with a large unexplained mass offset cannot be promoted unless the offset matches a known modification; an explicit truncation with near-zero residual mass is also allowed. Accepted results are reported separately as `backbone_sequence_supported` or `truncation_sequence_supported`. Structurally useful but non-unique evidence remains `sequence_region_candidate` at D level and is displayed as a candidate rather than an identification.
+
+For every significant MS1 Feature with a named modified-peptide candidate, the MS/MS workflow now pairs the modified form with the unmodified parent peptide. It extracts the full-run MS1 XIC from the Peak-first SQLite spectra, sums M/M+1/M+2 isotope signals, merges supported charge states into one peptide-form result, and reports normalized modified/unmodified ratios plus pairwise apparent fractions. Consistent direction across at least two comparable charge states is recorded as supporting evidence; charge states and isotope peaks are not ranked as independent differential components. Isobaric site alternatives such as `Oxidation@1 / Oxidation@12` remain grouped when the current fragments cannot localize the site. The traceable export is `lcms_modification_pairs.csv`. Apparent fractions are semi-quantitative `modified / (modified + unmodified)` values for one form pair, not absolute occupancy and not a sum across all glycoforms or PTMs.
+
+Run after supplying a user-verified heavy/light-chain FASTA:
+
+```powershell
+python .\lcms_feature_mvp\run_msms_compare.py `
+  --mzml .\data\mzML\20260407_QL2519_20260316_T5-3G6-ProA_Trypsin_PTM.mzML `
+  --mzml .\data\mzML\20260407_Vedolizumab_12756432_Trypsin_PTM.mzML `
+  --fasta .\data\sequences\vedolizumab_verified.fasta `
+  --feature-sqlite .\outputs\vedolizumab_peak_first\lcms_peak_first_compare.sqlite `
+  --output-dir .\outputs\vedolizumab_peak_first
+```
+
+The report never assigns confirmation level A from MS/MS alone. A verified product sequence is required; the program does not download or silently substitute a public antibody sequence.
+
 ## Data
 
 Downloaded source files:
@@ -128,12 +169,22 @@ Outputs:
 - Feature matrix and difference type classification.
 - Standalone HTML report with TIC, feature table, XIC overlay, and matrix.
 
-## Next converter step
+## Current boundary
 
-To parse real Thermo `.raw` scans, add one of these before the current parser:
+Thermo RAW conversion and MS1/MS2 mzML parsing are operational. Real sequence-level identification still requires the verified product FASTA and confirmed sample-preparation settings. The search intentionally limits candidates to one variable PTM per peptide; expand this only for unexplained features because combinatorial PTM search rapidly enlarges the search space. A Feature covered only by an isolation window is not considered identified, and MS1-only mass differences are never promoted to a named PTM without qualifying fragment evidence.
 
-- ProteoWizard `msconvert` to produce `.mzML`.
-- ThermoRawFileParser to produce `.mzML` or `.mgf`.
-- A validated vendor SDK conversion service under the company Empower/Waters/Thermo environment.
+## Sequence and 3D structure mapping
 
-After conversion, the existing pipeline can consume centroid CSV immediately, and an mzML reader can be added behind `core/lcms_parser.py`.
+The Peak-first report now includes a final “差异组分的序列与三级结构定位” module:
+
+- All differential Features with a main or candidate peptide sequence are deduplicated into peptide regions and rendered on the complete HC and LC FASTA sequences. Red means the selected test sample is higher than the reference, blue means lower, purple means overlapping evidence has conflicting directions, and semi-transparent color means tentative evidence.
+- Clicking a colored residue selects the linked Feature, scrolls the Feature table to its group, refreshes the XIC/MS2 detail, and focuses the selected region in 3D.
+- Selecting a Feature reads its linked MS2 peptide candidate and highlights the corresponding 1-based residue interval in the product FASTA chain.
+- A local PDB or mmCIF file can be uploaded directly in the browser.
+- A PDB ID can be fetched through the local server from RCSB and cached under `data/structures/pdb_cache`.
+- Structure mapping first assigns the full product HC/LC sequence to the best matching PDB antibody chains and then performs local peptide mapping only inside those chains. This avoids short peptides being assigned to an antigen or receptor chain in antibody-complex structures.
+- All mappable differential regions are colored in the structure using the same red/blue/purple direction scheme. The selected Feature is orange, and a localized `@position` modification is additionally shown as an orange sphere/stick site.
+- Vedolizumab currently auto-loads PDB `3V4P` (parent ACT-1 Fab bound to α4β7), and denosumab auto-loads PDB `5I1C` (a close human Fab variable-region template). RCSB has no experimental entry with a ≥99% exact match to either drug's HC/LC variable regions, so both defaults are explicitly labelled as homologous templates rather than exact drug structures.
+- Structure mapping never upgrades the original MS2 identification confidence. Missing coordinates, construct truncation, sequence variants, and ambiguous antibody chains can all prevent a reliable structural match.
+
+The bundled viewer is served from `lcms_feature_mvp/ui/vendor/3Dmol-min.js`, so uploaded structures still work without a CDN. Online PDB retrieval requires outbound HTTPS access to `files.rcsb.org`.

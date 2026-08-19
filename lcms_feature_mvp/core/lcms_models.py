@@ -40,6 +40,14 @@ class LCMSSpectrumScan:
     tic: float
     base_peak_mz: float | None
     base_peak_intensity: float
+    precursor_scan_id: str | None = None
+    precursor_mz: float | None = None
+    precursor_charge: int | None = None
+    precursor_intensity: float | None = None
+    isolation_window_lower_offset: float | None = None
+    isolation_window_upper_offset: float | None = None
+    activation_method: str | None = None
+    collision_energy: float | None = None
 
 
 @dataclass
@@ -96,4 +104,3 @@ class LCMSFeatureGroup:
     confidence_score: float
     sample_presence: dict[str, bool]
     area_by_sample: dict[str, float]
-

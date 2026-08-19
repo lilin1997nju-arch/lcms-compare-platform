@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -13,7 +14,15 @@ from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
+
+
+VENDOR_DIR = Path(__file__).resolve().parent / "ui" / "vendor"
+STRUCTURE_CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "structures" / "pdb_cache"
+PDB_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{4,12}$")
+MAX_STRUCTURE_BYTES = 40 * 1024 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +56,102 @@ def read_artifact_cached(db_path_text: str, mtime_ns: int, key: str) -> object:
 def read_artifact(db_path: Path, key: str) -> object:
     resolved = db_path.resolve()
     return read_artifact_cached(str(resolved), resolved.stat().st_mtime_ns, key)
+
+
+def read_bootstrap(db_path: Path) -> dict[str, object]:
+    payload = read_artifact(db_path, "bootstrap")
+    if not isinstance(payload, dict):
+        raise TypeError("bootstrap artifact must be an object")
+    enriched = dict(payload)
+    try:
+        component_payload = read_artifact(db_path, "ms1_component_groups")
+    except KeyError:
+        component_payload = {}
+    if isinstance(component_payload, dict):
+        groups = component_payload.get("component_groups")
+        if isinstance(groups, list):
+            enriched["ms1_component_groups"] = groups
+    # The MS2 job writes a second, sequence-aware component table.  Prefer it
+    # for the main Feature view so the browser does not briefly or permanently
+    # show the MS1-only "Unknown xxxx Da" labels after MS2 has completed.
+    try:
+        msms_payload = read_artifact(db_path, "msms_identifications")
+    except KeyError:
+        msms_payload = None
+    if isinstance(msms_payload, dict):
+        msms_groups = msms_payload.get("ms1_component_groups")
+        if isinstance(msms_groups, list) and msms_groups:
+            enriched["ms1_component_groups"] = msms_groups
+    return enriched
+
+
+def read_fasta_sequences(path: Path) -> dict[str, str]:
+    sequences: dict[str, str] = {}
+    name = ""
+    parts: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            if name:
+                sequences[name] = "".join(parts)
+            name = line[1:].split()[0] or f"chain_{len(sequences) + 1}"
+            parts = []
+        else:
+            parts.append(line.upper().replace(" ", ""))
+    if name:
+        sequences[name] = "".join(parts)
+    return sequences
+
+
+def read_msms_identifications(db_path: Path) -> dict[str, object]:
+    """Return MS/MS evidence with full LC/HC sequences for residue mapping."""
+    payload = read_artifact(db_path, "msms_identifications")
+    if not isinstance(payload, dict):
+        raise TypeError("msms_identifications artifact must be an object")
+    enriched = dict(payload)
+    chains = enriched.get("chains")
+    if isinstance(chains, dict) and chains and all(str(value or "").strip() for value in chains.values()):
+        enriched.setdefault("chain_lengths", {str(key): len(str(value)) for key, value in chains.items()})
+        return enriched
+    fasta_text = str(enriched.get("fasta") or "").strip()
+    if fasta_text:
+        fasta_path = Path(fasta_text)
+        if fasta_path.exists():
+            sequences = read_fasta_sequences(fasta_path)
+            if sequences:
+                enriched["chains"] = sequences
+                enriched["chain_lengths"] = {name: len(sequence) for name, sequence in sequences.items()}
+    return enriched
+
+
+def pdb_structure_text(pdb_id: str) -> tuple[str, bool]:
+    """Fetch one RCSB PDBx/mmCIF entry through a validated, cached endpoint."""
+    normalized = str(pdb_id or "").strip().upper()
+    if not PDB_ID_PATTERN.fullmatch(normalized):
+        raise ValueError("PDB ID must contain 4-12 letters or digits")
+    STRUCTURE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = STRUCTURE_CACHE_DIR / f"{normalized}.cif"
+    if cache_path.exists() and cache_path.stat().st_size > 100:
+        return cache_path.read_text(encoding="utf-8", errors="replace"), True
+
+    request = Request(
+        f"https://files.rcsb.org/download/{normalized}.cif",
+        headers={"User-Agent": "LCMSPeakFirstCompare/0.2 (+local analytical workbench)"},
+    )
+    with urlopen(request, timeout=30) as response:
+        content_length = int(response.headers.get("Content-Length") or 0)
+        if content_length > MAX_STRUCTURE_BYTES:
+            raise ValueError("Structure file is too large for the interactive viewer")
+        body = response.read(MAX_STRUCTURE_BYTES + 1)
+    if len(body) > MAX_STRUCTURE_BYTES:
+        raise ValueError("Structure file is too large for the interactive viewer")
+    text = body.decode("utf-8", errors="replace")
+    if "_atom_site." not in text:
+        raise ValueError(f"RCSB response for {normalized} does not contain atomic coordinates")
+    cache_path.write_text(text, encoding="utf-8")
+    return text, False
 
 
 def ensure_feature_table(connection: sqlite3.Connection) -> None:
@@ -103,8 +208,37 @@ def replace_features(db_path: Path, features: list[object]) -> int:
 
 def mz_tolerance(mz: float, params: dict[str, object]) -> float:
     if str(params.get("mz_tolerance_mode") or "da") == "ppm":
-        return max(mz * float(params.get("mz_tolerance_ppm") or 20.0) / 1_000_000.0, 1e-9)
-    return float(params.get("mz_tolerance_da") or 0.5)
+        return max(mz * float(params.get("mz_tolerance_ppm") or 10.0) / 1_000_000.0, 1e-9)
+    return float(params.get("mz_tolerance_da") or 0.16)
+
+
+def centroid_mz_tolerance(mz: float, params: dict[str, object]) -> float:
+    return max(abs(float(mz)) * float(params.get("mz_tolerance_ppm") or 10.0) / 1_000_000.0, 1e-9)
+
+
+def single_centroid_intensity(
+    mz_values: list[object],
+    intensity_values: list[object],
+    target_mz: float,
+    search_tolerance: float,
+    params: dict[str, object],
+) -> float:
+    local_points = [
+        (float(mz), float(intensity))
+        for mz, intensity in zip(mz_values, intensity_values)
+        if float(intensity) > 0.0 and abs(float(mz) - target_mz) <= search_tolerance
+    ]
+    if not local_points:
+        return 0.0
+    anchor_mz, _ = min(local_points, key=lambda item: abs(item[0] - target_mz))
+    if abs(anchor_mz - target_mz) > centroid_mz_tolerance(target_mz, params):
+        return 0.0
+    anchor_tolerance = centroid_mz_tolerance(anchor_mz, params)
+    return sum(
+        intensity
+        for mz, intensity in local_points
+        if abs(mz - anchor_mz) <= anchor_tolerance
+    )
 
 
 def integrate(rt: list[float], intensity: list[float]) -> float:
@@ -145,13 +279,16 @@ def xic_payload(db_path: Path, peak_id: str, target_mz: float, full_run: bool = 
                 rt_end = feature.get("rt_end")
                 if rt_start is None or rt_end is None:
                     continue
+                match_status = str(feature.get("match_status") or "")
+                if match_status in {"low_score", "missing"}:
+                    continue
                 feature_bounds_by_sample[str(sample_id)] = {
                     "rt_start": float(rt_start),
                     "rt_end": float(rt_end),
                     "rt_apex": float(feature.get("rt_apex") or feature.get("aligned_rt_apex") or rt_start),
                     "area": float(feature.get("area") or 0.0),
                     "height": float(feature.get("height") or 0.0),
-                    "match_status": str(feature.get("match_status") or ""),
+                    "match_status": match_status,
                 }
     if feature_bounds_by_sample:
         integration_rt_start = min(bounds["rt_start"] for bounds in feature_bounds_by_sample.values())
@@ -184,10 +321,13 @@ def xic_payload(db_path: Path, peak_id: str, target_mz: float, full_run: bool = 
             rt = float(scan.get("aligned_rt") or scan.get("rt") or 0.0) + local_shift
             if not full_run and (rt < context_rt_start or rt > context_rt_end):
                 continue
-            total = 0.0
-            for mz, intensity in zip(scan.get("mz", []), scan.get("intensity", [])):
-                if abs(float(mz) - target_mz) <= tolerance:
-                    total += float(intensity)
+            total = single_centroid_intensity(
+                list(scan.get("mz", [])),
+                list(scan.get("intensity", [])),
+                target_mz,
+                tolerance,
+                params,
+            )
             rt_values.append(rt)
             intensities.append(total)
         integration_pairs = [
@@ -295,6 +435,13 @@ def make_handler(comparisons: dict[str, dict[str, object]], default_id: str) -> 
                     html_path = Path(comparisons[default_id]["html_path"])
                     self.send_bytes(html_path.read_bytes(), "text/html; charset=utf-8")
                     return
+                if path == "/assets/3Dmol-min.js":
+                    asset_path = VENDOR_DIR / "3Dmol-min.js"
+                    if not asset_path.exists():
+                        self.send_json({"error": "3D structure viewer asset is not installed"}, HTTPStatus.NOT_FOUND)
+                    else:
+                        self.send_bytes(asset_path.read_bytes(), "text/javascript; charset=utf-8")
+                    return
                 if path == "/api/comparisons":
                     self.send_json(
                         {
@@ -313,8 +460,46 @@ def make_handler(comparisons: dict[str, dict[str, object]], default_id: str) -> 
                     else:
                         self.send_json({"error": "Original workbench HTML is not in this output directory"}, HTTPStatus.NOT_FOUND)
                     return
+                if path == "/api/msms":
+                    try:
+                        self.send_json(read_msms_identifications(db_for(query)))
+                    except KeyError:
+                        self.send_json({"error": "MS/MS identification has not been run"}, HTTPStatus.NOT_FOUND)
+                    return
                 if path == "/api/bootstrap":
-                    self.send_json(read_artifact(db_for(query), "bootstrap"))
+                    self.send_json(read_bootstrap(db_for(query)))
+                    return
+                if path == "/api/task-reference":
+                    try:
+                        structure = read_artifact(db_for(query), "task_reference_structure")
+                    except KeyError:
+                        structure = None
+                    self.send_json(
+                        structure
+                        if isinstance(structure, dict) and structure.get("available")
+                        else {"available": False, "reason": "未提供结构文件或 PDB ID。"}
+                    )
+                    return
+                if path == "/api/pdb-structure":
+                    pdb_id = str(query.get("pdb_id", [""])[0])
+                    try:
+                        structure_text, from_cache = pdb_structure_text(pdb_id)
+                    except ValueError as exc:
+                        self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                        return
+                    except HTTPError as exc:
+                        status = HTTPStatus.NOT_FOUND if exc.code == 404 else HTTPStatus.BAD_GATEWAY
+                        self.send_json({"error": f"RCSB PDB returned HTTP {exc.code}"}, status)
+                        return
+                    except URLError as exc:
+                        self.send_json({"error": f"Could not reach RCSB PDB: {exc.reason}"}, HTTPStatus.BAD_GATEWAY)
+                        return
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "chemical/x-mmcif; charset=utf-8")
+                    self.send_header("Content-Length", str(len(structure_text.encode("utf-8"))))
+                    self.send_header("X-Structure-Cache", "hit" if from_cache else "miss")
+                    self.end_headers()
+                    self.wfile.write(structure_text.encode("utf-8"))
                     return
                 if path == "/api/features":
                     self.send_json({"features": read_features(db_for(query))})
