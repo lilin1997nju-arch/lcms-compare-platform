@@ -45,15 +45,21 @@ class PeakFirstParams:
     tic_difference_selection_weight: float = 1.5
     xic_feature_search_margin_min: float = 0.45
     feature_drift_tolerance_min: float = 0.35
-    mz_tolerance_ppm: float = 20.0
-    mz_tolerance_da: float = 0.5
+    # Raw centroid peaks are clustered and matched across samples at high
+    # resolution.  The wider Da value is only the half-window used to locate
+    # and extract one centroid peak per scan.
+    mz_tolerance_ppm: float = 10.0
+    mz_tolerance_da: float = 0.16
     mz_tolerance_mode: str = "da"
-    top_n_mz: int = 50
-    top_n_changed_mz: int = 20
-    min_changed_mz_gap_da: float = 1.0
-    top_n_peaks: int = 60
-    max_spectrum_points_per_scan: int = 200
-    min_relative_intensity: float = 0.001
+    # These are bounded working-set limits. Passing 0 explicitly still means
+    # unlimited for diagnostic runs, but normal platform runs use the safer
+    # defaults below so the full report remains responsive on vendor data.
+    top_n_mz: int = 40
+    top_n_changed_mz: int = 15
+    min_changed_mz_gap_da: float = 0.02
+    top_n_peaks: int = 80
+    max_spectrum_points_per_scan: int = 500
+    min_relative_intensity: float = 0.0
     resample_points: int = 100
     peak_margin_min: float = 0.08
     peak_source: str = "consensus"
@@ -66,6 +72,14 @@ class PeakFirstParams:
     feature_min_height_fraction: float = 0.02
     feature_gap_fill_height_fraction: float = 0.005
     feature_abundance_weight: float = 0.8
+    feature_presence_relative_area_fraction: float = 0.02
+    feature_common_fold_change_threshold: float = 2.0
+    feature_strong_fold_change_threshold: float = 4.0
+    # Keep extreme ratios from dominating ranking displays and heatmap color
+    # scales. Raw areas remain available, and raw_max_fold_change preserves the
+    # uncapped finite ratio for audit/export.
+    max_reported_fold_change: float = 1000.0
+    feature_partial_detection_rank_weight: float = 0.35
     global_feature_rt_merge_tolerance_min: float = 0.8
     global_feature_mz_merge_tolerance_factor: float = 2.0
 
@@ -504,40 +518,297 @@ def extract_peak_window(
     return values
 
 
+def _corrected_peak_curve(window: list[tuple[float, float]]) -> tuple[list[float], list[float]]:
+    pairs = sorted((float(rt), float(intensity)) for rt, intensity in window)
+    if not pairs:
+        return [], []
+    rt = [item[0] for item in pairs]
+    smoothed = moving_average([item[1] for item in pairs], 5)
+    baseline = quantile(smoothed, 0.10)
+    return rt, [max(value - baseline, 0.0) for value in smoothed]
+
+
+def _interpolate_profile(rt: list[float], intensity: list[float], target: float) -> float:
+    if not rt or target < rt[0] or target > rt[-1]:
+        return 0.0
+    index = bisect_left(rt, target)
+    if index <= 0:
+        return intensity[0]
+    if index >= len(rt):
+        return intensity[-1]
+    left_rt, right_rt = rt[index - 1], rt[index]
+    if right_rt <= left_rt:
+        return intensity[index]
+    ratio = (target - left_rt) / (right_rt - left_rt)
+    return intensity[index - 1] * (1.0 - ratio) + intensity[index] * ratio
+
+
+def _profile_at_shift(
+    rt: list[float],
+    intensity: list[float],
+    grid: list[float],
+    shift: float,
+) -> list[float]:
+    # A positive correction moves the sample curve to the right, so aligned
+    # intensity at grid RT t comes from the uncorrected curve at t - shift.
+    return [_interpolate_profile(rt, intensity, target - shift) for target in grid]
+
+
+def _signed_cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm = math.sqrt(sum(x * x for x in a) * sum(y * y for y in b))
+    return max(-1.0, min(1.0, dot / norm)) if norm > 0 else 0.0
+
+
+def _peak_profile_score(reference: list[float], sample: list[float]) -> float:
+    intensity_score = cosine(reference, sample)
+    reference_slope = [reference[index] - reference[index - 1] for index in range(1, len(reference))]
+    sample_slope = [sample[index] - sample[index - 1] for index in range(1, len(sample))]
+    slope_score = max(0.0, _signed_cosine(reference_slope, sample_slope))
+    return 0.80 * intensity_score + 0.20 * slope_score
+
+
+def _local_peak_profile_quality(
+    rt: list[float],
+    intensity: list[float],
+    rt_start: float,
+    rt_end: float,
+) -> dict[str, object]:
+    """Decide whether a core TIC window contains a shiftable peak shape."""
+    core = [
+        (float(x), max(0.0, float(y)))
+        for x, y in zip(rt, intensity)
+        if rt_start <= float(x) <= rt_end
+    ]
+    if len(core) < 7 or rt_end <= rt_start:
+        return {
+            "clear_peak": False,
+            "reason": "insufficient_core_points",
+            "core_point_count": len(core),
+            "apex_rt": (rt_start + rt_end) * 0.5,
+            "apex_position": 0.5,
+            "prominence_score": 0.0,
+            "edge_contrast_score": 0.0,
+            "rise_score": 0.0,
+            "fall_score": 0.0,
+            "apex_to_median": 0.0,
+        }
+    core_rt = [item[0] for item in core]
+    values = [item[1] for item in core]
+    apex_index = max(range(len(values)), key=values.__getitem__)
+    apex = values[apex_index]
+    minimum = min(values)
+    dynamic = max(apex - minimum, 1e-12)
+    apex_rt = core_rt[apex_index]
+    apex_position = (apex_rt - rt_start) / max(rt_end - rt_start, 1e-12)
+    left_min = min(values[:apex_index + 1])
+    right_min = min(values[apex_index:])
+    rise_score = max(0.0, min(1.0, (apex - left_min) / dynamic))
+    fall_score = max(0.0, min(1.0, (apex - right_min) / dynamic))
+    prominence_score = max(0.0, min(1.0, (apex - max(left_min, right_min)) / dynamic))
+    edge_count = max(2, len(values) // 5)
+    left_edge = statistics.median(values[:edge_count])
+    right_edge = statistics.median(values[-edge_count:])
+    edge_contrast_score = max(0.0, min(1.0, (apex - max(left_edge, right_edge)) / dynamic))
+    median_intensity = statistics.median(values)
+    apex_to_median = apex / max(median_intensity, dynamic * 1e-6, 1e-12)
+    reasons: list[str] = []
+    if not 0.08 <= apex_position <= 0.92:
+        reasons.append("apex_at_window_edge")
+    if prominence_score < 0.25:
+        reasons.append("insufficient_two_sided_prominence")
+    if rise_score < 0.25:
+        reasons.append("missing_rising_edge")
+    if fall_score < 0.25:
+        reasons.append("missing_falling_edge")
+    if edge_contrast_score < 0.15:
+        reasons.append("weak_edge_contrast")
+    if apex_to_median < 1.15:
+        reasons.append("flat_profile")
+    return {
+        "clear_peak": not reasons,
+        "reason": "clear_peak" if not reasons else ";".join(reasons),
+        "core_point_count": len(core),
+        "apex_rt": apex_rt,
+        "apex_position": apex_position,
+        "prominence_score": prominence_score,
+        "edge_contrast_score": edge_contrast_score,
+        "rise_score": rise_score,
+        "fall_score": fall_score,
+        "apex_to_median": apex_to_median,
+    }
+
+
 def local_align_peak_by_apex(
     scans_by_sample: dict[str, list[LCMSSpectrumScan]],
     tic_peak: dict[str, object],
     shifts: dict[str, float],
     params: PeakFirstParams,
     signal: str = "tic",
+    reference_sample: str | None = None,
 ) -> dict[str, object]:
-    apex_by_sample: dict[str, float] = {}
-    windows: dict[str, list[tuple[float, float]]] = {}
-    for sample_id, scans in scans_by_sample.items():
-        window = extract_peak_window(scans, tic_peak, shifts.get(sample_id, 0.0), True, params.peak_margin_min, signal)
-        windows[sample_id] = window
-        apex_by_sample[sample_id] = max(window, key=lambda item: item[1])[0] if window else float(tic_peak["rt_apex"])
-    reference_apex = statistics.median(apex_by_sample.values()) if apex_by_sample else float(tic_peak["rt_apex"])
+    """Align one selected TIC peak to a fixed reference using its full profile.
+
+    The previous highest-point alignment could match different shoulders in a
+    composite peak and moved both samples toward their median apex. The profile
+    search keeps the reference fixed and uses the full peak shape, with a small
+    shift penalty and weak-match rejection to avoid unsupported corrections.
+    """
+    if reference_sample not in scans_by_sample:
+        reference_sample = next(iter(scans_by_sample), None)
     max_shift = min(
         params.max_local_shift_cap_min,
         max(params.max_local_shift_min, params.max_local_shift_fraction * float(tic_peak.get("width") or 0.1)),
     )
+    apex_by_sample: dict[str, float] = {}
+    windows: dict[str, list[tuple[float, float]]] = {}
+    corrected_curves: dict[str, tuple[list[float], list[float]]] = {}
+    profile_quality_by_sample: dict[str, dict[str, object]] = {}
+    core_start = float(tic_peak["rt_start"])
+    core_end = float(tic_peak["rt_end"])
+    for sample_id, scans in scans_by_sample.items():
+        window = extract_peak_window(
+            scans,
+            tic_peak,
+            shifts.get(sample_id, 0.0),
+            True,
+            params.peak_margin_min + max_shift,
+            signal,
+        )
+        windows[sample_id] = window
+        corrected_curves[sample_id] = _corrected_peak_curve(window)
+        curve_rt, curve_intensity = corrected_curves[sample_id]
+        quality = _local_peak_profile_quality(curve_rt, curve_intensity, core_start, core_end)
+        profile_quality_by_sample[sample_id] = quality
+        apex_by_sample[sample_id] = float(quality["apex_rt"])
+    reference_apex = apex_by_sample.get(str(reference_sample), float(tic_peak["rt_apex"]))
+    grid_start = core_start
+    grid_end = core_end
+    grid_count = max(80, params.resample_points)
+    grid = [
+        grid_start + (grid_end - grid_start) * index / max(1, grid_count - 1)
+        for index in range(grid_count)
+    ]
+    reference_rt, reference_intensity = corrected_curves.get(str(reference_sample), ([], []))
+    reference_profile = _profile_at_shift(reference_rt, reference_intensity, grid, 0.0)
+    rt_steps = [
+        rt[index] - rt[index - 1]
+        for rt, _ in corrected_curves.values()
+        for index in range(1, len(rt))
+        if rt[index] > rt[index - 1]
+    ]
+    search_step = min(0.01, max(0.0025, statistics.median(rt_steps) * 0.5 if rt_steps else 0.005))
+    search_count = max(1, int(math.ceil(max_shift / search_step)))
+    candidate_shifts = sorted({
+        0.0,
+        *(max(-max_shift, min(max_shift, index * search_step)) for index in range(-search_count, search_count + 1)),
+        -max_shift,
+        max_shift,
+    })
     local_shifts: dict[str, float] = {}
     capped: dict[str, bool] = {}
-    for sample_id, apex in apex_by_sample.items():
-        shift = reference_apex - apex
-        if abs(shift) > max_shift:
+    rejected: dict[str, bool] = {}
+    profile_scores: dict[str, float] = {}
+    profile_scores_before: dict[str, float] = {}
+    rejection_reason_by_sample: dict[str, str] = {}
+    reference_clear = bool(profile_quality_by_sample.get(str(reference_sample), {}).get("clear_peak"))
+    for sample_id, (sample_rt, sample_intensity) in corrected_curves.items():
+        if sample_id == reference_sample:
             local_shifts[sample_id] = 0.0
-            capped[sample_id] = True
-        else:
-            local_shifts[sample_id] = shift
             capped[sample_id] = False
+            rejected[sample_id] = not reference_clear
+            rejection_reason_by_sample[sample_id] = (
+                "none" if reference_clear
+                else f"reference_no_clear_peak:{profile_quality_by_sample[sample_id]['reason']}"
+            )
+            profile_scores[sample_id] = 1.0 if reference_clear and any(reference_profile) else 0.0
+            profile_scores_before[sample_id] = profile_scores[sample_id]
+            continue
+        zero_profile = _profile_at_shift(sample_rt, sample_intensity, grid, 0.0)
+        zero_score = _peak_profile_score(reference_profile, zero_profile)
+        sample_clear = bool(profile_quality_by_sample.get(sample_id, {}).get("clear_peak"))
+        if not reference_clear or not sample_clear:
+            local_shifts[sample_id] = 0.0
+            capped[sample_id] = False
+            rejected[sample_id] = True
+            rejection_reason_by_sample[sample_id] = (
+                "reference_no_clear_peak"
+                if not reference_clear
+                else f"sample_no_clear_peak:{profile_quality_by_sample[sample_id]['reason']}"
+            )
+            profile_scores_before[sample_id] = zero_score
+            profile_scores[sample_id] = zero_score
+            continue
+        best_shift = 0.0
+        best_score = zero_score
+        best_adjusted_score = zero_score
+        for candidate_shift in candidate_shifts:
+            sample_profile = _profile_at_shift(sample_rt, sample_intensity, grid, candidate_shift)
+            score = _peak_profile_score(reference_profile, sample_profile)
+            adjusted_score = score - 0.01 * abs(candidate_shift) / max(max_shift, 1e-9)
+            if adjusted_score > best_adjusted_score + 1e-12 or (
+                abs(adjusted_score - best_adjusted_score) <= 1e-12 and abs(candidate_shift) < abs(best_shift)
+            ):
+                best_shift = candidate_shift
+                best_score = score
+                best_adjusted_score = adjusted_score
+        improvement = best_score - zero_score
+        weak_match = not any(reference_profile) or not any(sample_intensity) or best_score < 0.55
+        unsupported_shift = abs(best_shift) > search_step and improvement < 0.005
+        rejected[sample_id] = weak_match or unsupported_shift
+        if weak_match:
+            rejection_reason_by_sample[sample_id] = "weak_profile_match"
+        elif unsupported_shift:
+            rejection_reason_by_sample[sample_id] = "unsupported_shift_improvement"
+        else:
+            rejection_reason_by_sample[sample_id] = "none"
+        local_shifts[sample_id] = 0.0 if rejected[sample_id] else best_shift
+        capped[sample_id] = not rejected[sample_id] and abs(best_shift) >= max_shift - search_step * 0.5
+        profile_scores_before[sample_id] = zero_score
+        profile_scores[sample_id] = zero_score if rejected[sample_id] else best_score
     return {
         "reference_peak_apex_rt": reference_apex,
+        "reference_sample": reference_sample,
+        "alignment_method": "reference_profile_cross_correlation",
+        "alignment_quality_gate": "two_sided_core_peak_shape",
+        "local_alignment_quality_gate_passed": (
+            reference_clear
+            and all(bool(profile_quality_by_sample.get(sample_id, {}).get("clear_peak")) for sample_id in scans_by_sample)
+        ),
+        "local_alignment_rejection_reason": (
+            "none"
+            if reference_clear
+            and all(bool(profile_quality_by_sample.get(sample_id, {}).get("clear_peak")) for sample_id in scans_by_sample)
+            else "no_clear_two_sided_peak_shape"
+        ),
+        "local_alignment_status": (
+            "skipped_no_clear_peak"
+            if not reference_clear
+            or not all(bool(profile_quality_by_sample.get(sample_id, {}).get("clear_peak")) for sample_id in scans_by_sample)
+            else (
+                "capped_possible_rt_shift"
+                if any(capped.values())
+                else (
+                    "applied"
+                    if any(abs(value) > 1e-12 for value in local_shifts.values())
+                    else "not_needed"
+                )
+            )
+        ),
+        "local_alignment_applied": any(
+            abs(value) > 1e-12 and not rejected.get(sample_id, False)
+            for sample_id, value in local_shifts.items()
+        ),
         "raw_peak_apex_rt_by_sample": apex_by_sample,
+        "peak_profile_quality_by_sample": profile_quality_by_sample,
         "local_peak_shift_by_sample": local_shifts,
         "local_shift_capped_by_sample": capped,
+        "local_shift_rejected_by_sample": rejected,
+        "local_shift_rejection_reason_by_sample": rejection_reason_by_sample,
+        "profile_score_before_by_sample": profile_scores_before,
+        "profile_score_by_sample": profile_scores,
         "max_local_shift_allowed": max_shift,
+        "profile_search_step_min": search_step,
         "local_shift_max": max((abs(v) for v in local_shifts.values()), default=0.0),
         "windows": windows,
     }
@@ -609,10 +880,14 @@ def compute_peak_chromatogram_similarity(
         for values in zip(*normalized.values())
     ]
     shape_values = [cosine(curve, consensus) for curve in normalized.values()]
-    local_shifts = [abs(float(value)) for value in dict(local_alignment.get("local_peak_shift_by_sample") or {}).values()]
     capped = any(dict(local_alignment.get("local_shift_capped_by_sample") or {}).values())
-    max_allowed = float(local_alignment.get("max_local_shift_allowed") or 0.1)
-    apex_score = max(0.0, 1.0 - (max(local_shifts, default=0.0) / max(max_allowed, 1e-9)))
+    profile_scores = [float(value) for value in dict(local_alignment.get("profile_score_by_sample") or {}).values()]
+    if profile_scores:
+        apex_score = statistics.mean(profile_scores)
+    else:
+        local_shifts = [abs(float(value)) for value in dict(local_alignment.get("local_peak_shift_by_sample") or {}).values()]
+        max_allowed = float(local_alignment.get("max_local_shift_allowed") or 0.1)
+        apex_score = max(0.0, 1.0 - (max(local_shifts, default=0.0) / max(max_allowed, 1e-9)))
     if capped:
         apex_score *= 0.5
     shape_score = statistics.mean(shape_values) if shape_values else 0.0
@@ -634,6 +909,12 @@ def mz_tolerance(mz: float, params: PeakFirstParams) -> float:
     return params.mz_tolerance_da
 
 
+def centroid_mz_tolerance(mz: float, params: PeakFirstParams) -> float:
+    """Tolerance for one physical centroid peak across scans/samples."""
+
+    return max(abs(float(mz)) * params.mz_tolerance_ppm / 1_000_000.0, 1e-9)
+
+
 def get_summed_spectrum_for_peak(
     scans: list[LCMSSpectrumScan],
     tic_peak: dict[str, object],
@@ -653,7 +934,9 @@ def get_summed_spectrum_for_peak(
                 if intensity > 0
             ]
             pairs.sort(key=lambda item: item[1], reverse=True)
-            values.extend(pairs[: params.max_spectrum_points_per_scan])
+            if params.max_spectrum_points_per_scan > 0:
+                pairs = pairs[: params.max_spectrum_points_per_scan]
+            values.extend(pairs)
     return values
 
 
@@ -674,7 +957,9 @@ def get_apex_spectrum_for_peak(
         if intensity > 0
     ]
     pairs.sort(key=lambda item: item[1], reverse=True)
-    return pairs[: params.max_spectrum_points_per_scan]
+    if params.max_spectrum_points_per_scan > 0:
+        pairs = pairs[: params.max_spectrum_points_per_scan]
+    return pairs
 
 
 def build_consensus_mz_bins(
@@ -693,7 +978,7 @@ def build_consensus_mz_bins(
             clusters.append([(mz, intensity)])
             continue
         center = weighted_mz(clusters[-1])
-        if abs(mz - center) <= mz_tolerance(center, params):
+        if abs(mz - center) <= centroid_mz_tolerance(center, params):
             clusters[-1].append((mz, intensity))
         else:
             clusters.append([(mz, intensity)])
@@ -732,7 +1017,7 @@ def vectorize_spectrum(
                 continue
             center = bins[index]
             delta = abs(mz - center)
-            if delta < best_delta and delta <= mz_tolerance(center, params):
+            if delta < best_delta and delta <= centroid_mz_tolerance(center, params):
                 best_index = index
                 best_delta = delta
         if best_index is not None:
@@ -755,6 +1040,110 @@ def normalize_spectrum_vector(
     return values
 
 
+def tic_area_normalization(
+    scans_by_sample: dict[str, list[LCMSSpectrumScan]],
+) -> dict[str, object]:
+    tic_area_by_sample = {
+        sample_id: integrate_curve([(float(scan.rt), float(scan.tic)) for scan in scans])
+        for sample_id, scans in scans_by_sample.items()
+    }
+    positive_areas = [area for area in tic_area_by_sample.values() if area > 0]
+    target_area = statistics.median(positive_areas) if positive_areas else 1.0
+    factor_by_sample = {
+        sample_id: (area / target_area if area > 0 and target_area > 0 else 1.0)
+        for sample_id, area in tic_area_by_sample.items()
+    }
+    return {
+        "method": "total_tic_area_to_median",
+        "tic_area_by_sample": tic_area_by_sample,
+        "target_tic_area": target_area,
+        "factor_by_sample": factor_by_sample,
+    }
+
+
+def abundance_profile_metrics(
+    values_by_sample: dict[str, float],
+    detected_by_sample: dict[str, bool],
+    params: PeakFirstParams,
+) -> dict[str, object]:
+    sample_ids = list(values_by_sample)
+    values = {sample_id: max(0.0, float(values_by_sample.get(sample_id) or 0.0)) for sample_id in sample_ids}
+    max_value = max(values.values(), default=0.0)
+    relative_by_sample = {
+        sample_id: (value / max_value if max_value > 0 else 0.0)
+        for sample_id, value in values.items()
+    }
+    presence_by_sample = {
+        sample_id: values[sample_id] > 0
+        and relative_by_sample[sample_id] > params.feature_presence_relative_area_fraction
+        for sample_id in sample_ids
+    }
+    presence_count = sum(presence_by_sample.values())
+    detection_count = sum(bool(detected_by_sample.get(sample_id)) for sample_id in sample_ids)
+    detected_present_count = sum(
+        presence_by_sample[sample_id] and bool(detected_by_sample.get(sample_id))
+        for sample_id in sample_ids
+    )
+    if presence_count > 0 and detected_present_count == presence_count:
+        quantitation_confidence = "high"
+        ranking_confidence_weight = 1.0
+    elif detected_present_count > 0:
+        quantitation_confidence = "partial_detection"
+        ranking_confidence_weight = params.feature_partial_detection_rank_weight
+    else:
+        quantitation_confidence = "low"
+        ranking_confidence_weight = 0.0
+    all_positive = all(value > 0 for value in values.values()) if values else False
+    min_value = min(values.values(), default=0.0)
+    raw_fold = (max_value / min_value) if all_positive and min_value > 0 else None
+    fold = (
+        min(raw_fold, max(float(params.max_reported_fold_change), 1.0))
+        if raw_fold is not None
+        else None
+    )
+    similarity = min_value / max_value if max_value > 0 else 0.0
+    difference = 1.0 - similarity
+    cv = 0.0
+    if all_positive and len(values) > 1:
+        mean_value = statistics.mean(values.values())
+        cv = statistics.pstdev(values.values()) / mean_value if mean_value > 0 else 0.0
+
+    ordered = sorted(values, key=values.get)
+    strongest_sample = ordered[-1] if ordered and max_value > 0 else None
+    strongest_detected = bool(strongest_sample and detected_by_sample.get(strongest_sample))
+    if presence_count == 0 or max_value <= 0 or quantitation_confidence == "low":
+        difference_type = "low_confidence"
+        difference = 0.0
+    elif presence_count < len(sample_ids):
+        difference_type = "presence_absence" if strongest_detected else "low_confidence"
+        if difference_type == "low_confidence":
+            difference = 0.0
+    else:
+        if fold is not None and fold >= params.feature_strong_fold_change_threshold:
+            difference_type = "area_changed"
+        elif fold is not None and fold >= params.feature_common_fold_change_threshold:
+            difference_type = "moderate_difference"
+        else:
+            difference_type = "common_feature"
+
+    return {
+        "cv": cv,
+        "max_fold_change": fold,
+        "raw_max_fold_change": raw_fold,
+        "similarity_score": similarity,
+        "difference_score": difference,
+        "difference_type": difference_type,
+        "presence_by_sample": presence_by_sample,
+        "relative_area_by_sample": relative_by_sample,
+        "presence_count": presence_count,
+        "detection_count": detection_count,
+        "quantitation_confidence": quantitation_confidence,
+        "ranking_confidence_weight": ranking_confidence_weight,
+        "higher_abundance_sample": ordered[-1] if ordered and max_value > 0 else None,
+        "lower_abundance_sample": ordered[0] if ordered and max_value > 0 else None,
+    }
+
+
 def reduce_mz_bins(
     bins: list[float],
     raw_matrix: dict[str, list[float]],
@@ -772,7 +1161,8 @@ def reduce_mz_bins(
         if max_total <= 0 or total >= max_total * params.min_relative_intensity
     ]
     keep.sort(key=lambda index: totals[index], reverse=True)
-    keep = keep[: params.top_n_mz]
+    if params.top_n_mz > 0:
+        keep = keep[: params.top_n_mz]
     keep.sort()
     return [bins[index] for index in keep], {
         sample_id: [values[index] for index in keep]
@@ -863,7 +1253,7 @@ def find_top_changed_mz(
     if not bins or not raw_matrix:
         return []
     normalized = {
-        sample_id: normalize_spectrum_vector(vector)
+        sample_id: normalize_spectrum_vector(vector, method="local_tic", transform="none")
         for sample_id, vector in raw_matrix.items()
     }
     changes: list[dict[str, object]] = []
@@ -872,46 +1262,53 @@ def find_top_changed_mz(
         raw_by_sample = {sample: raw_matrix[sample][index] for sample in sample_ids}
         norm_by_sample = {sample: normalized[sample][index] for sample in sample_ids}
         raw_values = list(raw_by_sample.values())
-        norm_values = list(norm_by_sample.values())
         positive = [value for value in raw_values if value > 0]
         if not positive:
             continue
-        mean_intensity = statistics.mean(norm_values)
-        cv = statistics.pstdev(norm_values) / mean_intensity if mean_intensity > 0 else 0.0
-        presence_count = len(positive)
+        metrics = abundance_profile_metrics(
+            norm_by_sample,
+            {sample_id: raw_by_sample[sample_id] > 0 for sample_id in sample_ids},
+            params,
+        )
+        mean_intensity = statistics.mean(norm_by_sample.values())
+        presence_count = int(metrics["presence_count"])
         presence_bonus = 0.5 if 0 < presence_count < len(sample_ids) else 0.0
-        fold = (max(norm_values) + 1e-12) / (min([value for value in norm_values if value > 0] or [1e-12]) + 1e-12)
-        if presence_count < len(sample_ids):
-            diff_type = "new_mz_signal" if presence_count <= len(sample_ids) / 2 else "missing_mz_signal"
-        elif cv > 0.25:
-            diff_type = "common_but_changed"
-        else:
-            diff_type = "unstable_low_confidence"
-        ranking_score = (cv / (1 + cv)) * math.log1p(mean_intensity) + presence_bonus
+        ranking_score = (
+            float(metrics["difference_score"]) * math.log1p(mean_intensity) + presence_bonus
+        ) * float(metrics["ranking_confidence_weight"])
         changes.append(
             {
                 "mz": mz,
                 "raw_intensity_by_sample": raw_by_sample,
                 "normalized_intensity_by_sample": norm_by_sample,
-                "presence_by_sample": {sample: raw_by_sample[sample] > 0 for sample in sample_ids},
+                "presence_by_sample": metrics["presence_by_sample"],
                 "presence_count": presence_count,
                 "mean_intensity": mean_intensity,
-                "cv": cv,
-                "max_fold_change": fold,
-                "difference_type": diff_type,
+                "cv": metrics["cv"],
+                "max_fold_change": metrics["max_fold_change"],
+                "raw_max_fold_change": metrics["raw_max_fold_change"],
+                "similarity_score": metrics["similarity_score"],
+                "difference_score": metrics["difference_score"],
+                "difference_type": metrics["difference_type"],
                 "contribution_to_spectrum_difference": ranking_score,
                 "ranking_score": ranking_score,
             }
         )
     changes.sort(key=lambda item: float(item["ranking_score"]), reverse=True)
     selected: list[dict[str, object]] = []
-    min_gap = max(params.min_changed_mz_gap_da, params.mz_tolerance_da * 2.0)
     for change in changes:
         mz = float(change["mz"])
-        if any(abs(mz - float(item["mz"])) < min_gap for item in selected):
+        if any(
+            abs(mz - float(item["mz"]))
+            < max(
+                params.min_changed_mz_gap_da,
+                2.0 * centroid_mz_tolerance((mz + float(item["mz"])) * 0.5, params),
+            )
+            for item in selected
+        ):
             continue
         selected.append(change)
-        if len(selected) >= params.top_n_changed_mz:
+        if params.top_n_changed_mz > 0 and len(selected) >= params.top_n_changed_mz:
             break
     return selected
 
@@ -928,19 +1325,38 @@ def extract_xic_points_for_peak(
     start = float(tic_peak["rt_start"]) - margin
     end = float(tic_peak["rt_end"]) + margin
     tolerance = mz_tolerance(target_mz, params)
+    target_centroid_tolerance = centroid_mz_tolerance(target_mz, params)
     points: list[tuple[float, float, float]] = []
     for scan in scans:
         aligned_rt = scan.rt + rt_shift + local_shift
         if aligned_rt < start or aligned_rt > end:
             continue
-        total = 0.0
-        mz_weighted = 0.0
-        for mz, intensity in zip(scan.mz_array, scan.intensity_array):
-            if abs(float(mz) - target_mz) <= tolerance:
-                value = float(intensity)
-                total += value
-                mz_weighted += float(mz) * value
-        observed_mz = mz_weighted / total if total > 0 else target_mz
+        local_points = [
+            (float(mz), float(intensity))
+            for mz, intensity in zip(scan.mz_array, scan.intensity_array)
+            if float(intensity) > 0.0 and abs(float(mz) - target_mz) <= tolerance
+        ]
+        if local_points:
+            anchor_mz, _ = min(local_points, key=lambda item: abs(item[0] - target_mz))
+            # The Da window is only a search window. A neighboring centroid
+            # must never stand in for a missing target ion; accept the anchor
+            # only when it is the same physical peak within the cross-sample
+            # ppm tolerance.
+            if abs(anchor_mz - target_mz) <= target_centroid_tolerance:
+                anchor_tolerance = centroid_mz_tolerance(anchor_mz, params)
+                centroid_points = [
+                    (mz, intensity)
+                    for mz, intensity in local_points
+                    if abs(mz - anchor_mz) <= anchor_tolerance
+                ]
+                total = sum(intensity for _, intensity in centroid_points)
+                observed_mz = weighted_mz(centroid_points)
+            else:
+                total = 0.0
+                observed_mz = target_mz
+        else:
+            total = 0.0
+            observed_mz = target_mz
         points.append((aligned_rt, total, observed_mz))
     points.sort(key=lambda item: item[0])
     return points
@@ -963,6 +1379,8 @@ def detect_xic_lcms_feature(
             "parent_tic_peak_id": tic_peak_id,
             "mz": target_mz,
             "observed_mz": target_mz,
+            "true_peak_mz": target_mz,
+            "quantitation_mz": target_mz,
             "rt_start": None,
             "rt_apex": None,
             "rt_end": None,
@@ -979,8 +1397,8 @@ def detect_xic_lcms_feature(
     apex_index = intensity.index(max_height) if max_height > 0 else 0
     low_values = [value for value in intensity if value <= quantile(intensity, 0.4)]
     noise = max(statistics.median(low_values) if low_values else 0.0, quantile(intensity, 0.1), 1e-9)
-    min_detect_height = max(noise * 3.0, max_height * params.feature_min_height_fraction)
-    is_detected = max_height >= min_detect_height and not force_gap_fill
+    min_detect_height = noise * params.min_snr
+    is_detected = max_height > 0 and max_height >= min_detect_height and not force_gap_fill
     boundary_level = max(noise, max_height * (params.feature_gap_fill_height_fraction if not is_detected else params.feature_min_height_fraction))
     left = apex_index
     while left > 0 and intensity[left] > boundary_level:
@@ -1003,8 +1421,12 @@ def detect_xic_lcms_feature(
         "raw_file_id": raw_file_id,
         "parent_tic_peak_id": tic_peak_id,
         "mz": observed_mz,
+        "observed_mz": observed_mz,
+        "true_peak_mz": observed_mz,
+        "quantitation_mz": target_mz,
         "representative_mz": target_mz,
         "mz_tolerance": mz_tolerance(target_mz, params),
+        "cross_sample_mz_tolerance_ppm": params.mz_tolerance_ppm,
         "rt_start": rt[left],
         "rt_apex": rt[apex_index],
         "rt_end": rt[right],
@@ -1023,7 +1445,7 @@ def mzmine_join_match_score(
     representative_rt: float,
     params: PeakFirstParams,
 ) -> float:
-    mz_tol = max(mz_tolerance(representative_mz, params), 1e-9)
+    mz_tol = max(centroid_mz_tolerance(representative_mz, params), 1e-9)
     rt_tol = max(params.feature_rt_tolerance_min, 1e-9)
     mz_delta = abs(float(feature.get("mz") or representative_mz) - representative_mz)
     rt_value = feature.get("aligned_rt_apex")
@@ -1035,21 +1457,11 @@ def mzmine_join_match_score(
 
 
 def classify_feature_group_difference(
-    areas: dict[str, float],
-    matched_count: int,
-    sample_count: int,
-    similarity_score: float,
+    normalized_areas: dict[str, float],
+    detected_by_sample: dict[str, bool],
+    params: PeakFirstParams,
 ) -> str:
-    positive = [value for value in areas.values() if value > 0]
-    if matched_count == 0 or not positive:
-        return "low_confidence"
-    if matched_count < sample_count:
-        return "presence_absence"
-    if similarity_score < 0.60:
-        return "area_changed"
-    if similarity_score < 0.80:
-        return "moderate_difference"
-    return "common_feature"
+    return str(abundance_profile_metrics(normalized_areas, detected_by_sample, params)["difference_type"])
 
 
 def build_peak_feature_groups(
@@ -1060,6 +1472,8 @@ def build_peak_feature_groups(
     global_shifts: dict[str, float],
     local_shifts: dict[str, float],
     params: PeakFirstParams,
+    area_normalization_factors: dict[str, float] | None = None,
+    reference_sample: str | None = None,
 ) -> list[dict[str, object]]:
     groups: list[dict[str, object]] = []
     sample_ids = list(scans_by_sample)
@@ -1093,10 +1507,13 @@ def build_peak_feature_groups(
             if feature.get("match_status") == "matched" and feature.get("aligned_rt_apex") is not None
         ]
         if detected_features:
-            representative_mz = weighted_mz([
-                (float(feature.get("mz") or target_mz), float(feature.get("height") or 0.0))
-                for feature in detected_features
-            ])
+            # Keep the group coordinate on a physical centroid estimate from
+            # the strongest sample instead of averaging incompatible peaks.
+            representative_feature = max(
+                detected_features,
+                key=lambda feature: float(feature.get("height") or 0.0),
+            )
+            representative_mz = float(representative_feature.get("mz") or target_mz)
             representative_rt = statistics.median(float(feature["aligned_rt_apex"]) for feature in detected_features)
         else:
             representative_mz = target_mz
@@ -1105,36 +1522,79 @@ def build_peak_feature_groups(
             mz_delta = abs(float(feature.get("mz") or representative_mz) - representative_mz)
             rt_value = feature.get("aligned_rt_apex")
             rt_delta = abs(float(rt_value) - representative_rt) if rt_value is not None else params.feature_drift_tolerance_min
-            rt_shift_only = mz_delta <= mz_tolerance(representative_mz, params) and rt_delta <= params.feature_drift_tolerance_min
+            centroid_matches = mz_delta <= centroid_mz_tolerance(representative_mz, params)
+            rt_shift_only = centroid_matches and rt_delta <= params.feature_drift_tolerance_min
             if rt_shift_only:
                 feature["rt_shift_corrected_match"] = True
                 feature["feature_rt_delta"] = rt_delta
-            if match_scores[sample_id] < 0.30 and feature.get("match_status") == "matched" and not rt_shift_only:
+            if (
+                feature.get("match_status") == "matched"
+                and (
+                    not centroid_matches
+                    or (match_scores[sample_id] < 0.30 and not rt_shift_only)
+                )
+            ):
                 feature["match_status"] = "low_score"
+                feature["unmatched_candidate_area"] = float(feature.get("area") or 0.0)
+                feature["unmatched_candidate_height"] = float(feature.get("height") or 0.0)
+                feature["area"] = 0.0
+                feature["height"] = 0.0
         areas = {sample_id: float(feature.get("area") or 0.0) for sample_id, feature in features.items()}
+        factors = area_normalization_factors or {}
+        normalized_areas = {
+            sample_id: area / max(float(factors.get(sample_id) or 1.0), 1e-12)
+            for sample_id, area in areas.items()
+        }
         heights = {sample_id: float(feature.get("height") or 0.0) for sample_id, feature in features.items()}
         max_area = max(areas.values(), default=0.0)
-        normalized = normalize_spectrum_vector([areas[sample_id] for sample_id in sample_ids], method="local_tic", transform="log1p")
-        mean_norm = statistics.mean(normalized) if normalized else 0.0
-        cv = statistics.pstdev(normalized) / mean_norm if mean_norm > 0 and len(normalized) > 1 else 0.0
-        similarity = 1.0 / (1.0 + cv)
-        difference = 1.0 - similarity
-        matched_count = sum(1 for feature in features.values() if feature.get("match_status") == "matched")
-        positive_norm = [value for value in normalized if value > 0]
-        fold = (max(normalized) + 1e-12) / (min(positive_norm or [1e-12]) + 1e-12) if normalized else 1.0
-        difference_type = classify_feature_group_difference(areas, matched_count, len(sample_ids), similarity)
+        detected_by_sample = {
+            sample_id: feature.get("match_status") == "matched"
+            for sample_id, feature in features.items()
+        }
+        metrics = abundance_profile_metrics(normalized_areas, detected_by_sample, params)
+        for sample_id, feature in features.items():
+            is_present = bool(dict(metrics["presence_by_sample"])[sample_id])
+            if is_present and detected_by_sample[sample_id]:
+                feature["quantitation_status"] = "present"
+            elif is_present:
+                feature["quantitation_status"] = "quantified_below_detection_threshold"
+            else:
+                feature["quantitation_status"] = "below_relative_area_threshold"
+            feature["normalized_area"] = normalized_areas[sample_id]
+            feature["relative_area"] = dict(metrics["relative_area_by_sample"])[sample_id]
+        similarity = float(metrics["similarity_score"])
+        difference = float(metrics["difference_score"])
+        matched_count = int(metrics["presence_count"])
+        detected_count = int(metrics["detection_count"])
+        ranking_confidence_weight = float(metrics["ranking_confidence_weight"])
+        fold = metrics["max_fold_change"]
+        difference_type = str(metrics["difference_type"])
+        reference_fold_change_by_sample: dict[str, float | None] = {}
+        if reference_sample in normalized_areas:
+            reference_area = normalized_areas[str(reference_sample)]
+            reference_fold_change_by_sample = {
+                sample_id: (value / reference_area if reference_area > 0 else None)
+                for sample_id, value in normalized_areas.items()
+            }
         abundance_score = math.log1p(max_area)
-        abundance_weighted_score = difference * (1.0 + params.feature_abundance_weight * abundance_score)
+        abundance_weighted_score = difference * ranking_confidence_weight * (1.0 + params.feature_abundance_weight * abundance_score)
         groups.append(
             {
                 "feature_group_id": f"{tic_peak_id}_FG_{rank:04d}",
                 "parent_tic_peak_id": tic_peak_id,
                 "representative_mz": representative_mz,
+                "true_peak_mz": representative_mz,
+                "quantitation_mz": target_mz,
+                "envelope_representative_mz": representative_mz,
                 "representative_rt": representative_rt,
                 "sample_count": matched_count,
                 "missing_sample_count": len(sample_ids) - matched_count,
-                "cv": cv,
+                "detection_count": detected_count,
+                "quantitation_confidence": metrics["quantitation_confidence"],
+                "ranking_confidence_weight": ranking_confidence_weight,
+                "cv": metrics["cv"],
                 "max_fold_change": fold,
+                "raw_max_fold_change": metrics["raw_max_fold_change"],
                 "max_area": max_area,
                 "abundance_score": abundance_score,
                 "abundance_weighted_score": abundance_weighted_score,
@@ -1143,6 +1603,12 @@ def build_peak_feature_groups(
                 "difference_type": difference_type,
                 "match_score_by_sample": match_scores,
                 "area_by_sample": areas,
+                "normalized_area_by_sample": normalized_areas,
+                "presence_by_sample": metrics["presence_by_sample"],
+                "relative_area_by_sample": metrics["relative_area_by_sample"],
+                "reference_fold_change_by_sample": reference_fold_change_by_sample,
+                "higher_abundance_sample": metrics["higher_abundance_sample"],
+                "lower_abundance_sample": metrics["lower_abundance_sample"],
                 "height_by_sample": heights,
                 "features_by_sample": features,
                 "rt_correction_by_sample": {
@@ -1169,31 +1635,40 @@ def feature_groups_to_top_changed_mz(groups: list[dict[str, object]], params: Pe
         rows.append(
             {
                 "mz": group["representative_mz"],
+                "true_peak_mz": group.get("true_peak_mz", group["representative_mz"]),
+                "quantitation_mz": group.get("quantitation_mz", group["representative_mz"]),
+                "envelope_representative_mz": group.get(
+                    "envelope_representative_mz",
+                    group["representative_mz"],
+                ),
                 "feature_group_id": group["feature_group_id"],
                 "representative_rt": group["representative_rt"],
                 "raw_intensity_by_sample": group["area_by_sample"],
-                "normalized_intensity_by_sample": group["area_by_sample"],
-                "presence_by_sample": {
-                    sample_id: float(area) > 0 and not group["features_by_sample"][sample_id].get("gap_filled")
-                    for sample_id, area in group["area_by_sample"].items()
-                },
+                "normalized_intensity_by_sample": group["normalized_area_by_sample"],
+                "presence_by_sample": group["presence_by_sample"],
                 "presence_count": group["sample_count"],
-                "mean_intensity": statistics.mean(list(group["area_by_sample"].values())) if group["area_by_sample"] else 0.0,
+                "mean_intensity": statistics.mean(list(group["normalized_area_by_sample"].values())) if group["normalized_area_by_sample"] else 0.0,
                 "cv": group["cv"],
                 "max_fold_change": group["max_fold_change"],
+                "raw_max_fold_change": group.get("raw_max_fold_change"),
+                "similarity_score": group["similarity_score"],
+                "quantitation_confidence": group["quantitation_confidence"],
+                "ranking_confidence_weight": group["ranking_confidence_weight"],
                 "difference_type": group["difference_type"],
                 "contribution_to_spectrum_difference": group["difference_score"],
                 "ranking_score": group.get("abundance_weighted_score", group["difference_score"]),
                 "match_score_by_sample": group["match_score_by_sample"],
             }
         )
-    return rows[: params.top_n_changed_mz]
+    if params.top_n_changed_mz > 0:
+        return rows[: params.top_n_changed_mz]
+    return rows
 
 
 def global_feature_groups_from_peaks(
     peak_results: list[dict[str, object]],
     params: PeakFirstParams,
-    limit: int = 500,
+    limit: int | None = None,
 ) -> list[dict[str, object]]:
     raw_rows: list[dict[str, object]] = []
     max_abundance = 0.0
@@ -1203,11 +1678,15 @@ def global_feature_groups_from_peaks(
     for peak in peak_results:
         for group in peak.get("feature_groups") or []:
             abundance_norm = (float(group.get("abundance_score") or 0.0) / max_abundance) if max_abundance > 0 else 0.0
-            ranking = float(group.get("difference_score") or 0.0) * (1.0 + params.feature_abundance_weight * abundance_norm)
+            ranking_confidence_weight = float(group.get("ranking_confidence_weight", 1.0))
+            ranking = float(group.get("difference_score") or 0.0) * ranking_confidence_weight * (1.0 + params.feature_abundance_weight * abundance_norm)
             row = {
                 "feature_group_id": group.get("feature_group_id"),
                 "parent_tic_peak_id": group.get("parent_tic_peak_id"),
                 "representative_mz": group.get("representative_mz"),
+                "true_peak_mz": group.get("true_peak_mz", group.get("representative_mz")),
+                "quantitation_mz": group.get("quantitation_mz", group.get("representative_mz")),
+                "envelope_representative_mz": group.get("envelope_representative_mz", group.get("representative_mz")),
                 "representative_rt": group.get("representative_rt"),
                 "similarity_score": group.get("similarity_score"),
                 "difference_score": group.get("difference_score"),
@@ -1215,10 +1694,20 @@ def global_feature_groups_from_peaks(
                 "abundance_norm": abundance_norm,
                 "max_area": group.get("max_area"),
                 "max_fold_change": group.get("max_fold_change"),
+                "raw_max_fold_change": group.get("raw_max_fold_change"),
                 "difference_type": group.get("difference_type"),
                 "sample_count": group.get("sample_count"),
                 "missing_sample_count": group.get("missing_sample_count"),
                 "area_by_sample": group.get("area_by_sample"),
+                "normalized_area_by_sample": group.get("normalized_area_by_sample"),
+                "presence_by_sample": group.get("presence_by_sample"),
+                "relative_area_by_sample": group.get("relative_area_by_sample"),
+                "reference_fold_change_by_sample": group.get("reference_fold_change_by_sample"),
+                "detection_count": group.get("detection_count"),
+                "quantitation_confidence": group.get("quantitation_confidence"),
+                "ranking_confidence_weight": ranking_confidence_weight,
+                "higher_abundance_sample": group.get("higher_abundance_sample"),
+                "lower_abundance_sample": group.get("lower_abundance_sample"),
                 "match_score_by_sample": group.get("match_score_by_sample"),
                 "rt_correction_by_sample": group.get("rt_correction_by_sample"),
                 "source_feature_group_ids": [group.get("feature_group_id")],
@@ -1237,7 +1726,7 @@ def global_feature_groups_from_peaks(
     for row in raw_rows:
         mz = float(row.get("representative_mz") or 0.0)
         rt = float(row.get("representative_rt") or 0.0)
-        mz_tol = max(mz_tolerance(mz, params) * params.global_feature_mz_merge_tolerance_factor, 1e-9)
+        mz_tol = max(centroid_mz_tolerance(mz, params) * params.global_feature_mz_merge_tolerance_factor, 1e-9)
         rt_tol = max(params.global_feature_rt_merge_tolerance_min, params.feature_rt_tolerance_min)
         matched_cluster: dict[str, object] | None = None
         for cluster in clusters:
@@ -1266,11 +1755,6 @@ def global_feature_groups_from_peaks(
             matched_cluster["merged_feature_group_ids"] = keep_ids
             matched_cluster["merged_parent_tic_peak_ids"] = keep_parents
             matched_cluster["merged_feature_count"] = keep_count
-        else:
-            matched_cluster["ranking_score"] = max(float(matched_cluster.get("ranking_score") or 0.0), float(row.get("ranking_score") or 0.0))
-            matched_cluster["difference_score"] = max(float(matched_cluster.get("difference_score") or 0.0), float(row.get("difference_score") or 0.0))
-            matched_cluster["max_area"] = max(float(matched_cluster.get("max_area") or 0.0), float(row.get("max_area") or 0.0))
-            matched_cluster["max_fold_change"] = max(float(matched_cluster.get("max_fold_change") or 0.0), float(row.get("max_fold_change") or 0.0))
     rows = clusters
     rows.sort(
         key=lambda item: (
@@ -1280,7 +1764,9 @@ def global_feature_groups_from_peaks(
         ),
         reverse=True,
     )
-    return rows[:limit]
+    if limit is not None and limit > 0:
+        return rows[:limit]
+    return rows
 
 
 def classify_tic_peak_status(
@@ -1385,11 +1871,21 @@ def prepare_peak_first_payload(
             float(item.get("area") or 0.0),
         ),
         reverse=True,
-    )[: params.top_n_peaks]
+    )
+    if params.top_n_peaks > 0:
+        confirmed = confirmed[: params.top_n_peaks]
     peak_results: list[dict[str, object]] = []
     raw_file_by_sample = {raw_file.sample_id: raw_file for raw_file in raw_files}
+    area_normalization = tic_area_normalization(scans_by_sample)
+    area_normalization_factors = dict(area_normalization["factor_by_sample"])
     for peak in confirmed:
-        local = local_align_peak_by_apex(scans_by_sample, peak, shifts, params)
+        local = local_align_peak_by_apex(
+            scans_by_sample,
+            peak,
+            shifts,
+            params,
+            reference_sample=reference_sample,
+        )
         local_shifts = dict(local["local_peak_shift_by_sample"])
         cut_bounds = sample_specific_cut_bounds(peak, local_shifts, params)
         curves: dict[str, list[float]] = {}
@@ -1441,6 +1937,8 @@ def prepare_peak_first_payload(
             shifts,
             local_shifts,
             params,
+            area_normalization_factors=area_normalization_factors,
+            reference_sample=reference_sample,
         )
         top_changed = feature_groups_to_top_changed_mz(feature_groups, params) or spectrum_changed
         status = classify_tic_peak_status(chrom_scores, spectrum_scores, local)
@@ -1478,6 +1976,7 @@ def prepare_peak_first_payload(
         "sample_ids": list(scans_by_sample),
         "reference_sample": reference_sample,
         "alignment": alignment,
+        "feature_area_normalization": area_normalization,
         "params": params.__dict__,
         "chromatograms": {
             sample_id: {

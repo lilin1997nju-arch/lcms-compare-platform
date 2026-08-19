@@ -6,10 +6,12 @@ param(
     [string[]]$SampleContains = @(),
     [string[]]$IncludeSample = @(),
     [string]$ReferenceSample = "",
-    [int]$TopNPeaks = 60,
+    [int]$TopNPeaks = 80,
     [int]$TopNMz = 40,
     [int]$TopNChangedMz = 15,
-    [double]$MzToleranceDa = 0.5
+    [double]$MzToleranceDa = 0.16,
+    [double]$MzTolerancePpm = 10.0,
+    [double]$MinChangedMzGapDa = 0.02
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +32,8 @@ $argsList = @(
     "--max-spectrum-points-per-scan", 200,
     "--mz-tolerance-mode", "da",
     "--mz-tolerance-da", $MzToleranceDa,
+    "--mz-tolerance-ppm", $MzTolerancePpm,
+    "--min-changed-mz-gap-da", $MinChangedMzGapDa,
     "--max-peaks-per-scan", 500,
     "--spectrum-min-intensity", 0
 )

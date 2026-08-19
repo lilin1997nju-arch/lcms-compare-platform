@@ -14,7 +14,18 @@ from core.lcms_feature_matching import match_features  # noqa: E402
 from core.lcms_models import LCMSSpectrumScan  # noqa: E402
 from core.lcms_parser import mock_scans_from_raw  # noqa: E402
 from core.lcms_peak_detection import detect_xic_peaks  # noqa: E402
-from core.lcms_peak_first import PeakFirstParams, detect_tic_peaks, filter_tic_peaks, prepare_peak_first_payload  # noqa: E402
+from core.lcms_peak_first import (  # noqa: E402
+    PeakFirstParams,
+    abundance_profile_metrics,
+    build_consensus_mz_bins,
+    detect_xic_lcms_feature,
+    detect_tic_peaks,
+    extract_xic_points_for_peak,
+    filter_tic_peaks,
+    global_feature_groups_from_peaks,
+    local_align_peak_by_apex,
+    prepare_peak_first_payload,
+)
 from core.lcms_workbench import build_similarity_heatmaps, main_peak_alignment, sort_difference_regions, spectrum_payload  # noqa: E402
 from core.lcms_xic import extract_xic, screen_candidate_mz  # noqa: E402
 from run_xcalibur_workbench import (  # noqa: E402
@@ -23,6 +34,7 @@ from run_xcalibur_workbench import (  # noqa: E402
     feature_matrix_rows_from_regions,
     write_workbench_sqlite,
 )
+from run_peak_first_compare import PEAK_FIRST_TEMPLATE  # noqa: E402
 from serve_xcalibur_workbench import (  # noqa: E402
     build_feature_matrix,
     feature_matrix_csv,
@@ -30,6 +42,7 @@ from serve_xcalibur_workbench import (  # noqa: E402
     read_saved_features,
     replace_saved_features,
 )
+from serve_peak_first_compare import single_centroid_intensity  # noqa: E402
 
 
 def gaussian(x: float, center: float, width: float, height: float) -> float:
@@ -104,7 +117,83 @@ def shifted_single_feature_scans(sample_id: str, rt_center: float, mz: float) ->
     return scans
 
 
+def composite_peak_scans(
+    sample_id: str,
+    shift: float,
+    first_height: float,
+    second_height: float,
+) -> list[LCMSSpectrumScan]:
+    scans: list[LCMSSpectrumScan] = []
+    for index in range(401):
+        rt = 4.0 + index * 0.005
+        intensity = (
+            gaussian(rt, 4.80 + shift, 0.07, first_height)
+            + gaussian(rt, 5.15 + shift, 0.09, second_height)
+            + 5.0
+        )
+        scans.append(
+            LCMSSpectrumScan(
+                scan_id=f"{sample_id}_{index}",
+                raw_file_id=f"{sample_id}.raw",
+                sample_id=sample_id,
+                rt=rt,
+                ms_level=1,
+                mz_array=[500.0],
+                intensity_array=[intensity],
+                tic=intensity,
+                base_peak_mz=500.0,
+                base_peak_intensity=intensity,
+            )
+        )
+    return scans
+
+
 class LCMSMvpTests(unittest.TestCase):
+    def test_peak_first_template_marks_selected_feature_rt_and_uses_one_tic_band(self) -> None:
+        self.assertIn("function drawSelectedFeatureRt", PEAK_FIRST_TEMPLATE)
+        self.assertIn("Purple dashed line marks selected Feature RT", PEAK_FIRST_TEMPLATE)
+        self.assertIn('ctx.fillStyle="rgba(59,130,246,.11)"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("data-saved-feature", PEAK_FIRST_TEMPLATE)
+        self.assertIn("const MAX_FEATURE_FOLD = 1000", PEAK_FIRST_TEMPLATE)
+        self.assertIn("Math.log(MAX_FEATURE_FOLD)", PEAK_FIRST_TEMPLATE)
+        self.assertIn("capped |ln(test/reference)|", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function featureMapPairAbundance", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function featureMapAbundanceScale", PEAK_FIRST_TEMPLATE)
+        self.assertIn("const radius=featureMapHalfSide(item,abundanceScale)", PEAK_FIRST_TEMPLATE)
+        self.assertIn("square area uses the higher normalized abundance in the selected pair on a robust ln scale", PEAK_FIRST_TEMPLATE)
+        self.assertNotIn("abundanceNorm*4+Math.sqrt(rankNorm)*3+foldNorm*5", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function logFoldTicks", PEAK_FIRST_TEMPLATE)
+        self.assertIn("[1,10,100,1000]", PEAK_FIRST_TEMPLATE)
+        self.assertIn("requestedComparison", PEAK_FIRST_TEMPLATE)
+        self.assertNotIn("msmsReportLink", PEAK_FIRST_TEMPLATE)
+        self.assertNotIn('href="/lcms_msms_report.html"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("selectedFeatureGroupId", PEAK_FIRST_TEMPLATE)
+        self.assertIn("componentContainsFeature", PEAK_FIRST_TEMPLATE)
+        self.assertIn('data-selection-target="${parentSelected?', PEAK_FIRST_TEMPLATE)
+        self.assertIn("scrollGlobalSelectionIntoView", PEAK_FIRST_TEMPLATE)
+        self.assertIn("container.scrollTop", PEAK_FIRST_TEMPLATE)
+        self.assertIn("feature-analysis-grid", PEAK_FIRST_TEMPLATE)
+        self.assertIn('id="featureMs2Canvas"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("function ensureMsmsData", PEAK_FIRST_TEMPLATE)
+        self.assertIn('apiUrl("/api/msms")', PEAK_FIRST_TEMPLATE)
+        self.assertIn("function selectedMs2Evidence", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function drawFeatureMs2", PEAK_FIRST_TEMPLATE)
+        self.assertIn('queryParams.get("feature_group_id")', PEAK_FIRST_TEMPLATE)
+        self.assertIn("b ions", PEAK_FIRST_TEMPLATE)
+        self.assertIn("y ions", PEAK_FIRST_TEMPLATE)
+        self.assertIn("feature_group_id", PEAK_FIRST_TEMPLATE)
+        self.assertIn('id="globalSequenceTracks"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("function globalSequenceLocations", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function preferredStructureChains", PEAK_FIRST_TEMPLATE)
+        self.assertIn("PROJECT_STRUCTURE_DEFAULTS", PEAK_FIRST_TEMPLATE)
+        self.assertIn('id="saveStructureFile"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("/api/task-reference/upload", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function loadUploadedStructure(file,save=true)", PEAK_FIRST_TEMPLATE)
+        self.assertIn('pdbId:"3V4P"', PEAK_FIRST_TEMPLATE)
+        self.assertIn('pdbId:"5I1C"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("同源模板，非药物精确结构", PEAK_FIRST_TEMPLATE)
+        self.assertNotIn("colored bands are sample-specific integration windows", PEAK_FIRST_TEMPLATE)
+
     def test_mock_raw_parser_creates_scan_level_arrays(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "SCX-HPLC-MS_Intact_MabThera_Untreated_1.raw"
@@ -188,6 +277,81 @@ class LCMSMvpTests(unittest.TestCase):
         self.assertAlmostEqual(alignment["rt_shift_by_sample"]["sample"], -0.4, delta=0.11)
         self.assertGreaterEqual(alignment["alignment_landmark_count_by_sample"]["sample"], 2)
         self.assertEqual(alignment["main_peak_by_sample"]["sample"]["match_method"], "multi_peak_landmark_median")
+
+    def test_local_tic_alignment_uses_composite_profile_and_keeps_reference_fixed(self) -> None:
+        scans_by_sample = {
+            "reference": composite_peak_scans("reference", 0.0, 1100.0, 900.0),
+            # The second shoulder is now the highest point. Highest-point
+            # alignment would pair it with the reference's first subpeak.
+            "sample": composite_peak_scans("sample", 0.12, 900.0, 1050.0),
+        }
+        tic_peak = {
+            "tic_peak_id": "TICP_TEST",
+            "rt_start": 4.55,
+            "rt_apex": 4.80,
+            "rt_end": 5.45,
+            "width": 0.90,
+        }
+        local = local_align_peak_by_apex(
+            scans_by_sample,
+            tic_peak,
+            shifts={"reference": 0.0, "sample": 0.0},
+            params=PeakFirstParams(max_local_shift_cap_min=0.3, max_local_shift_fraction=0.3),
+            reference_sample="reference",
+        )
+
+        self.assertEqual(local["alignment_method"], "reference_profile_cross_correlation")
+        self.assertEqual(local["local_peak_shift_by_sample"]["reference"], 0.0)
+        self.assertAlmostEqual(local["local_peak_shift_by_sample"]["sample"], -0.12, delta=0.015)
+        self.assertGreater(
+            local["profile_score_by_sample"]["sample"],
+            local["profile_score_before_by_sample"]["sample"] + 0.05,
+        )
+        self.assertFalse(local["local_shift_rejected_by_sample"]["sample"])
+
+    def test_local_tic_alignment_rejects_flat_window_with_boundary_peak(self) -> None:
+        scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
+        for sample_id, center in (("reference", 5.42), ("sample", 5.34)):
+            scans: list[LCMSSpectrumScan] = []
+            for index in range(401):
+                rt = 4.0 + index * 0.005
+                intensity = gaussian(rt, center, 0.07, 1000.0) + 5.0
+                scans.append(
+                    LCMSSpectrumScan(
+                        scan_id=f"{sample_id}_{index}",
+                        raw_file_id=f"{sample_id}.raw",
+                        sample_id=sample_id,
+                        rt=rt,
+                        ms_level=1,
+                        mz_array=[500.0],
+                        intensity_array=[intensity],
+                        tic=intensity,
+                        base_peak_mz=500.0,
+                        base_peak_intensity=intensity,
+                    )
+                )
+            scans_by_sample[sample_id] = scans
+        local = local_align_peak_by_apex(
+            scans_by_sample,
+            {
+                "tic_peak_id": "TICP_FLAT",
+                "rt_start": 4.60,
+                "rt_apex": 5.10,
+                "rt_end": 5.20,
+                "width": 0.60,
+            },
+            shifts={"reference": 0.0, "sample": 0.0},
+            params=PeakFirstParams(max_local_shift_cap_min=0.25, max_local_shift_fraction=0.4),
+            reference_sample="reference",
+        )
+
+        self.assertFalse(local["local_alignment_quality_gate_passed"])
+        self.assertEqual(local["local_peak_shift_by_sample"]["sample"], 0.0)
+        self.assertTrue(local["local_shift_rejected_by_sample"]["sample"])
+        self.assertIn(
+            "apex_at_window_edge",
+            local["peak_profile_quality_by_sample"]["reference"]["reason"],
+        )
 
     def test_heatmap_normalization_reduces_scale_bias(self) -> None:
         scans_by_sample = {
@@ -355,6 +519,185 @@ class LCMSMvpTests(unittest.TestCase):
         self.assertIn("peak_consistency_score", first_peak)
         self.assertTrue(first_peak["top_changed_mz"])
         self.assertIn("difference_type", first_peak["top_changed_mz"][0])
+        self.assertEqual(payload["feature_area_normalization"]["method"], "total_tic_area_to_median")
+
+    def test_peak_first_abundance_types_use_true_fold_change(self) -> None:
+        params = PeakFirstParams(
+            feature_presence_relative_area_fraction=0.02,
+            feature_common_fold_change_threshold=2.0,
+            feature_strong_fold_change_threshold=4.0,
+        )
+        detected = {"reference": True, "sample": True}
+
+        common = abundance_profile_metrics({"reference": 100.0, "sample": 199.0}, detected, params)
+        moderate = abundance_profile_metrics({"reference": 100.0, "sample": 200.0}, detected, params)
+        changed = abundance_profile_metrics({"reference": 100.0, "sample": 400.0}, detected, params)
+        absent = abundance_profile_metrics({"reference": 100.0, "sample": 2.0}, detected, params)
+
+        self.assertEqual(common["difference_type"], "common_feature")
+        self.assertAlmostEqual(common["max_fold_change"], 1.99)
+        self.assertEqual(moderate["difference_type"], "moderate_difference")
+        self.assertEqual(changed["difference_type"], "area_changed")
+        self.assertEqual(absent["difference_type"], "presence_absence")
+        self.assertFalse(absent["presence_by_sample"]["sample"])
+
+        extreme = abundance_profile_metrics(
+            {"reference": 1.0, "sample": 1_000_000.0},
+            detected,
+            params,
+        )
+        self.assertEqual(extreme["max_fold_change"], 1000.0)
+        self.assertEqual(extreme["raw_max_fold_change"], 1_000_000.0)
+
+        partial = abundance_profile_metrics(
+            {"reference": 100.0, "sample": 156.0},
+            {"reference": True, "sample": False},
+            params,
+        )
+        self.assertEqual(partial["difference_type"], "common_feature")
+        self.assertEqual(partial["presence_count"], 2)
+        self.assertEqual(partial["detection_count"], 1)
+        self.assertEqual(partial["quantitation_confidence"], "partial_detection")
+        self.assertEqual(partial["ranking_confidence_weight"], 0.35)
+        self.assertAlmostEqual(partial["similarity_score"], 100.0 / 156.0)
+
+        undetected = abundance_profile_metrics(
+            {"reference": 100.0, "sample": 156.0},
+            {"reference": False, "sample": False},
+            params,
+        )
+        self.assertEqual(undetected["difference_type"], "low_confidence")
+        self.assertEqual(undetected["ranking_confidence_weight"], 0.0)
+
+    def test_peak_first_xic_detection_uses_configured_snr(self) -> None:
+        xic = [(index * 0.1, value, 500.0) for index, value in enumerate([1.0, 1.0, 4.0, 1.0, 1.0])]
+        strict = detect_xic_lcms_feature(
+            xic,
+            target_mz=500.0,
+            sample_id="sample",
+            raw_file_id="sample.mzML",
+            tic_peak_id="TICP_0001",
+            params=PeakFirstParams(min_snr=5.0),
+        )
+        permissive = detect_xic_lcms_feature(
+            xic,
+            target_mz=500.0,
+            sample_id="sample",
+            raw_file_id="sample.mzML",
+            tic_peak_id="TICP_0001",
+            params=PeakFirstParams(min_snr=2.0),
+        )
+
+        self.assertEqual(strict["match_status"], "gap_filled")
+        self.assertEqual(permissive["match_status"], "matched")
+
+    def test_centroid_consensus_keeps_z3_isotopes_as_real_peaks(self) -> None:
+        params = PeakFirstParams(mz_tolerance_ppm=10.0, mz_tolerance_da=0.16)
+        spectra = [
+            [(627.6874, 100.0), (628.0218, 80.0), (628.3558, 60.0)],
+            [(627.6878, 90.0), (628.0221, 70.0), (628.3561, 50.0)],
+        ]
+
+        bins = build_consensus_mz_bins(spectra, params)
+
+        self.assertEqual(len(bins), 3)
+        self.assertAlmostEqual(bins[0], 627.68759, places=4)
+        self.assertAlmostEqual(bins[1] - bins[0], 1.00335483507 / 3, places=3)
+
+    def test_single_centroid_xic_does_not_average_neighbor_inside_da_window(self) -> None:
+        scan = LCMSSpectrumScan(
+            scan_id="scan=1",
+            raw_file_id="sample.mzML",
+            sample_id="sample",
+            rt=10.0,
+            ms_level=1,
+            mz_array=[500.0000, 500.1200],
+            intensity_array=[100.0, 900.0],
+            tic=1000.0,
+            base_peak_mz=500.12,
+            base_peak_intensity=900.0,
+        )
+        points = extract_xic_points_for_peak(
+            [scan],
+            {"rt_start": 9.9, "rt_end": 10.1},
+            target_mz=500.0,
+            rt_shift=0.0,
+            local_shift=0.0,
+            params=PeakFirstParams(mz_tolerance_ppm=10.0, mz_tolerance_da=0.16),
+        )
+
+        self.assertEqual(len(points), 1)
+        self.assertAlmostEqual(points[0][1], 100.0)
+        self.assertAlmostEqual(points[0][2], 500.0)
+
+    def test_single_centroid_xic_does_not_substitute_neighbor_when_target_is_missing(self) -> None:
+        scan = LCMSSpectrumScan(
+            scan_id="scan=1",
+            raw_file_id="sample.mzML",
+            sample_id="sample",
+            rt=10.0,
+            ms_level=1,
+            mz_array=[500.1200],
+            intensity_array=[900.0],
+            tic=900.0,
+            base_peak_mz=500.12,
+            base_peak_intensity=900.0,
+        )
+        points = extract_xic_points_for_peak(
+            [scan],
+            {"rt_start": 9.9, "rt_end": 10.1},
+            target_mz=500.0,
+            rt_shift=0.0,
+            local_shift=0.0,
+            params=PeakFirstParams(mz_tolerance_ppm=10.0, mz_tolerance_da=0.16),
+        )
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0][1], 0.0)
+        self.assertEqual(points[0][2], 500.0)
+
+    def test_browser_xic_does_not_plot_neighbor_as_target_signal(self) -> None:
+        params = {"mz_tolerance_ppm": 10.0, "mz_tolerance_da": 0.16, "mz_tolerance_mode": "da"}
+
+        exact = single_centroid_intensity([500.0, 500.12], [100.0, 900.0], 500.0, 0.16, params)
+        missing = single_centroid_intensity([500.12], [900.0], 500.0, 0.16, params)
+
+        self.assertEqual(exact, 100.0)
+        self.assertEqual(missing, 0.0)
+
+    def test_global_feature_merge_keeps_type_and_fold_from_same_row(self) -> None:
+        common = {
+            "feature_group_id": "FG_common",
+            "parent_tic_peak_id": "TICP_1",
+            "representative_mz": 500.0,
+            "representative_rt": 10.0,
+            "similarity_score": 0.8,
+            "difference_score": 0.2,
+            "abundance_weighted_score": 0.3,
+            "abundance_score": 10.0,
+            "max_area": 1000.0,
+            "max_fold_change": 1.25,
+            "difference_type": "common_feature",
+        }
+        moderate = {
+            **common,
+            "feature_group_id": "FG_moderate",
+            "parent_tic_peak_id": "TICP_2",
+            "representative_mz": 500.004,
+            "representative_rt": 10.2,
+            "abundance_weighted_score": 0.2,
+            "max_fold_change": 3.0,
+            "difference_type": "moderate_difference",
+        }
+
+        rows = global_feature_groups_from_peaks(
+            [{"feature_groups": [common]}, {"feature_groups": [moderate]}],
+            PeakFirstParams(mz_tolerance_ppm=10.0, mz_tolerance_da=0.16),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["difference_type"], "common_feature")
+        self.assertEqual(rows[0]["max_fold_change"], 1.25)
 
     def test_peak_first_splits_adjacent_tic_peaks_by_valley(self) -> None:
         curve = []

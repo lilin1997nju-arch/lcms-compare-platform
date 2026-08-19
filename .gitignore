@@ -32,3 +32,18 @@ lcms_realdata_platform/*.log
 # Keep directory placeholders
 !.gitkeep
 !**/.gitkeep
+
+# Local platform state, task results, logs, and generated reports
+lcms_department_platform/jobs/**
+lcms_department_platform/logs/**
+lcms_department_platform/state/**
+lcms_department_platform/data/**
+release/**
+
+# Local example datasets and downloaded structure cache
+data/mzML/**
+data/denosumab_mzML/**
+data/structures/pdb_cache/**
+
+# Local packaging/build scratch
+.pptx_build/**

@@ -320,7 +320,7 @@ def top_spectrum_points(
         for mz, intensity in zip(scan.mz_array, scan.intensity_array)
         if mz_min <= mz <= mz_max and intensity >= min_intensity
     ]
-    if len(pairs) > max_peaks:
+    if max_peaks > 0 and len(pairs) > max_peaks:
         pairs = sorted(pairs, key=lambda item: item[1], reverse=True)[:max_peaks]
     pairs.sort(key=lambda item: item[0])
     return [mz for mz, _ in pairs], [intensity for _, intensity in pairs]
