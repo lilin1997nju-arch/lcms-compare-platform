@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 import statistics
 from bisect import bisect_left, bisect_right
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from itertools import combinations
@@ -22,6 +24,106 @@ PROTON = 1.007276466621
 WATER = 18.010564684
 CARBAMIDOMETHYL = 57.021463735
 ISOTOPE_MASS_DIFF = 1.00335483507
+AVERAGINE_UNIT_MASS = 111.1254
+
+
+MODIFICATION_SITE_PATTERN = re.compile(r"^(?P<name>.+)@(?P<position>\d+)$")
+DISPLAY_MODIFICATION_SITE_PATTERN = re.compile(
+    r"^(?P<name>.+)@(?P<residue>[A-Z]?)(?P<position>\d+)$"
+)
+
+
+def modification_token_with_residue(token: str, sequence: str) -> str:
+    """Add the peptide residue letter to a localized modification label."""
+    text = str(token or "").strip()
+    match = MODIFICATION_SITE_PATTERN.match(text)
+    if not match:
+        return text
+    name = match.group("name").strip()
+    position = int(match.group("position"))
+    if name.lower().startswith(("n-terminal", "c-terminal")):
+        return f"{name}@{position}"
+    residue = sequence[position - 1] if 1 <= position <= len(sequence) else ""
+    if not residue or name.endswith(f"-{residue}"):
+        return f"{name}@{position}"
+    return f"{name}@{residue}{position}"
+
+
+def format_modification_alternatives(alternatives: list[str], sequence: str) -> str:
+    """Render isobaric localization alternatives without implying coexistence."""
+    clean = [str(item or "").strip() for item in alternatives if str(item or "").strip()]
+    if not clean:
+        return ""
+    raw_token_lists = [
+        [token.strip() for token in item.split(";") if token.strip()]
+        for item in clean
+    ]
+    if len(raw_token_lists) == 1:
+        return "；".join(raw_token_lists[0])
+    token_lists = [
+        [modification_token_with_residue(token, sequence) for token in item.split(";") if token.strip()]
+        for item in clean
+    ]
+
+    common = Counter(token_lists[0])
+    for tokens in token_lists[1:]:
+        common &= Counter(tokens)
+    common_tokens: list[str] = []
+    remaining_common = Counter(common)
+    for token in token_lists[0]:
+        if remaining_common[token] > 0:
+            common_tokens.append(token)
+            remaining_common[token] -= 1
+
+    residual_lists: list[list[str]] = []
+    for tokens in token_lists:
+        residual_common = Counter(common)
+        residual: list[str] = []
+        for token in tokens:
+            if residual_common[token] > 0:
+                residual_common[token] -= 1
+            else:
+                residual.append(token)
+        residual_lists.append(residual)
+
+    if all(len(tokens) == 1 for tokens in residual_lists):
+        parsed_sites = [DISPLAY_MODIFICATION_SITE_PATTERN.match(tokens[0]) for tokens in residual_lists]
+        if all(parsed_sites):
+            names = [match.group("name") for match in parsed_sites if match]
+            if len(set(names)) == 1:
+                site_labels = []
+                for match in parsed_sites:
+                    assert match is not None
+                    position = int(match.group("position"))
+                    residue = match.group("residue") or (
+                        sequence[position - 1] if 1 <= position <= len(sequence) else ""
+                    )
+                    site_labels.append(f"{residue}{position}" if residue else str(position))
+                site_labels = sorted(set(site_labels), key=lambda value: int(re.search(r"\d+", value).group()))
+                ambiguous = f"{names[0]}@{'/'.join(site_labels)}（位点未区分）"
+                return "；".join([*common_tokens, ambiguous])
+
+    option_labels = []
+    for index, tokens in enumerate(token_lists):
+        option_name = chr(ord("A") + index) if index < 26 else str(index + 1)
+        option_labels.append(f"方案{option_name}：{'；'.join(tokens)}")
+    return "｜".join(option_labels) + "（方案未区分）"
+AVERAGINE_COMPOSITION = {
+    "C": 4.9384,
+    "H": 7.7583,
+    "N": 1.3577,
+    "O": 1.4773,
+    "S": 0.0417,
+}
+# Nominal neutron shifts and natural abundances.  The truncated polynomial is
+# sufficient for scoring the first isotopes normally visible in peptide MS1.
+NATURAL_ISOTOPE_POLYNOMIALS = {
+    "C": ((0, 0.9893), (1, 0.0107)),
+    "H": ((0, 0.999885), (1, 0.000115)),
+    "N": ((0, 0.99636), (1, 0.00364)),
+    "O": ((0, 0.99757), (1, 0.00038), (2, 0.00205)),
+    "S": ((0, 0.9499), (1, 0.0075), (2, 0.0425), (4, 0.0001)),
+}
 AA_MASS = {
     "A": 71.037113805, "R": 156.10111105, "N": 114.04292747, "D": 115.026943065,
     "C": 103.009184505, "E": 129.042593135, "Q": 128.05857754, "G": 57.021463735,
@@ -42,6 +144,176 @@ COMMON_MODIFICATIONS = (
     ("G1F N-glycan", frozenset("N"), 1606.586694, "n_glycan_sequon"),
     ("G2F N-glycan", frozenset("N"), 1768.639517, "n_glycan_sequon"),
 )
+
+GLYCAN_RESIDUE_MASS = {
+    "Hex": 162.0528234315,
+    "HexNAc": 203.0793725330,
+    "Fuc": 146.0579088090,
+    "NeuAc": 291.0954165270,
+}
+
+
+def _glycan_composition_mass(composition: dict[str, int]) -> float:
+    return sum(
+        GLYCAN_RESIDUE_MASS[name] * max(0, int(count))
+        for name, count in composition.items()
+    )
+
+
+# A deliberately bounded panel for therapeutic-antibody peptide mapping.  It
+# is queried only for differential Features with a selected MS2 precursor and
+# glycan-diagnostic ions; this is not a dataset-wide glycoproteomics search.
+TARGETED_N_GLYCANS = tuple(
+    {
+        "name": name,
+        "composition": composition,
+        "mass": _glycan_composition_mass(composition),
+    }
+    for name, composition in (
+        ("G0 N-glycan", {"Hex": 3, "HexNAc": 4}),
+        ("G0F N-glycan", {"Hex": 3, "HexNAc": 4, "Fuc": 1}),
+        ("G1 N-glycan", {"Hex": 4, "HexNAc": 4}),
+        ("G1F N-glycan", {"Hex": 4, "HexNAc": 4, "Fuc": 1}),
+        ("G2 N-glycan", {"Hex": 5, "HexNAc": 4}),
+        ("G2F N-glycan", {"Hex": 5, "HexNAc": 4, "Fuc": 1}),
+        ("M5 N-glycan", {"Hex": 5, "HexNAc": 2}),
+        ("M6 N-glycan", {"Hex": 6, "HexNAc": 2}),
+        ("M7 N-glycan", {"Hex": 7, "HexNAc": 2}),
+        ("M8 N-glycan", {"Hex": 8, "HexNAc": 2}),
+        ("M9 N-glycan", {"Hex": 9, "HexNAc": 2}),
+        ("G1F+NeuAc1 N-glycan", {"Hex": 4, "HexNAc": 4, "Fuc": 1, "NeuAc": 1}),
+        ("G2F+NeuAc1 N-glycan", {"Hex": 5, "HexNAc": 4, "Fuc": 1, "NeuAc": 1}),
+        ("G2F+NeuAc2 N-glycan", {"Hex": 5, "HexNAc": 4, "Fuc": 1, "NeuAc": 2}),
+    )
+)
+
+
+def _convolve_isotope_polynomials(
+    first: tuple[float, ...],
+    second: tuple[float, ...],
+    isotope_count: int,
+) -> tuple[float, ...]:
+    output = [0.0] * isotope_count
+    for first_index, first_value in enumerate(first):
+        if first_value <= 0.0:
+            continue
+        for second_index, second_value in enumerate(second[: isotope_count - first_index]):
+            if second_value > 0.0:
+                output[first_index + second_index] += first_value * second_value
+    return tuple(output)
+
+
+def _isotope_polynomial_power(
+    base: tuple[float, ...],
+    exponent: int,
+    isotope_count: int,
+) -> tuple[float, ...]:
+    result = (1.0,) + (0.0,) * (isotope_count - 1)
+    factor = base
+    remaining = max(0, int(exponent))
+    while remaining:
+        if remaining & 1:
+            result = _convolve_isotope_polynomials(result, factor, isotope_count)
+        remaining >>= 1
+        if remaining:
+            factor = _convolve_isotope_polynomials(factor, factor, isotope_count)
+    return result
+
+
+@lru_cache(maxsize=4096)
+def _cached_averagine_isotope_distribution(
+    rounded_neutral_mass: int,
+    isotope_count: int,
+) -> tuple[float, ...]:
+    count = max(3, min(16, int(isotope_count)))
+    scale = max(1.0, float(rounded_neutral_mass)) / AVERAGINE_UNIT_MASS
+    distribution = (1.0,) + (0.0,) * (count - 1)
+    for element, average_count in AVERAGINE_COMPOSITION.items():
+        atom_count = max(0, int(round(average_count * scale)))
+        base = [0.0] * count
+        for shift, abundance in NATURAL_ISOTOPE_POLYNOMIALS[element]:
+            if shift < count:
+                base[shift] = abundance
+        element_distribution = _isotope_polynomial_power(tuple(base), atom_count, count)
+        distribution = _convolve_isotope_polynomials(distribution, element_distribution, count)
+    total = sum(distribution)
+    if total <= 0.0:
+        return (1.0,) + (0.0,) * (count - 1)
+    return tuple(value / total for value in distribution)
+
+
+def theoretical_averagine_isotope_distribution(
+    neutral_mass: float,
+    isotope_count: int = 10,
+) -> list[float]:
+    """Return a normalized nominal-isotope envelope for an average peptide."""
+    return list(_cached_averagine_isotope_distribution(int(round(max(1.0, neutral_mass))), isotope_count))
+
+
+def fit_theoretical_isotope_envelope(
+    observed_intensities: list[float],
+    neutral_mass_observed_first: float,
+    max_monoisotopic_offset: int = 4,
+) -> dict[str, object]:
+    """Fit an observed envelope to shifted averagine isotope distributions.
+
+    The shift is the number of theoretical isotopes preceding the first
+    observed peak.  This directly detects cases where M+1 or M+2 was picked as
+    the first observable isotope and supplies a confidence score for the full
+    relative-intensity pattern rather than isotope spacing alone.
+    """
+    observed = [max(0.0, float(value)) for value in observed_intensities]
+    observed_norm = math.sqrt(sum(value * value for value in observed))
+    if not observed or observed_norm <= 0.0:
+        return {
+            "monoisotopic_offset": 0,
+            "cosine_score": 0.0,
+            "explained_theoretical_fraction": 0.0,
+            "fit_score": 0.0,
+            "theoretical_intensity": [],
+        }
+    maximum_offset = max(0, min(6, int(max_monoisotopic_offset)))
+    isotope_count = min(16, len(observed) + maximum_offset + 4)
+    best: tuple[float, int, dict[str, object]] | None = None
+    for offset in range(maximum_offset + 1):
+        neutral_mass = max(
+            1.0,
+            float(neutral_mass_observed_first) - offset * ISOTOPE_MASS_DIFF,
+        )
+        theoretical = theoretical_averagine_isotope_distribution(neutral_mass, isotope_count)
+        expected = theoretical[offset: offset + len(observed)]
+        if len(expected) != len(observed):
+            continue
+        expected_norm = math.sqrt(sum(value * value for value in expected))
+        cosine = (
+            sum(first * second for first, second in zip(observed, expected))
+            / max(observed_norm * expected_norm, 1e-12)
+        )
+        explained_fraction = sum(expected) / max(sum(theoretical), 1e-12)
+        # Shape is the primary evidence for a missing M/M+1 peak.  Coverage is
+        # deliberately a weak term because the true monoisotopic peak may be
+        # below the detection threshold for larger peptides.
+        fit_score = max(0.0, min(1.0, cosine)) * (
+            0.96 + 0.04 * math.sqrt(max(0.0, min(1.0, explained_fraction)))
+        ) - 0.01 * offset
+        fit_score = max(0.0, min(1.0, fit_score))
+        result = {
+            "monoisotopic_offset": offset,
+            "cosine_score": max(0.0, min(1.0, cosine)),
+            "explained_theoretical_fraction": explained_fraction,
+            "fit_score": fit_score,
+            "theoretical_intensity": expected,
+        }
+        rank = (fit_score, -offset)
+        if best is None or rank > (best[0], best[1]):
+            best = (fit_score, -offset, result)
+    return best[2] if best is not None else {
+        "monoisotopic_offset": 0,
+        "cosine_score": 0.0,
+        "explained_theoretical_fraction": 0.0,
+        "fit_score": 0.0,
+        "theoretical_intensity": [],
+    }
 
 
 @dataclass(frozen=True)
@@ -459,7 +731,11 @@ def search_scans(
                 if best is None or float(row["score"]) > float(best["score"]):
                     best = row
         if best is not None:
-            if not best.get("is_decoy") and float(best["score"]) >= 40.0:
+            # Keep the observed spectrum for every target candidate that passes
+            # the search minimum.  Confidence is assigned later; discarding the
+            # peaks below the C-level score threshold made D-level sequence
+            # candidates look identified while leaving the report spectrum blank.
+            if not best.get("is_decoy"):
                 pairs = sorted(zip(scan.mz_array, scan.intensity_array), key=lambda pair: pair[0])
                 labels = {
                     int(match["observed_index"]): str(match["label"])
@@ -617,6 +893,11 @@ def annotate_feature_groups(
 
 
 def psm_confidence(psm: dict[str, object]) -> str:
+    open_confidence = str(psm.get("open_modification_confidence") or "")
+    if open_confidence == "B_open_modification_supported":
+        return "B_high_confidence_inferred"
+    if open_confidence == "C_open_mass_candidate":
+        return "C_tentative"
     if (
         float(psm.get("q_value", 1.0)) <= 0.01
         and float(psm.get("score") or 0.0) >= 60.0
@@ -691,6 +972,19 @@ def differential_annotations(psms: list[dict[str, object]]) -> list[dict[str, ob
                 f"单 Feature 开放质量搜索：{interpretation}；"
                 "未知 ΔMass 由 b/y 及扩展碎片支持，需结合标准品或进一步采集复核"
             )
+        elif link_type == "feature_targeted_glycopeptide_search":
+            interpretation = (
+                f"差异 Feature 定向糖肽搜索：{interpretation}；"
+                f"检测到 {int(best.get('glycan_diagnostic_ion_count') or 0)} 个糖链诊断离子、"
+                f"{int(best.get('glycan_core_y_ion_count') or 0)} 个核心 Y 离子及"
+                f"{int(best.get('matched_ion_count') or 0)} 个肽骨架位点证据；"
+                "糖型和位点仍建议结合标准品或正交糖分析复核"
+            )
+        elif link_type == "global_open_modification_search":
+            interpretation = (
+                f"全局开放修饰搜索：{interpretation}；该 ΔMass 经重复谱聚类、"
+                "目标-诱饵控制及限制性二次重搜支持，仍建议结合正交方法确认具体化学结构"
+            )
         if len(best_by_sample) == 1:
             interpretation += f"；仅 {next(iter(best_by_sample))} 获得合格 MS/MS"
         else:
@@ -702,8 +996,11 @@ def differential_annotations(psms: list[dict[str, object]]) -> list[dict[str, ob
             "component_charge_isotope_consensus_search",
             "component_mass_offset_sequence_tag_search",
             "feature_open_mass_search",
+            "feature_targeted_glycopeptide_search",
+            "global_open_modification_search",
         } and confidence.startswith("B_"):
-            confidence = "C_tentative"
+            if link_type != "global_open_modification_search":
+                confidence = "C_tentative"
         annotations.append({
             "feature_or_candidate_id": group_id,
             "candidate_id": candidate_id,
@@ -972,26 +1269,40 @@ def _infer_unidentified_ms1_groups(
                     sum(intensity for _, intensity in points),
                     1e-12,
                 )
+                observed_first_mass = (envelope[0][0] - PROTON) * charge
+                isotope_fit = fit_theoretical_isotope_envelope(
+                    [intensity for _, intensity in envelope],
+                    observed_first_mass,
+                )
+                monoisotopic_offset = int(isotope_fit["monoisotopic_offset"])
+                monoisotopic_mz = envelope[0][0] - monoisotopic_offset * spacing
                 charge_prior = 1.0 if charge in {2, 3} else (0.92 if charge == 4 else 0.78)
                 score = (
                     len(envelope)
                     + 0.45 * intensity_fraction
                     + 0.15 * charge_prior
+                    + 1.10 * float(isotope_fit["fit_score"])
                     - 0.50 * mean_error / max(tolerance, 1e-12)
                 )
-                mono_mz = envelope[0][0]
                 candidate = {
                     "charge": charge,
-                    "observed_first_isotope_mz": mono_mz,
+                    "observed_first_isotope_mz": envelope[0][0],
+                    "monoisotopic_mz": monoisotopic_mz,
+                    "monoisotopic_offset": monoisotopic_offset,
                     "target_isotope_index": min(
                         range(len(envelope)),
                         key=lambda index: abs(envelope[index][0] - target_mz),
                     ),
-                    "neutral_mass_observed_first": (mono_mz - PROTON) * charge,
+                    "neutral_mass_observed_first": observed_first_mass,
+                    "neutral_mass_monoisotopic": (monoisotopic_mz - PROTON) * charge,
                     "envelope_mz": [mz for mz, _ in envelope],
                     "envelope_intensity": [intensity for _, intensity in envelope],
                     "isotope_peak_count": len(envelope),
                     "mean_spacing_error_da": mean_error,
+                    "isotope_fit_score": isotope_fit["fit_score"],
+                    "isotope_fit_cosine": isotope_fit["cosine_score"],
+                    "isotope_fit_explained_fraction": isotope_fit["explained_theoretical_fraction"],
+                    "theoretical_isotope_intensity": isotope_fit["theoretical_intensity"],
                     "source_sample_id": sample_id,
                     "source_scan_id": apex_scan.get("scan_id"),
                     "source_rt": float(apex_scan.get("aligned_rt") or apex_scan.get("rt") or center_rt),
@@ -1039,9 +1350,16 @@ def _infer_unidentified_ms1_groups(
         if refined is not None:
             charge = int(refined["charge"])
             observed_mass = float(refined["neutral_mass_observed_first"])
+            best_offset = int(refined.get("monoisotopic_offset") or 0)
+            fit_score = float(refined.get("isotope_fit_score") or 0.0)
+            offsets = (
+                [best_offset]
+                if fit_score >= 0.72
+                else sorted(range(0, 5), key=lambda offset: (abs(offset - best_offset), offset))
+            )
             hypotheses[feature_id] = [
                 (charge, isotope_offset, observed_mass - isotope_offset * ISOTOPE_MASS_DIFF)
-                for isotope_offset in range(0, 5)
+                for isotope_offset in offsets
                 if 500.0 <= observed_mass - isotope_offset * ISOTOPE_MASS_DIFF <= 15_000.0
             ]
         else:
@@ -1391,13 +1709,21 @@ def _infer_unidentified_ms1_groups(
                 "component_confidence": "MS1_inferred",
                 "true_peak_mz": feature.get("true_peak_mz", feature.get("representative_mz")),
                 "component_observed_first_isotope_mz": envelope.get("observed_first_isotope_mz"),
+                "component_monoisotopic_mz": envelope.get("monoisotopic_mz"),
+                "component_monoisotopic_offset": envelope.get("monoisotopic_offset"),
                 "envelope_representative_mz": (
-                    envelope.get("observed_first_isotope_mz")
+                    envelope.get("monoisotopic_mz")
+                    or envelope.get("observed_first_isotope_mz")
                     or feature.get("envelope_representative_mz")
                     or feature.get("representative_mz")
                 ),
                 "component_isotope_peak_count": envelope.get("isotope_peak_count"),
                 "component_envelope_mz": envelope.get("envelope_mz") or [],
+                "component_envelope_intensity": envelope.get("envelope_intensity") or [],
+                "component_theoretical_isotope_intensity": envelope.get("theoretical_isotope_intensity") or [],
+                "component_isotope_fit_score": envelope.get("isotope_fit_score"),
+                "component_isotope_fit_cosine": envelope.get("isotope_fit_cosine"),
+                "component_isotope_fit_explained_fraction": envelope.get("isotope_fit_explained_fraction"),
             })
             members.append(member)
             inferred_feature_ids.add(feature_id)
@@ -1411,6 +1737,19 @@ def _infer_unidentified_ms1_groups(
         relation_types = sorted({str(edge["relation_type"]) for edge in cluster["edges"]})
         mean_shape = statistics.mean(float(edge.get("xic_shape_score") or 0.0) for edge in cluster["edges"])
         mean_score = statistics.mean(float(edge.get("inference_score") or 0.0) for edge in cluster["edges"])
+        isotope_fit_scores = [
+            float(member.get("component_isotope_fit_score") or 0.0)
+            for member in members
+            if member.get("component_isotope_fit_score") is not None
+        ]
+        mean_isotope_fit = statistics.mean(isotope_fit_scores) if isotope_fit_scores else None
+        component_mass_evidence = {
+            str(edge.get("mass_evidence") or "")
+            for edge in cluster["edges"]
+            if edge.get("mass_evidence")
+        }
+        if isotope_fit_scores:
+            component_mass_evidence.add("averagine_full_isotope_envelope")
         high_confidence = (
             mean_shape >= 0.90
             and mean_score >= 0.86
@@ -1435,9 +1774,15 @@ def _infer_unidentified_ms1_groups(
             "component_neutral_mass": neutral_mass,
             "component_primary_feature_id": primary.get("feature_group_id"),
             "component_relation_types": relation_types,
-            "component_mass_evidence": sorted({str(edge.get("mass_evidence") or "") for edge in cluster["edges"] if edge.get("mass_evidence")}),
+            "component_mass_evidence": sorted(component_mass_evidence),
             "component_inference_score": mean_score,
             "component_xic_shape_score": mean_shape,
+            "component_isotope_fit_score": mean_isotope_fit,
+            "component_isotope_fit_min_score": min(isotope_fit_scores) if isotope_fit_scores else None,
+            "component_monoisotope_corrected": any(
+                int(member.get("component_monoisotopic_offset") or 0) > 0
+                for member in members
+            ),
             "members": members,
             "ranking_score": max(float(feature.get("ranking_score") or 0.0) for feature in entries),
             "difference_type": max(
@@ -1492,6 +1837,8 @@ def build_ms1_component_groups(
         "component_charge_isotope_consensus_search": 3,
         "component_mass_offset_sequence_tag_search": 3,
         "selected_precursor_consensus_search": 3,
+        "feature_targeted_glycopeptide_search": 3,
+        "global_open_modification_search": 3,
         "isolation_window_targeted_search": 2,
         "unlinked_sequence": 0,
     }
@@ -1511,12 +1858,16 @@ def build_ms1_component_groups(
         )
 
     assignments: dict[str, dict[str, object]] = {}
+    low_evidence_by_feature: dict[str, dict[str, object]] = {}
     for annotation in annotations:
         feature_id = str(annotation.get("feature_or_candidate_id") or "")
         confidence = str(annotation.get("confidence") or "")
         if feature_id not in feature_rows or confidence not in confidence_order:
             continue
-        if not include_low_evidence and confidence == "D_low_evidence":
+        if confidence == "D_low_evidence" and not include_low_evidence:
+            previous = low_evidence_by_feature.get(feature_id)
+            if previous is None or annotation_score(annotation) > annotation_score(previous):
+                low_evidence_by_feature[feature_id] = annotation
             continue
         previous = assignments.get(feature_id)
         if previous is None or annotation_score(annotation) > annotation_score(previous):
@@ -1611,6 +1962,10 @@ def build_ms1_component_groups(
             })
             members.append(member)
         modifications = sorted({str(annotation.get("modification") or "Unmodified") for _, annotation in entries})
+        component_modification = format_modification_alternatives(
+            modifications,
+            str(best_annotation.get("sequence") or ""),
+        )
         component = dict(primary_feature)
         if raw_area:
             component["area_by_sample"] = raw_area
@@ -1619,9 +1974,9 @@ def build_ms1_component_groups(
             component["normalized_area_by_sample"] = normalized_area
         component.update({
             "identified_component": True,
-            "component_label": f"{best_annotation.get('sequence') or ''} | {' / '.join(modifications)}",
+            "component_label": f"{best_annotation.get('sequence') or ''} | {component_modification}",
             "component_sequence": best_annotation.get("sequence"),
-            "component_modification": " / ".join(modifications),
+            "component_modification": component_modification,
             "component_chain": best_annotation.get("chain"),
             "component_start": best_annotation.get("start"),
             "component_end": best_annotation.get("end"),
@@ -1687,6 +2042,50 @@ def build_ms1_component_groups(
         })
         component_rows.append(singleton)
 
+    # A D-level match is useful review evidence, but it must not turn an MS1
+    # component into an identified peptide.  Attach the best candidate to the
+    # unresolved/inferred component so every consumer can show one consistent
+    # label while preserving the Unknown identity and confidence boundary.
+    for row in component_rows:
+        if row.get("identified_component"):
+            continue
+        feature_ids = {
+            str(row.get("feature_group_id") or ""),
+            str(row.get("component_primary_feature_id") or ""),
+        }
+        feature_ids.update(str(value) for value in row.get("source_feature_group_ids") or [])
+        feature_ids.update(str(value) for value in row.get("merged_feature_group_ids") or [])
+        for member in row.get("members") or []:
+            if not isinstance(member, dict):
+                continue
+            feature_ids.add(str(member.get("feature_group_id") or ""))
+            feature_ids.update(str(value) for value in member.get("source_feature_group_ids") or [])
+            feature_ids.update(str(value) for value in member.get("merged_feature_group_ids") or [])
+        candidates = [
+            low_evidence_by_feature[feature_id]
+            for feature_id in feature_ids
+            if feature_id in low_evidence_by_feature
+        ]
+        if not candidates:
+            continue
+        candidate = max(candidates, key=annotation_score)
+        sequence = str(candidate.get("sequence") or "").strip()
+        modification = str(candidate.get("modification") or "Unmodified").strip()
+        base_label = str(row.get("component_label") or row.get("feature_group_id") or "Unknown")
+        candidate_text = f"candidate {sequence}" if sequence else "low-evidence sequence candidate"
+        if sequence and sequence not in base_label:
+            row["component_label"] = f"{base_label} | {candidate_text}"
+        row.update({
+            "candidate_component": True,
+            "component_candidate_sequence": sequence or None,
+            "component_candidate_modification": modification or None,
+            "component_candidate_confidence": "D_low_evidence",
+            "component_candidate_feature_ids": sorted(
+                feature_id for feature_id in feature_ids
+                if feature_id in low_evidence_by_feature
+            ),
+        })
+
     component_rows.sort(key=lambda row: float(row.get("ranking_score") or 0.0), reverse=True)
     identified_index = 0
     inferred_index = 0
@@ -1744,7 +2143,12 @@ def build_modified_peptide_findings(
     for psm in psms:
         if psm.get("is_decoy") or str(psm.get("modification_text") or "Unmodified") == "Unmodified":
             continue
-        key = (str(psm.get("base_peptide_id") or ""), round(float(psm.get("neutral_mass") or 0.0), 5))
+        grouped_mass = psm.get("global_delta_cluster_mass")
+        if grouped_mass is not None:
+            grouped_mass = float(psm.get("backbone_neutral_mass") or 0.0) + float(grouped_mass)
+        else:
+            grouped_mass = float(psm.get("neutral_mass") or 0.0)
+        key = (str(psm.get("base_peptide_id") or ""), round(grouped_mass, 5))
         grouped.setdefault(key, []).append(psm)
 
     confidence_order = {"B_high_confidence_inferred": 3, "C_tentative": 2, "D_low_evidence": 1}
@@ -1804,9 +2208,16 @@ def build_modified_peptide_findings(
             "start": best.get("start"),
             "end": best.get("end"),
             "sequence": best.get("sequence"),
-            "modification": " / ".join(alternatives),
+            "modification": format_modification_alternatives(
+                alternatives,
+                str(best.get("sequence") or ""),
+            ),
             "modification_alternatives": alternatives,
-            "modification_mass_delta": sum(float(item[2]) for item in modifications),
+            "modification_mass_delta": (
+                sum(float(item[2]) for item in modifications)
+                if modifications
+                else float(best.get("mass_delta") or 0.0)
+            ),
             "neutral_mass": neutral_mass,
             "proteolysis": best.get("proteolysis", "fully_tryptic"),
             "confidence": psm_confidence(best),
@@ -1825,7 +2236,10 @@ def build_modified_peptide_findings(
                     "sample_id", "scan_id", "rt", "precursor_mz", "precursor_charge",
                     "chain", "start", "end", "sequence", "modification_text", "proteolysis",
                     "score", "q_value", "matched_ion_count", "fragment_coverage",
-                    "explained_intensity", "spectrum_peaks",
+                    "explained_intensity", "spectrum_peaks", "mass_delta",
+                    "localized_mass_offset_site", "global_delta_cluster_id",
+                    "global_delta_cluster_mass", "global_delta_cluster_q_value",
+                    "global_delta_cluster_support", "open_modification_confidence",
                 )
             },
         })
@@ -2815,6 +3229,32 @@ def _mass_offset_description(
     )
 
 
+def _unique_compatible_mass_offset_site(
+    candidate: PeptideCandidate,
+    mass_delta: float,
+) -> int | None:
+    """Return a unique chemically compatible 1-based site, if one exists."""
+    positions: set[int] = set()
+    for _, residues, delta, location in COMMON_MODIFICATIONS:
+        if abs(mass_delta - delta) > 0.05:
+            continue
+        for position, aa in enumerate(candidate.sequence):
+            valid = (
+                (location == "residue" and aa in residues)
+                or (location == "n_term" and position == 0 and aa in residues)
+                or (
+                    location == "n_glycan_sequon"
+                    and aa in residues
+                    and position + 2 < len(candidate.sequence)
+                    and candidate.sequence[position + 1] != "P"
+                    and candidate.sequence[position + 2] in "ST"
+                )
+            )
+            if valid:
+                positions.add(position + 1)
+    return next(iter(positions)) if len(positions) == 1 else None
+
+
 def _mass_offset_display_label(
     candidate: PeptideCandidate,
     mass_delta: float,
@@ -3527,6 +3967,546 @@ def search_feature_guided_scans(
     return accepted
 
 
+def _n_glycan_sequon_sites(sequence: str) -> list[int]:
+    return [
+        position
+        for position, aa in enumerate(sequence)
+        if aa == "N"
+        and position + 2 < len(sequence)
+        and sequence[position + 1] != "P"
+        and sequence[position + 2] in "ST"
+    ]
+
+
+def _targeted_n_glycan_candidates(
+    backbone_candidates: list[PeptideCandidate],
+) -> list[PeptideCandidate]:
+    candidates: list[PeptideCandidate] = []
+    seen: set[tuple[str, int, str]] = set()
+    for backbone in backbone_candidates:
+        if backbone.is_decoy or backbone.modifications:
+            continue
+        for site_index in _n_glycan_sequon_sites(backbone.sequence):
+            for glycan in TARGETED_N_GLYCANS:
+                name = str(glycan["name"])
+                key = (backbone.base_peptide_id, site_index, name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                target = _candidate(
+                    backbone.chain,
+                    backbone.start,
+                    backbone.end,
+                    backbone.sequence,
+                    ((site_index, name, float(glycan["mass"])),),
+                    carbamidomethyl_cys=backbone.carbamidomethyl_cys,
+                    proteolysis=backbone.proteolysis,
+                    base_peptide_id=backbone.base_peptide_id,
+                )
+                candidates.extend((target, _decoy(target)))
+    return sorted(candidates, key=lambda candidate: candidate.neutral_mass)
+
+
+def _targeted_glycan_diagnostic_evidence(
+    observed_mz: list[float],
+    observed_intensity: list[float],
+    fragment_tolerance_ppm: float,
+) -> dict[str, object]:
+    diagnostic_ions = (
+        ("HexNAc-126", 126.0550),
+        ("HexNAc-138", 138.0550),
+        ("HexNAc-144", 144.0655),
+        ("HexNAc-168", 168.0655),
+        ("HexNAc-186", 186.0761),
+        ("HexNAc", 204.086649),
+        ("NeuAc-H2O", 274.092127),
+        ("NeuAc", 292.102692),
+        ("HexHexNAc", 366.139472),
+    )
+    matches: list[dict[str, object]] = []
+    used: set[int] = set()
+    for label, target_mz in diagnostic_ions:
+        match = _best_observed_peak(
+            observed_mz,
+            observed_intensity,
+            target_mz,
+            fragment_tolerance_ppm,
+        )
+        if match is None or int(match["observed_index"]) in used:
+            continue
+        used.add(int(match["observed_index"]))
+        matches.append({
+            **match,
+            "label": label,
+            "theoretical_mz": target_mz,
+            "series": "glycan_diagnostic",
+            "ordinal": len(matches) + 1,
+        })
+    total_intensity = sum(observed_intensity)
+    diagnostic_intensity_fraction = (
+        sum(float(match["intensity"]) for match in matches)
+        / total_intensity
+        if total_intensity else 0.0
+    )
+    labels = {str(match["label"]) for match in matches}
+    return {
+        "glycan_diagnostic_ion_count": len(matches),
+        "glycan_diagnostic_intensity_fraction": diagnostic_intensity_fraction,
+        "glycan_has_hexnac_204": "HexNAc" in labels,
+        "glycan_has_sialic_diagnostic": bool(
+            labels.intersection({"NeuAc-H2O", "NeuAc"})
+        ),
+        "glycan_diagnostic_matches": matches,
+    }
+
+
+def _targeted_glycan_core_y_evidence(
+    backbone: PeptideCandidate,
+    composition: dict[str, int],
+    observed_mz: list[float],
+    observed_intensity: list[float],
+    precursor_charge: int,
+    fragment_tolerance_ppm: float,
+) -> dict[str, object]:
+    core_stubs = [
+        ("Y0", {}),
+        ("Y1", {"HexNAc": 1}),
+        ("Y2", {"HexNAc": 2}),
+        ("Y3", {"HexNAc": 2, "Hex": 1}),
+        ("Y4", {"HexNAc": 2, "Hex": 2}),
+        ("Y5", {"HexNAc": 2, "Hex": 3}),
+    ]
+    if int(composition.get("Fuc") or 0) > 0:
+        core_stubs.extend((
+            ("Y1F", {"HexNAc": 1, "Fuc": 1}),
+            ("Y2F", {"HexNAc": 2, "Fuc": 1}),
+            ("Y3F", {"HexNAc": 2, "Hex": 1, "Fuc": 1}),
+        ))
+    matches: list[dict[str, object]] = []
+    used: set[int] = set()
+    for label, stub in core_stubs:
+        if any(
+            int(stub_count) > int(composition.get(name) or 0)
+            for name, stub_count in stub.items()
+        ):
+            continue
+        stub_mass = _glycan_composition_mass(stub)
+        for charge in range(1, max(1, min(3, precursor_charge)) + 1):
+            target_mz = (
+                backbone.neutral_mass + stub_mass + charge * PROTON
+            ) / charge
+            match = _best_observed_peak(
+                observed_mz,
+                observed_intensity,
+                target_mz,
+                fragment_tolerance_ppm,
+            )
+            if match is None or int(match["observed_index"]) in used:
+                continue
+            used.add(int(match["observed_index"]))
+            matches.append({
+                **match,
+                "label": f"{label}^{charge}" if charge > 1 else label,
+                "theoretical_mz": target_mz,
+                "series": "glycan_core_y",
+                "ordinal": len(matches) + 1,
+                "fragment_charge": charge,
+            })
+    labels = {str(match["label"]).split("^", 1)[0] for match in matches}
+    return {
+        "glycan_core_y_ion_count": len(matches),
+        "glycan_core_y_type_count": len(labels),
+        "glycan_has_y1_support": bool(labels.intersection({"Y1", "Y1F"})),
+        "glycan_core_y_matches": matches,
+    }
+
+
+def _targeted_glycan_backbone_evidence(
+    backbone: PeptideCandidate,
+    glycan_site_index: int,
+    observed_mz: list[float],
+    observed_intensity: list[float],
+    fragment_tolerance_ppm: float,
+) -> dict[str, object]:
+    possible: list[dict[str, object]] = []
+    for label, theoretical_mz, series, ordinal in theoretical_fragments(
+        backbone,
+        max_charge=2,
+    ):
+        charge = _fragment_charge(label)
+        regular = _best_observed_peak(
+            observed_mz,
+            observed_intensity,
+            theoretical_mz,
+            fragment_tolerance_ppm,
+        )
+        if regular is not None:
+            possible.append({
+                **regular,
+                "label": label,
+                "series": series,
+                "ordinal": ordinal,
+                "fragment_charge": charge,
+                "theoretical_mz": theoretical_mz,
+                "hexnac_retained": False,
+            })
+        contains_site = (
+            (series == "b" and ordinal > glycan_site_index)
+            or (
+                series == "y"
+                and ordinal >= len(backbone.sequence) - glycan_site_index
+            )
+        )
+        if not contains_site:
+            continue
+        shifted_mz = theoretical_mz + GLYCAN_RESIDUE_MASS["HexNAc"] / charge
+        shifted = _best_observed_peak(
+            observed_mz,
+            observed_intensity,
+            shifted_mz,
+            fragment_tolerance_ppm,
+        )
+        if shifted is not None:
+            possible.append({
+                **shifted,
+                "label": f"{label}+HexNAc",
+                "series": series,
+                "ordinal": ordinal,
+                "fragment_charge": charge,
+                "theoretical_mz": shifted_mz,
+                "hexnac_retained": True,
+            })
+    chosen: list[dict[str, object]] = []
+    used_indices: set[int] = set()
+    used_positions: set[tuple[str, int]] = set()
+    for match in sorted(
+        possible,
+        key=lambda row: (
+            bool(row["hexnac_retained"]),
+            float(row["intensity"]),
+        ),
+        reverse=True,
+    ):
+        observed_index = int(match["observed_index"])
+        position = (str(match["series"]), int(match["ordinal"]))
+        if observed_index in used_indices or position in used_positions:
+            continue
+        used_indices.add(observed_index)
+        used_positions.add(position)
+        chosen.append(match)
+    total_intensity = sum(observed_intensity)
+    explained_intensity = (
+        sum(float(match["intensity"]) for match in chosen) / total_intensity
+        if total_intensity else 0.0
+    )
+    metrics = _sequence_tag_metrics(
+        chosen,
+        len(backbone.sequence),
+        explained_intensity,
+    )
+    return {
+        **metrics,
+        "matched_fragments": chosen,
+        "glycan_hexnac_fragment_count": sum(
+            bool(match["hexnac_retained"]) for match in chosen
+        ),
+    }
+
+
+def search_feature_glycopeptide_scans(
+    payload: dict[str, object],
+    scans: list[LCMSSpectrumScan],
+    backbone_candidates: list[PeptideCandidate],
+    exclude_feature_ids: set[str] | None = None,
+    rt_tolerance_min: float = 0.5,
+    precursor_tolerance_ppm: float = 20.0,
+    fragment_tolerance_ppm: float = 20.0,
+    max_scans_per_sample: int = 2,
+    fdr_threshold: float = 0.01,
+) -> list[dict[str, object]]:
+    """Identify N-glycopeptides only for differential Features with linked MS2."""
+    excluded = {str(value) for value in (exclude_feature_ids or set())}
+    significant_types = {"presence_absence", "area_changed", "moderate_difference"}
+    features = [
+        row for row in payload.get("global_feature_groups") or []
+        if row.get("difference_type") in significant_types
+        and str(row.get("feature_group_id") or "") not in excluded
+    ]
+    glycopeptides = _targeted_n_glycan_candidates(backbone_candidates)
+    if not features or not glycopeptides:
+        return []
+    glycopeptide_masses = [candidate.neutral_mass for candidate in glycopeptides]
+    glycan_by_name = {
+        str(glycan["name"]): glycan for glycan in TARGETED_N_GLYCANS
+    }
+    shifts = dict((payload.get("alignment") or {}).get("rt_shift_by_sample") or {})
+    scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
+    for scan in scans:
+        if scan.ms_level == 2 and scan.precursor_mz is not None and scan.mz_array:
+            scans_by_sample.setdefault(str(scan.sample_id), []).append(scan)
+    for sample_scans in scans_by_sample.values():
+        sample_scans.sort(key=lambda scan: float(scan.rt))
+
+    diagnostic_cache: dict[str, tuple[list[float], list[float], dict[str, object]]] = {}
+    winners: list[dict[str, object]] = []
+    for feature in features:
+        feature_id = str(feature.get("feature_group_id") or "")
+        feature_mz = float(
+            feature.get("true_peak_mz")
+            or feature.get("representative_mz")
+            or 0.0
+        )
+        feature_rt = float(feature.get("representative_rt") or 0.0)
+        local_shifts = dict(feature.get("rt_correction_by_sample") or {})
+        selected_scans: list[tuple[LCMSSpectrumScan, int]] = []
+        for sample_id, sample_scans in scans_by_sample.items():
+            center_rt = (
+                feature_rt
+                - float(shifts.get(sample_id) or 0.0)
+                - float(local_shifts.get(sample_id) or 0.0)
+            )
+            possible: list[tuple[tuple[float, float], LCMSSpectrumScan, int]] = []
+            for scan in sample_scans:
+                if abs(float(scan.rt) - center_rt) > max(0.0, rt_tolerance_min):
+                    continue
+                charge = int(scan.precursor_charge or 0)
+                if charge <= 0:
+                    continue
+                aligned_rt = (
+                    float(scan.rt)
+                    + float(shifts.get(sample_id) or 0.0)
+                    + float(local_shifts.get(sample_id) or 0.0)
+                )
+                relation = _scan_isotope_relation(
+                    feature_mz,
+                    float(scan.precursor_mz or 0.0),
+                    charge,
+                    max(
+                        feature_mz * max(0.1, precursor_tolerance_ppm)
+                        / 1_000_000.0,
+                        0.02,
+                    ),
+                )
+                if relation is None:
+                    continue
+                isotope_offset, mz_error = relation
+                possible.append((
+                    (abs(aligned_rt - feature_rt), abs(float(mz_error))),
+                    scan,
+                    isotope_offset,
+                ))
+            selected_scans.extend(
+                (scan, isotope_offset)
+                for _, scan, isotope_offset in sorted(
+                    possible,
+                    key=lambda item: item[0],
+                )[:max(1, max_scans_per_sample)]
+            )
+
+        for scan, isotope_offset in selected_scans:
+            cached = diagnostic_cache.get(str(scan.scan_id))
+            if cached is None:
+                observed_pairs = sorted(
+                    zip(scan.mz_array, scan.intensity_array),
+                    key=lambda pair: pair[0],
+                )
+                observed_mz = [float(pair[0]) for pair in observed_pairs]
+                observed_intensity = [
+                    max(0.0, float(pair[1])) for pair in observed_pairs
+                ]
+                diagnostic = _targeted_glycan_diagnostic_evidence(
+                    observed_mz,
+                    observed_intensity,
+                    fragment_tolerance_ppm,
+                )
+                cached = (observed_mz, observed_intensity, diagnostic)
+                diagnostic_cache[str(scan.scan_id)] = cached
+            observed_mz, observed_intensity, diagnostic = cached
+            if (
+                not diagnostic["glycan_has_hexnac_204"]
+                or int(diagnostic["glycan_diagnostic_ion_count"]) < 2
+            ):
+                continue
+            charge = int(scan.precursor_charge or 0)
+            component_mass = (
+                (feature_mz - PROTON) * charge
+                - isotope_offset * ISOTOPE_MASS_DIFF
+            )
+            tolerance = (
+                component_mass * max(0.1, precursor_tolerance_ppm)
+                / 1_000_000.0
+            )
+            left = bisect_left(glycopeptide_masses, component_mass - tolerance)
+            right = bisect_right(glycopeptide_masses, component_mass + tolerance)
+            evaluated: list[dict[str, object]] = []
+            for candidate in glycopeptides[left:right]:
+                site_index, glycan_name, glycan_mass = candidate.modifications[0]
+                glycan = glycan_by_name[glycan_name]
+                composition = dict(glycan["composition"])
+                if (
+                    int(composition.get("NeuAc") or 0) > 0
+                    and not diagnostic["glycan_has_sialic_diagnostic"]
+                ):
+                    continue
+                backbone = _candidate(
+                    candidate.chain,
+                    candidate.start,
+                    candidate.end,
+                    candidate.sequence,
+                    carbamidomethyl_cys=candidate.carbamidomethyl_cys,
+                    proteolysis=candidate.proteolysis,
+                    is_decoy=candidate.is_decoy,
+                    base_peptide_id=candidate.base_peptide_id,
+                )
+                core_y = _targeted_glycan_core_y_evidence(
+                    backbone,
+                    composition,
+                    observed_mz,
+                    observed_intensity,
+                    charge,
+                    fragment_tolerance_ppm,
+                )
+                if int(core_y["glycan_core_y_ion_count"]) < 2:
+                    continue
+                backbone_evidence = _targeted_glycan_backbone_evidence(
+                    backbone,
+                    site_index,
+                    observed_mz,
+                    observed_intensity,
+                    fragment_tolerance_ppm,
+                )
+                mass_error_ppm = (
+                    (component_mass - candidate.neutral_mass)
+                    / max(candidate.neutral_mass, 1e-12)
+                    * 1_000_000.0
+                )
+                mass_score = max(
+                    0.0,
+                    1.0
+                    - abs(mass_error_ppm)
+                    / max(precursor_tolerance_ppm, 1e-9),
+                )
+                diagnostic_score = min(
+                    18.0,
+                    3.0 * int(diagnostic["glycan_diagnostic_ion_count"])
+                    + 20.0
+                    * float(diagnostic["glycan_diagnostic_intensity_fraction"]),
+                )
+                core_y_score = min(
+                    25.0,
+                    5.0 * int(core_y["glycan_core_y_ion_count"]),
+                )
+                hexnac_score = min(
+                    15.0,
+                    5.0
+                    * int(backbone_evidence["glycan_hexnac_fragment_count"]),
+                )
+                score = (
+                    15.0 * mass_score
+                    + diagnostic_score
+                    + core_y_score
+                    + hexnac_score
+                    + 0.55 * float(backbone_evidence["score"])
+                )
+                label_matches = {
+                    int(match["observed_index"]): str(match["label"])
+                    for match in (
+                        list(diagnostic["glycan_diagnostic_matches"])
+                        + list(core_y["glycan_core_y_matches"])
+                        + list(backbone_evidence["matched_fragments"])
+                    )
+                }
+                top_indices = sorted(
+                    range(len(observed_mz)),
+                    key=observed_intensity.__getitem__,
+                    reverse=True,
+                )[:80]
+                spectrum_peaks = [
+                    {
+                        "mz": observed_mz[index],
+                        "intensity": observed_intensity[index],
+                        "label": label_matches.get(index, ""),
+                    }
+                    for index in sorted(top_indices, key=observed_mz.__getitem__)
+                ]
+                link = _feature_link_payload(
+                    feature,
+                    "feature_targeted_glycopeptide_search",
+                    isotope_offset,
+                )
+                row = {
+                    **asdict(candidate),
+                    "modification_text": candidate.modification_text,
+                    "sample_id": scan.sample_id,
+                    "scan_id": scan.scan_id,
+                    "rt": scan.rt,
+                    "precursor_mz": scan.precursor_mz,
+                    "precursor_charge": charge,
+                    "precursor_intensity": scan.precursor_intensity or 0.0,
+                    "precursor_error_ppm": mass_error_ppm,
+                    "activation_method": scan.activation_method,
+                    "collision_energy": scan.collision_energy,
+                    "spectrum_peaks": spectrum_peaks,
+                    **backbone_evidence,
+                    **diagnostic,
+                    **core_y,
+                    "score": score,
+                    "mass_delta": float(glycan_mass),
+                    "localized_mass_offset_site": site_index + 1,
+                    "glycan_name": glycan_name,
+                    "glycan_composition": composition,
+                    "glycan_site": f"{candidate.sequence[site_index]}{site_index + 1}",
+                    "search_origin": "feature_targeted_glycopeptide_search",
+                    "feature_links": [link],
+                    **{key: value for key, value in link.items() if key != "feature_link_distance"},
+                }
+                evaluated.append(row)
+            if not evaluated:
+                continue
+            evaluated.sort(key=lambda row: float(row["score"]), reverse=True)
+            winner = evaluated[0]
+            competitor_scores = [
+                float(row["score"])
+                for row in evaluated[1:]
+                if (
+                    row.get("candidate_id") != winner.get("candidate_id")
+                    or row.get("is_decoy") != winner.get("is_decoy")
+                )
+            ]
+            winner["candidate_score_margin"] = (
+                float(winner["score"]) - max(competitor_scores)
+                if competitor_scores else float(winner["score"])
+            )
+            winners.append(winner)
+
+    searched = assign_q_values(winners)
+    accepted: list[dict[str, object]] = []
+    for row in searched:
+        if row.get("is_decoy"):
+            continue
+        if float(row.get("q_value") if row.get("q_value") is not None else 1.0) > fdr_threshold:
+            continue
+        if float(row.get("score") or 0.0) < 48.0:
+            continue
+        if int(row.get("glycan_diagnostic_ion_count") or 0) < 2:
+            continue
+        if int(row.get("glycan_core_y_ion_count") or 0) < 2:
+            continue
+        if int(row.get("matched_ion_count") or 0) < 3:
+            continue
+        if not (
+            int(row.get("sequence_tag_length") or 0) >= 1
+            or int(row.get("complementary_ion_pair_count") or 0) >= 1
+            or int(row.get("glycan_hexnac_fragment_count") or 0) >= 1
+        ):
+            continue
+        if float(row.get("candidate_score_margin") or 0.0) < 2.0:
+            continue
+        row["feature_link_type"] = "feature_targeted_glycopeptide_search"
+        accepted.append(row)
+    return accepted
+
+
 def search_feature_open_mass_scans(
     payload: dict[str, object],
     scans: list[LCMSSpectrumScan],
@@ -3785,6 +4765,532 @@ def search_feature_open_mass_scans(
     return accepted
 
 
+def _cluster_open_mass_results(
+    rows: list[dict[str, object]],
+    tolerance_da: float = 0.02,
+) -> list[dict[str, object]]:
+    """Cluster recurrent open-search mass shifts and estimate cluster q-values."""
+    clusters: list[dict[str, object]] = []
+    for row in sorted(rows, key=lambda item: float(item.get("mass_delta") or 0.0)):
+        delta = float(row.get("mass_delta") or 0.0)
+        cluster = clusters[-1] if clusters else None
+        if cluster is None or abs(delta - float(cluster["mass_delta"])) > tolerance_da:
+            cluster = {"mass_delta": delta, "rows": []}
+            clusters.append(cluster)
+        cluster_rows = cluster["rows"]
+        assert isinstance(cluster_rows, list)
+        cluster_rows.append(row)
+        cluster["mass_delta"] = statistics.mean(
+            float(item.get("mass_delta") or 0.0) for item in cluster_rows
+        )
+
+    summaries: list[dict[str, object]] = []
+    for cluster in clusters:
+        cluster_rows = list(cluster["rows"])
+        targets = [row for row in cluster_rows if not row.get("is_decoy")]
+        decoys = [row for row in cluster_rows if row.get("is_decoy")]
+        scored_rows = targets or decoys
+        interpretations = sorted({
+            str(value)
+            for row in targets
+            for value in row.get("compatible_mass_offsets") or []
+            if value
+        })
+        best_score = max(float(row.get("score") or 0.0) for row in scored_rows)
+        summaries.append({
+            "mass_delta": float(cluster["mass_delta"]),
+            "mass_delta_min": min(float(row.get("mass_delta") or 0.0) for row in cluster_rows),
+            "mass_delta_max": max(float(row.get("mass_delta") or 0.0) for row in cluster_rows),
+            "target_psm_count": len(targets),
+            "decoy_psm_count": len(decoys),
+            "sample_count": len({str(row.get("sample_id") or "") for row in targets}),
+            "samples": sorted({str(row.get("sample_id") or "") for row in targets}),
+            "sequence_count": len({str(row.get("sequence") or "") for row in targets}),
+            "sequences": sorted({str(row.get("sequence") or "") for row in targets})[:12],
+            "localized_site_count": sum(row.get("localized_mass_offset_site") is not None for row in targets),
+            "candidate_interpretations": interpretations,
+            "best_score": best_score,
+            "cluster_score": best_score + 4.0 * math.log1p(max(len(targets), len(decoys))),
+            "rows": cluster_rows,
+        })
+    summaries.sort(key=lambda item: float(item["cluster_score"]), reverse=True)
+    running_targets = 0
+    running_decoys = 0
+    fdrs: list[float] = []
+    for summary in summaries:
+        running_targets += int(summary["target_psm_count"])
+        running_decoys += int(summary["decoy_psm_count"])
+        fdrs.append(running_decoys / max(1, running_targets))
+    q_value = 1.0
+    for index in range(len(summaries) - 1, -1, -1):
+        q_value = min(q_value, fdrs[index])
+        summaries[index]["cluster_q_value"] = q_value
+    for rank, summary in enumerate(summaries, start=1):
+        cluster_id = f"OPEN_DELTA_{rank:04d}"
+        summary["cluster_id"] = cluster_id
+        for row in summary.pop("rows"):
+            row["global_delta_cluster_id"] = cluster_id
+            row["global_delta_cluster_mass"] = summary["mass_delta"]
+            row["global_delta_cluster_q_value"] = summary["cluster_q_value"]
+            row["global_delta_cluster_support"] = summary["target_psm_count"]
+    return [
+        summary for summary in summaries
+        if int(summary.get("target_psm_count") or 0) > 0
+    ]
+
+
+def search_global_open_modification_scans(
+    scans: list[LCMSSpectrumScan],
+    backbone_candidates: list[PeptideCandidate],
+    exclude_scan_ids: set[str] | None = None,
+    fragment_tolerance_ppm: float = 20.0,
+    minimum_mass_delta_da: float = -250.0,
+    maximum_mass_delta_da: float = 2500.0,
+    minimum_absolute_delta_da: float = 0.5,
+    delta_cluster_tolerance_da: float = 0.02,
+    max_discovery_scans: int = 15000,
+    max_screened_candidates: int = 12,
+    max_delta_clusters: int = 40,
+    fdr_threshold: float = 0.01,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    """Run a two-pass unrestricted modification search over acquired MS2.
+
+    Pass one discovers recurrent mass shifts on representative unresolved
+    precursor scans using a fragment index.  Pass two re-searches every
+    unresolved acquired MS2 scan against only the discovered delta clusters.
+    Features without an acquired MS2 scan never enter this workflow.
+    """
+    excluded = {str(value) for value in (exclude_scan_ids or set())}
+    valid_scans = [
+        scan for scan in scans
+        if scan.ms_level == 2
+        and scan.precursor_mz is not None
+        and int(scan.precursor_charge or 0) > 0
+        and bool(scan.mz_array)
+        and str(scan.scan_id) not in excluded
+    ]
+    candidates = [candidate for candidate in backbone_candidates if len(candidate.sequence) >= 6]
+    if not valid_scans or not candidates:
+        return [], [], []
+
+    # A coarse fragment index supplies sequence-backbone candidates without
+    # constraining precursor delta.  Exact ppm matching is still performed by
+    # the regular open-mass matcher after this inexpensive screen.
+    fragment_bin_width = 0.02
+    fragment_index: dict[int, set[int]] = {}
+    for candidate_index, candidate in enumerate(candidates):
+        for _, fragment_mz, series, __ in theoretical_fragments(candidate):
+            if series not in {"b", "y"} or fragment_mz <= 0.0:
+                continue
+            fragment_index.setdefault(int(round(fragment_mz / fragment_bin_width)), set()).add(candidate_index)
+
+    def scan_quality(scan: LCMSSpectrumScan) -> float:
+        strongest = sorted((max(0.0, float(value)) for value in scan.intensity_array), reverse=True)[:20]
+        return math.log1p(float(scan.precursor_intensity or 0.0)) + math.log1p(sum(strongest))
+
+    representative_by_bin: dict[tuple[str, int, int, int], LCMSSpectrumScan] = {}
+    for scan in valid_scans:
+        charge = int(scan.precursor_charge or 0)
+        neutral_mass = (float(scan.precursor_mz or 0.0) - PROTON) * charge
+        key = (
+            str(scan.sample_id),
+            charge,
+            int(round(neutral_mass / 0.05)),
+            int(round(float(scan.rt) / 0.20)),
+        )
+        previous = representative_by_bin.get(key)
+        if previous is None or scan_quality(scan) > scan_quality(previous):
+            representative_by_bin[key] = scan
+    discovery_scans = sorted(
+        representative_by_bin.values(),
+        key=scan_quality,
+        reverse=True,
+    )[:max(1, int(max_discovery_scans))]
+
+    def candidate_indices_for_scan(scan: LCMSSpectrumScan) -> list[int]:
+        charge = int(scan.precursor_charge or 0)
+        component_mass = (float(scan.precursor_mz or 0.0) - PROTON) * charge
+        selected_peaks = sorted(
+            zip(scan.mz_array, scan.intensity_array),
+            key=lambda pair: float(pair[1]),
+            reverse=True,
+        )[:60]
+        hits: dict[int, set[int]] = {}
+        for observed_mz, __ in selected_peaks:
+            center = int(round(float(observed_mz) / fragment_bin_width))
+            for fragment_bin in range(center - 2, center + 3):
+                for candidate_index in fragment_index.get(fragment_bin, set()):
+                    candidate = candidates[candidate_index]
+                    delta = component_mass - candidate.neutral_mass
+                    if not minimum_mass_delta_da <= delta <= maximum_mass_delta_da:
+                        continue
+                    if (
+                        abs(delta) < minimum_absolute_delta_da
+                        and candidate.proteolysis not in {
+                            "n_terminal_truncation_candidate",
+                            "c_terminal_truncation_candidate",
+                        }
+                    ):
+                        continue
+                    hits.setdefault(candidate_index, set()).add(fragment_bin)
+        ranked = sorted(
+            hits,
+            key=lambda index: (
+                len(hits[index]),
+                -abs(component_mass - candidates[index].neutral_mass),
+            ),
+            reverse=True,
+        )
+        return ranked[:max(24, int(max_screened_candidates) * 4)]
+
+    def evaluate_scan(
+        scan: LCMSSpectrumScan,
+        candidate_indices: list[int],
+        cluster: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        charge = int(scan.precursor_charge or 0)
+        component_mass = (float(scan.precursor_mz or 0.0) - PROTON) * charge
+        observed_pairs = sorted(zip(scan.mz_array, scan.intensity_array), key=lambda pair: pair[0])
+        observed_mz = [float(pair[0]) for pair in observed_pairs]
+        observed_intensity = [max(0.0, float(pair[1])) for pair in observed_pairs]
+        optimistic: list[tuple[float, int, float]] = []
+        for candidate_index in candidate_indices:
+            candidate = candidates[candidate_index]
+            delta = component_mass - candidate.neutral_mass
+            if not minimum_mass_delta_da <= delta <= maximum_mass_delta_da:
+                continue
+            screen = _screen_mass_offset_fragments(
+                candidate,
+                delta,
+                observed_mz,
+                observed_intensity,
+                fragment_tolerance_ppm,
+            )
+            if int(screen.get("matched_ion_count") or 0) < 3:
+                continue
+            if int(screen.get("sequence_tag_length") or 0) < 1 and int(screen.get("complementary_ion_pair_count") or 0) < 1:
+                continue
+            optimistic.append((float(screen.get("score") or 0.0), candidate_index, delta))
+        evaluated: list[dict[str, object]] = []
+        for _, candidate_index, delta in sorted(optimistic, reverse=True)[:max(1, int(max_screened_candidates))]:
+            candidate = candidates[candidate_index]
+            evidence = _match_mass_offset_fragments(
+                candidate,
+                delta,
+                observed_mz,
+                observed_intensity,
+                fragment_tolerance_ppm,
+            )
+            if int(evidence.get("matched_ion_count") or 0) < 4:
+                continue
+            localized_site = evidence.get("localized_mass_offset_site")
+            if localized_site is None:
+                unique_site = _unique_compatible_mass_offset_site(
+                    candidate,
+                    delta,
+                )
+                if (
+                    unique_site is not None
+                    and int(evidence.get("regular_fragment_count") or 0) > 0
+                    and int(evidence.get("shifted_fragment_count") or 0) > 0
+                ):
+                    localized_site = unique_site
+                    evidence["localized_mass_offset_site"] = unique_site
+                    evidence["mass_offset_localization_basis"] = (
+                        "unique_compatible_residue_with_fragment_boundary_support"
+                    )
+            modification_description, compatible_offsets = _mass_offset_description(
+                candidate,
+                delta,
+                localized_site,
+            )
+            display_modification_text = _mass_offset_display_label(
+                candidate,
+                delta,
+                localized_site,
+                compatible_offsets,
+            )
+            model_prior = 2.0 if compatible_offsets else 0.0
+            evidence["score"] = float(evidence.get("score") or 0.0) + model_prior
+            labels = {
+                int(match["observed_index"]): str(match["label"])
+                for match in evidence.get("matched_fragments") or []
+            }
+            top_indices = sorted(
+                range(len(observed_mz)),
+                key=observed_intensity.__getitem__,
+                reverse=True,
+            )[:60]
+            row = {
+                **asdict(candidate),
+                "candidate_id": f"{candidate.candidate_id}:GLOBAL_OPEN_DELTA={delta:+.4f}",
+                "neutral_mass": component_mass,
+                "backbone_neutral_mass": candidate.neutral_mass,
+                "modification_text": display_modification_text,
+                "mass_offset_description": modification_description,
+                "compatible_mass_offsets": compatible_offsets,
+                "candidate_model_prior": model_prior,
+                "mass_delta": delta,
+                "localized_mass_offset_site": localized_site,
+                "sample_id": scan.sample_id,
+                "scan_id": scan.scan_id,
+                "rt": scan.rt,
+                "precursor_mz": scan.precursor_mz,
+                "precursor_charge": charge,
+                "precursor_intensity": scan.precursor_intensity or 0.0,
+                "precursor_error_ppm": 0.0,
+                "activation_method": scan.activation_method,
+                "collision_energy": scan.collision_energy,
+                "spectrum_peaks": [
+                    {
+                        "mz": observed_mz[index],
+                        "intensity": observed_intensity[index],
+                        "label": labels.get(index, ""),
+                    }
+                    for index in sorted(top_indices, key=observed_mz.__getitem__)
+                ],
+                **evidence,
+                "search_origin": "global_open_modification_search",
+            }
+            if cluster is not None:
+                row["discovery_delta_cluster_mass"] = cluster.get("mass_delta")
+            evaluated.append(row)
+        if not evaluated:
+            return None
+        evaluated.sort(key=lambda row: float(row.get("score") or 0.0), reverse=True)
+        winner = evaluated[0]
+        competing_scores = [
+            float(row.get("score") or 0.0)
+            for row in evaluated[1:]
+            if (
+                row.get("sequence") != winner.get("sequence")
+                or row.get("chain") != winner.get("chain")
+                or row.get("start") != winner.get("start")
+            )
+        ]
+        winner["candidate_score_margin"] = (
+            float(winner.get("score") or 0.0) - max(competing_scores)
+            if competing_scores else float(winner.get("score") or 0.0)
+        )
+        return winner
+
+    discovery_rows = [
+        row for row in (
+            evaluate_scan(scan, candidate_indices_for_scan(scan))
+            for scan in discovery_scans
+        )
+        if row is not None
+    ]
+    discovery_rows = assign_q_values(discovery_rows)
+    discovery_clusters = _cluster_open_mass_results(
+        discovery_rows,
+        delta_cluster_tolerance_da,
+    )
+    selected_clusters = [
+        cluster for cluster in discovery_clusters
+        if (
+            int(cluster.get("target_psm_count") or 0) >= 2
+            or bool(cluster.get("candidate_interpretations"))
+        )
+        and float(cluster.get("best_score") or 0.0) >= 34.0
+        and float(
+            cluster["cluster_q_value"]
+            if cluster.get("cluster_q_value") is not None
+            else 1.0
+        ) <= 0.20
+    ][:max(1, int(max_delta_clusters))]
+    if not selected_clusters:
+        return [], [], discovery_clusters
+
+    ordered_mass_candidates = sorted(enumerate(candidates), key=lambda item: item[1].neutral_mass)
+    candidate_masses = [candidate.neutral_mass for _, candidate in ordered_mass_candidates]
+
+    def restricted_candidates(scan: LCMSSpectrumScan, cluster: dict[str, object]) -> list[int]:
+        charge = int(scan.precursor_charge or 0)
+        component_mass = (float(scan.precursor_mz or 0.0) - PROTON) * charge
+        expected_backbone_mass = component_mass - float(cluster.get("mass_delta") or 0.0)
+        tolerance = max(delta_cluster_tolerance_da, expected_backbone_mass * 20.0 / 1_000_000.0)
+        left = bisect_left(candidate_masses, expected_backbone_mass - tolerance)
+        right = bisect_right(candidate_masses, expected_backbone_mass + tolerance)
+        return [ordered_mass_candidates[index][0] for index in range(left, right)]
+
+    second_pass_rows: list[dict[str, object]] = []
+    for scan in valid_scans:
+        winners = [
+            row for row in (
+                evaluate_scan(scan, restricted_candidates(scan, cluster), cluster)
+                for cluster in selected_clusters
+            )
+            if row is not None
+        ]
+        if winners:
+            second_pass_rows.append(max(winners, key=lambda row: float(row.get("score") or 0.0)))
+    searched = assign_q_values(second_pass_rows)
+    final_clusters = _cluster_open_mass_results(searched, delta_cluster_tolerance_da)
+    cluster_by_id = {str(cluster["cluster_id"]): cluster for cluster in final_clusters}
+    accepted: list[dict[str, object]] = []
+    candidates_out: list[dict[str, object]] = []
+    for row in searched:
+        if row.get("is_decoy"):
+            continue
+        cluster = cluster_by_id.get(str(row.get("global_delta_cluster_id") or "")) or {}
+        q_value = float(row.get("q_value") if row.get("q_value") is not None else 1.0)
+        cluster_q = float(
+            row["global_delta_cluster_q_value"]
+            if row.get("global_delta_cluster_q_value") is not None
+            else 1.0
+        )
+        score = float(row.get("score") or 0.0)
+        ions = int(row.get("matched_ion_count") or 0)
+        tag_length = int(row.get("sequence_tag_length") or 0)
+        complementary = int(row.get("complementary_ion_pair_count") or 0)
+        margin = float(row.get("candidate_score_margin") or 0.0)
+        localized = row.get("localized_mass_offset_site") is not None
+        strong = (
+            q_value <= fdr_threshold
+            and cluster_q <= max(0.05, fdr_threshold)
+            and score >= 45.0
+            and ions >= 5
+            and (tag_length >= 2 or complementary >= 1)
+            and margin >= 2.0
+            and localized
+            and int(cluster.get("target_psm_count") or 0) >= 2
+        )
+        tentative = (
+            q_value <= max(0.05, fdr_threshold)
+            and score >= 34.0
+            and ions >= 4
+            and (tag_length >= 1 or complementary >= 1)
+            and margin >= 1.0
+            and int(cluster.get("target_psm_count") or 0) >= 2
+        )
+        if strong:
+            row["open_modification_confidence"] = "B_open_modification_supported"
+            row["sequence_inference_level"] = "global_open_modification_supported"
+            accepted.append(row)
+        elif tentative:
+            row["open_modification_confidence"] = "C_open_mass_candidate"
+            row["sequence_inference_level"] = "global_open_mass_candidate"
+            candidates_out.append(row)
+
+    accepted_cluster_ids = {str(row.get("global_delta_cluster_id") or "") for row in accepted}
+    candidate_cluster_ids = {str(row.get("global_delta_cluster_id") or "") for row in candidates_out}
+    for cluster in final_clusters:
+        cluster_id = str(cluster.get("cluster_id") or "")
+        if cluster_id in accepted_cluster_ids:
+            cluster["classification"] = "supported_open_modification"
+        elif cluster_id in candidate_cluster_ids:
+            cluster["classification"] = "open_mass_candidate"
+        else:
+            cluster["classification"] = "unresolved_mass_shift_cluster"
+    return accepted, candidates_out, final_clusters
+
+
+def build_global_known_modification_summary(
+    supported_psms: list[dict[str, object]],
+    candidate_psms: list[dict[str, object]],
+    clusters: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Summarize chemically interpretable open-search results before unknown shifts."""
+    grouped: dict[str, dict[str, object]] = {}
+
+    def bucket(name: str) -> dict[str, object]:
+        return grouped.setdefault(name, {
+            "supported": [],
+            "candidates": [],
+            "clusters": [],
+        })
+
+    for cluster in clusters:
+        for name in cluster.get("candidate_interpretations") or []:
+            bucket(str(name))["clusters"].append(cluster)
+    for level, rows in (("supported", supported_psms), ("candidates", candidate_psms)):
+        for psm in rows:
+            for name in psm.get("compatible_mass_offsets") or []:
+                bucket(str(name))[level].append(psm)
+
+    summary: list[dict[str, object]] = []
+    for name, evidence in grouped.items():
+        supported = list(evidence["supported"])
+        candidates = list(evidence["candidates"])
+        related_clusters = list(evidence["clusters"])
+        all_psms = supported + candidates
+        sample_evidence: dict[str, dict[str, object]] = {}
+        for sample_id in sorted({str(row.get("sample_id") or "") for row in all_psms if row.get("sample_id")}):
+            sample_supported = [row for row in supported if str(row.get("sample_id") or "") == sample_id]
+            sample_candidates = [row for row in candidates if str(row.get("sample_id") or "") == sample_id]
+            sample_rows = sample_supported + sample_candidates
+            sample_evidence[sample_id] = {
+                "supported_psm_count": len(sample_supported),
+                "candidate_psm_count": len(sample_candidates),
+                "sequence_count": len({str(row.get("sequence") or "") for row in sample_rows}),
+            }
+
+        localized_sites: set[str] = set()
+        for row in all_psms:
+            local_site = row.get("localized_mass_offset_site")
+            if local_site is None:
+                continue
+            local_site = int(local_site)
+            sequence = str(row.get("sequence") or "")
+            residue = sequence[local_site - 1] if 1 <= local_site <= len(sequence) else "?"
+            absolute_site = int(row.get("start") or 1) + local_site - 1
+            localized_sites.add(f"{row.get('chain') or '?'}:{residue}{absolute_site}")
+
+        delta_values = [float(row.get("mass_delta") or 0.0) for row in all_psms]
+        if not delta_values:
+            delta_values = [float(cluster.get("mass_delta") or 0.0) for cluster in related_clusters]
+        best_psm = max(all_psms, key=lambda row: float(row.get("score") or 0.0), default=None)
+        if supported:
+            classification = "supported_known_modification"
+        elif candidates:
+            classification = "known_modification_candidate"
+        else:
+            classification = "unresolved_known_mass_shift"
+        summary.append({
+            "known_modification_id": "",
+            "modification": name,
+            "mass_delta": statistics.median(delta_values) if delta_values else None,
+            "classification": classification,
+            "supported_psm_count": len(supported),
+            "candidate_psm_count": len(candidates),
+            "target_winner_spectrum_count": sum(int(cluster.get("target_psm_count") or 0) for cluster in related_clusters),
+            "sample_count": len(sample_evidence),
+            "sample_evidence": sample_evidence,
+            "sequence_count": len({str(row.get("sequence") or "") for row in all_psms}),
+            "sequences": sorted({str(row.get("sequence") or "") for row in all_psms})[:20],
+            "localized_site_count": len(localized_sites),
+            "localized_sites": sorted(localized_sites)[:30],
+            "cluster_ids": sorted({str(cluster.get("cluster_id") or "") for cluster in related_clusters}),
+            "best_score": max((float(row.get("score") or 0.0) for row in all_psms), default=None),
+            "best_psm_q_value": min((float(row["q_value"] if row.get("q_value") is not None else 1.0) for row in all_psms), default=None),
+            "best_cluster_q_value": min((float(cluster["cluster_q_value"] if cluster.get("cluster_q_value") is not None else 1.0) for cluster in related_clusters), default=None),
+            "best_psm": {
+                key: best_psm.get(key) for key in (
+                    "sample_id", "scan_id", "rt", "precursor_mz", "precursor_charge",
+                    "chain", "start", "end", "sequence", "modification_text",
+                    "mass_delta", "localized_mass_offset_site", "score", "q_value",
+                    "global_delta_cluster_id", "spectrum_peaks",
+                )
+            } if best_psm is not None else None,
+        })
+    classification_order = {
+        "supported_known_modification": 3,
+        "known_modification_candidate": 2,
+        "unresolved_known_mass_shift": 1,
+    }
+    summary.sort(key=lambda row: (
+        classification_order.get(str(row.get("classification") or ""), 0),
+        int(row.get("supported_psm_count") or 0),
+        int(row.get("candidate_psm_count") or 0),
+        int(row.get("target_winner_spectrum_count") or 0),
+    ), reverse=True)
+    for rank, row in enumerate(summary, start=1):
+        row["rank"] = rank
+        row["known_modification_id"] = f"KNOWN_MOD_{rank:03d}"
+    return summary
+
+
 def build_feature_ms2_evidence(
     payload: dict[str, object],
     scans: list[LCMSSpectrumScan],
@@ -3796,9 +5302,8 @@ def build_feature_ms2_evidence(
     mz_tolerance_ppm: float = 20.0,
     isolation_padding_da: float = 0.02,
 ) -> tuple[list[dict[str, object]], dict[str, int]]:
-    significant_types = {"presence_absence", "area_changed", "moderate_difference"}
     features = sorted(
-        [row for row in payload.get("global_feature_groups") or [] if row.get("difference_type") in significant_types],
+        list(payload.get("global_feature_groups") or []),
         key=lambda row: float(row.get("ranking_score") or 0.0),
         reverse=True,
     )
@@ -3924,7 +5429,16 @@ def build_feature_ms2_evidence(
             feature_region_candidates[0]
             if feature_region_candidates else None
         )
-        if best_annotation is not None:
+        annotation_confidence = str(
+            best_annotation.get("confidence") or ""
+        ) if best_annotation is not None else ""
+        if best_annotation is not None and annotation_confidence == "D_low_evidence":
+            status = "low_evidence_sequence_candidate"
+            hypothesis = (
+                "MS2 存在序列匹配线索，但综合得分未达到当前暂定鉴定阈值；"
+                "该序列仅作为低证据候选显示，不替代 Unknown 成分名称。"
+            )
+        elif best_annotation is not None:
             link_type = str(best_annotation.get("feature_link_type") or "direct_precursor")
             if link_type == "isotope_envelope":
                 status = "identified_isotope_envelope"
@@ -3945,6 +5459,10 @@ def build_feature_ms2_evidence(
                 )
             elif link_type == "feature_open_mass_search":
                 status = "tentative_feature_open_mass_identification"
+            elif link_type == "feature_targeted_glycopeptide_search":
+                status = "tentative_feature_glycopeptide_identification"
+            elif link_type == "global_open_modification_search":
+                status = "tentative_global_open_modification_identification"
             else:
                 status = "identified_direct_precursor"
             hypothesis = str(best_annotation.get("interpretation") or "")
@@ -3970,7 +5488,12 @@ def build_feature_ms2_evidence(
         unidentified_reason = None
         candidate_mass_hypotheses: list[dict[str, object]] = []
         selected_precursor_charge = None
-        if best_annotation is None and best_region_candidate is not None:
+        if best_annotation is not None and annotation_confidence == "D_low_evidence":
+            unidentified_reason = "low_evidence_sequence_candidate_below_identification_threshold"
+            selected_precursor_charge = (
+                best_psm.get("precursor_charge") if best_psm is not None else None
+            )
+        elif best_annotation is None and best_region_candidate is not None:
             unidentified_reason = (
                 "partial_sequence_tag_without_unique_identification"
             )
@@ -4002,7 +5525,12 @@ def build_feature_ms2_evidence(
                     unidentified_reason = "outside_current_sequence_or_modification_space"
                 else:
                     unidentified_reason = "coisolated_not_selected"
-        if status in {
+        if status == "low_evidence_sequence_candidate":
+            peptide_likelihood = "medium"
+            peptide_likelihood_reason = (
+                "sequence_match_below_current_identification_threshold"
+            )
+        elif status in {
             "tentative_component_consensus_identification",
             "tentative_backbone_sequence_support",
             "tentative_truncation_sequence_support",
@@ -4061,6 +5589,11 @@ def build_feature_ms2_evidence(
                     "b_ion_longest_run", "y_ion_longest_run",
                     "complementary_ion_pair_count", "candidate_score_margin",
                     "sequence_inference_level", "alternative_sequence_candidates",
+                    "glycan_name", "glycan_composition", "glycan_site",
+                    "glycan_diagnostic_ion_count",
+                    "glycan_diagnostic_intensity_fraction",
+                    "glycan_core_y_ion_count", "glycan_core_y_type_count",
+                    "glycan_has_y1_support", "glycan_hexnac_fragment_count",
                 )
             }
         compact_region_candidate = None
@@ -4169,12 +5702,6 @@ def _candidate_counterpart(
     modified: PeptideCandidate,
     candidates: list[PeptideCandidate],
 ) -> PeptideCandidate | None:
-    unmodified = [
-        candidate for candidate in candidates
-        if not candidate.is_decoy and not candidate.modifications and candidate.base_peptide_id == modified.base_peptide_id
-    ]
-    if unmodified:
-        return unmodified[0]
     if any(name == "C-terminal Lys clipping" for _, name, _ in modified.modifications):
         return next((
             candidate for candidate in candidates
@@ -4184,7 +5711,77 @@ def _candidate_counterpart(
             and candidate.start == modified.start
             and candidate.sequence == modified.sequence + "K"
         ), None)
+    unmodified = [
+        candidate for candidate in candidates
+        if not candidate.is_decoy and not candidate.modifications and candidate.base_peptide_id == modified.base_peptide_id
+    ]
+    if unmodified:
+        return unmodified[0]
     return None
+
+
+def _candidate_from_psm(psm: dict[str, object]) -> PeptideCandidate | None:
+    """Rebuild a searchable form candidate from accepted PSM metadata.
+
+    Targeted glycopeptide and sequence-inference PSMs may use candidates that
+    are not present in the bounded standard-search catalog passed to the
+    quantitation layer.  Their accepted PSM payload still carries all fields
+    needed for targeted MS1 extraction.
+    """
+    if psm.get("is_decoy"):
+        return None
+    sequence = str(psm.get("sequence") or "").strip()
+    chain = str(psm.get("chain") or "").strip()
+    candidate_id = str(psm.get("candidate_id") or "").strip()
+    if not sequence or not chain or not candidate_id:
+        return None
+    try:
+        start = int(psm.get("start") or 0)
+        end = int(psm.get("end") or 0)
+        neutral_mass = float(psm.get("neutral_mass") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if start <= 0 or end < start or neutral_mass <= 0:
+        return None
+    modifications: list[tuple[int, str, float]] = []
+    for item in psm.get("modifications") or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 3:
+            continue
+        try:
+            modifications.append((int(item[0]), str(item[1]), float(item[2])))
+        except (TypeError, ValueError):
+            continue
+    return PeptideCandidate(
+        candidate_id=candidate_id,
+        base_peptide_id=str(psm.get("base_peptide_id") or f"{chain}:{start}-{end}:{sequence}"),
+        chain=chain,
+        start=start,
+        end=end,
+        sequence=sequence,
+        neutral_mass=neutral_mass,
+        modifications=tuple(modifications),
+        carbamidomethyl_cys=bool(psm.get("carbamidomethyl_cys", True)),
+        proteolysis=str(psm.get("proteolysis") or "fully_tryptic"),
+        is_decoy=False,
+    )
+
+
+def _psm_matches_form(psm: dict[str, object], candidate: PeptideCandidate) -> bool:
+    if str(psm.get("candidate_id") or "") == candidate.candidate_id:
+        return True
+    if not any(name == "C-terminal Lys clipping" for _, name, _ in candidate.modifications):
+        return False
+    try:
+        neutral_mass = float(psm.get("neutral_mass") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(psm.get("chain") or "") == candidate.chain
+        and int(psm.get("start") or 0) == candidate.start
+        and int(psm.get("end") or 0) == candidate.end
+        and str(psm.get("sequence") or "") == candidate.sequence
+        and abs(neutral_mass - candidate.neutral_mass) <= 0.01
+    )
 
 
 def _aligned_psm_rt(psm: dict[str, object], shifts: dict[str, object]) -> float:
@@ -4333,6 +5930,15 @@ def _summarize_form(
         status = "ms1_candidate"
     else:
         status = "not_detected"
+    best_psm = max(
+        psm_rows,
+        key=lambda row: (
+            float(row.get("score") or 0.0),
+            int(row.get("matched_ion_count") or 0),
+            float(row.get("fragment_coverage") or 0.0),
+        ),
+        default=None,
+    )
     return {
         "neutral_mass": neutral_mass,
         "consensus_rt": consensus_rt,
@@ -4347,6 +5953,7 @@ def _summarize_form(
         },
         "rt_apex_by_sample": rt_by_sample,
         "selected_peaks_by_sample": selected_by_sample,
+        "best_psm": best_psm,
     }
 
 
@@ -4411,18 +6018,50 @@ def build_peptide_form_comparisons(
     form so they support one conclusion instead of becoming duplicate Features.
     """
     candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates if not candidate.is_decoy}
+    for psm in psms:
+        rebuilt = _candidate_from_psm(psm)
+        if rebuilt is not None:
+            candidate_by_id.setdefault(rebuilt.candidate_id, rebuilt)
+    available_candidates = list(candidate_by_id.values())
     shifts = dict((payload.get("alignment") or {}).get("rt_shift_by_sample") or {})
     sample_ids = [str(sample) for sample in payload.get("sample_ids") or []]
     reference_sample = str(payload.get("reference_sample") or (sample_ids[0] if sample_ids else ""))
     normalization = dict((payload.get("feature_area_normalization") or {}).get("factor_by_sample") or {})
-    psms_by_candidate: dict[str, list[dict[str, object]]] = {}
-    for psm in psms:
-        psms_by_candidate.setdefault(str(psm.get("candidate_id") or ""), []).append(psm)
+    all_feature_ids = {
+        str(row.get("feature_group_id") or "")
+        for row in payload.get("global_feature_groups") or []
+        if row.get("feature_group_id")
+    }
     significant_feature_ids = {
         str(row.get("feature_group_id") or "")
         for row in payload.get("global_feature_groups") or []
         if row.get("difference_type") in {"presence_absence", "area_changed", "moderate_difference"}
     }
+
+    annotations_by_candidate: dict[str, list[dict[str, object]]] = {}
+    for annotation in annotations:
+        annotations_by_candidate.setdefault(str(annotation.get("candidate_id") or ""), []).append(annotation)
+    triggered_family_candidate_ids: set[str] = set()
+    for psm in psms:
+        feature_ids = {
+            str(link.get("feature_group_id") or "")
+            for link in psm.get("feature_links") or []
+        }
+        if not (feature_ids & significant_feature_ids):
+            continue
+        candidate = candidate_by_id.get(str(psm.get("candidate_id") or ""))
+        if candidate is None:
+            continue
+        counterpart = _candidate_counterpart(candidate, available_candidates) if candidate.modifications else None
+        triggered_family_candidate_ids.add((counterpart or candidate).candidate_id)
+    for annotation in annotations:
+        if str(annotation.get("feature_or_candidate_id") or "") not in significant_feature_ids:
+            continue
+        candidate = candidate_by_id.get(str(annotation.get("candidate_id") or ""))
+        if candidate is None:
+            continue
+        counterpart = _candidate_counterpart(candidate, available_candidates) if candidate.modifications else None
+        triggered_family_candidate_ids.add((counterpart or candidate).candidate_id)
 
     groups: list[dict[str, object]] = []
     for annotation in sorted(annotations, key=lambda row: float(row.get("feature_rt") or 0.0)):
@@ -4433,7 +6072,7 @@ def build_peptide_form_comparisons(
         modified = candidate_by_id.get(str(annotation.get("candidate_id") or ""))
         if modified is None or not modified.modifications:
             continue
-        unmodified = _candidate_counterpart(modified, candidates)
+        unmodified = _candidate_counterpart(modified, available_candidates)
         if unmodified is None:
             continue
         rt = float(annotation.get("feature_rt") or 0.0)
@@ -4450,14 +6089,100 @@ def build_peptide_form_comparisons(
                 "unmodified_candidate": unmodified,
                 "modified_seed_rt": rt,
                 "annotations": [],
+                "supporting_annotations": [],
             }
             groups.append(group)
         elif all(candidate.candidate_id != modified.candidate_id for candidate in group["modified_candidates"]):
             group["modified_candidates"].append(modified)
         group["annotations"].append(annotation)
+        group["supporting_annotations"].append(annotation)
         group["modified_seed_rt"] = statistics.median(
             float(row.get("feature_rt") or rt) for row in group["annotations"]
         )
+
+    # Expand every triggered family with all accepted modified forms.  This is
+    # essential for events such as heavy-chain C-terminal Lys processing: the
+    # retained-K peptide can be differential while the clipped counterpart is
+    # a common Feature.  A significant member therefore triggers targeted
+    # quantitation of every MS2-supported counterpart in the same family.
+    for modified in available_candidates:
+        if modified.is_decoy or not modified.modifications:
+            continue
+        unmodified = _candidate_counterpart(modified, available_candidates)
+        if unmodified is None:
+            continue
+        modified_psms = [psm for psm in psms if _psm_matches_form(psm, modified)]
+        direct_modified_annotations = annotations_by_candidate.get(modified.candidate_id, [])
+        if not modified_psms and not direct_modified_annotations:
+            continue
+        unmodified_psms = [psm for psm in psms if _psm_matches_form(psm, unmodified)]
+        related_candidate_ids = {
+            str(psm.get("candidate_id") or "")
+            for psm in modified_psms + unmodified_psms
+        } | {modified.candidate_id, unmodified.candidate_id}
+        related_annotations = [
+            row
+            for candidate_id in related_candidate_ids
+            for row in annotations_by_candidate.get(candidate_id, [])
+        ]
+        related_feature_ids = {
+            str(link.get("feature_group_id") or "")
+            for psm in modified_psms + unmodified_psms
+            for link in psm.get("feature_links") or []
+        } | {
+            str(row.get("feature_or_candidate_id") or "")
+            for row in related_annotations
+        }
+        if (
+            unmodified.candidate_id not in triggered_family_candidate_ids
+            and not (related_feature_ids & significant_feature_ids)
+        ):
+            continue
+        modified_annotations = [
+            row
+            for candidate_id in {
+                str(psm.get("candidate_id") or "") for psm in modified_psms
+            } | {modified.candidate_id}
+            for row in annotations_by_candidate.get(candidate_id, [])
+        ]
+        modified_rts = [_aligned_psm_rt(psm, shifts) for psm in modified_psms]
+        annotation_rts = [
+            float(row.get("feature_rt") or 0.0)
+            for row in modified_annotations
+            if float(row.get("feature_rt") or 0.0) > 0
+        ]
+        seed_rt = statistics.median(modified_rts or annotation_rts) if (modified_rts or annotation_rts) else 0.0
+        group = next((
+            item for item in groups
+            if item["unmodified_candidate"].candidate_id == unmodified.candidate_id
+            and abs(item["modified_candidate"].neutral_mass - modified.neutral_mass) <= 1e-6
+            and (
+                not seed_rt
+                or not float(item.get("modified_seed_rt") or 0.0)
+                or abs(seed_rt - float(item["modified_seed_rt"])) <= rt_cluster_tolerance_min
+            )
+        ), None)
+        if group is None:
+            group = {
+                "modified_candidate": modified,
+                "modified_candidates": [modified],
+                "unmodified_candidate": unmodified,
+                "modified_seed_rt": seed_rt,
+                "annotations": list(modified_annotations),
+                "supporting_annotations": list(related_annotations),
+            }
+            groups.append(group)
+        else:
+            if all(candidate.candidate_id != modified.candidate_id for candidate in group["modified_candidates"]):
+                group["modified_candidates"].append(modified)
+            group["annotations"].extend(
+                row for row in modified_annotations if row not in group["annotations"]
+            )
+            group["supporting_annotations"].extend(
+                row for row in related_annotations if row not in group["supporting_annotations"]
+            )
+            if modified_rts:
+                group["modified_seed_rt"] = statistics.median(modified_rts)
     if not groups or not sample_ids:
         return []
 
@@ -4469,10 +6194,10 @@ def build_peptide_form_comparisons(
             form_psms = (
                 [
                     psm
-                    for modified_candidate in group["modified_candidates"]
-                    for psm in psms_by_candidate.get(modified_candidate.candidate_id, [])
+                    for psm in psms
+                    if any(_psm_matches_form(psm, modified_candidate) for modified_candidate in group["modified_candidates"])
                 ]
-                if label == "modified" else psms_by_candidate.get(candidate.candidate_id, [])
+                if label == "modified" else [psm for psm in psms if _psm_matches_form(psm, candidate)]
             )
             observed_charges = {
                 int(psm.get("precursor_charge") or 0) for psm in form_psms
@@ -4484,10 +6209,10 @@ def build_peptide_form_comparisons(
                 for offset in (-1, 0, 1)
                 if 1 <= charge + offset <= max_charge
             }) if observed_charges else list(range(1, max_charge + 1))
-            if label == "modified":
+            psm_rts = [_aligned_psm_rt(psm, shifts) for psm in form_psms]
+            if label == "modified" and not psm_rts:
                 seed_rt = float(group["modified_seed_rt"])
             else:
-                psm_rts = [_aligned_psm_rt(psm, shifts) for psm in form_psms]
                 seed_rt = statistics.median(psm_rts) if psm_rts else None
             forms[key] = {
                 "candidate": candidate,
@@ -4571,14 +6296,82 @@ def build_peptide_form_comparisons(
                 "unmodified_charge_trend": _charge_trend(unmodified_summary, reference_sample, test_sample),
             })
         annotations_for_group = group["annotations"]
+        supporting_annotations = group.get("supporting_annotations") or annotations_for_group
         confidence_order = {"B_high_confidence_inferred": 3, "C_tentative": 2, "D_low_evidence": 1}
         best_annotation = max(
-            annotations_for_group,
+            annotations_for_group or supporting_annotations,
             key=lambda row: confidence_order.get(str(row.get("confidence") or ""), 0),
+            default={},
         )
+        if not best_annotation:
+            modified_psm_rows = list(modified_form.get("psms") or [])
+            best_psm = max(
+                modified_psm_rows,
+                key=lambda row: (
+                    confidence_order.get(psm_confidence(row), 0),
+                    float(row.get("score") or 0.0),
+                ),
+                default={},
+            )
+            best_annotation = {
+                "confidence": psm_confidence(best_psm) if best_psm else "D_low_evidence",
+                "feature_ranking": max(
+                    (
+                        float(link.get("feature_ranking") or 0.0)
+                        for psm in modified_psm_rows
+                        for link in psm.get("feature_links") or []
+                    ),
+                    default=0.0,
+                ),
+            }
         modification_alternatives = sorted({
             candidate.modification_text for candidate in group["modified_candidates"]
         })
+        modified_candidate_ids = {
+            candidate.candidate_id for candidate in group["modified_candidates"]
+        }
+        modified_linked_feature_ids = ({
+            str(row.get("feature_or_candidate_id") or "")
+            for row in supporting_annotations
+            if row.get("feature_or_candidate_id")
+            and str(row.get("candidate_id") or "") in modified_candidate_ids
+        } | {
+            str(link.get("feature_group_id") or "")
+            for psm in modified_form.get("psms") or []
+            for link in psm.get("feature_links") or []
+            if link.get("feature_group_id")
+        }) & all_feature_ids
+        unmodified_linked_feature_ids = ({
+            str(row.get("feature_or_candidate_id") or "")
+            for row in supporting_annotations
+            if row.get("feature_or_candidate_id")
+            and str(row.get("candidate_id") or "") == unmodified.candidate_id
+        } | {
+            str(link.get("feature_group_id") or "")
+            for psm in unmodified_form.get("psms") or []
+            for link in psm.get("feature_links") or []
+            if link.get("feature_group_id")
+        }) & all_feature_ids
+        linked_feature_ids = ({
+            str(row.get("feature_or_candidate_id") or "")
+            for row in supporting_annotations
+            if row.get("feature_or_candidate_id")
+        } | {
+            str(link.get("feature_group_id") or "")
+            for form in (modified_form, unmodified_form)
+            for psm in form.get("psms") or []
+            for link in psm.get("feature_links") or []
+            if link.get("feature_group_id")
+        }) & all_feature_ids
+        feature_rankings = [
+            float(row.get("feature_ranking") or 0.0)
+            for row in supporting_annotations
+        ] + [
+            float(link.get("feature_ranking") or 0.0)
+            for form in (modified_form, unmodified_form)
+            for psm in form.get("psms") or []
+            for link in psm.get("feature_links") or []
+        ]
         comparisons.append({
             "rank": index,
             "pair_id": f"PAIR_{index:04d}",
@@ -4587,15 +6380,20 @@ def build_peptide_form_comparisons(
             "start": unmodified.start,
             "end": unmodified.end,
             "sequence": unmodified.sequence,
-            "modification": " / ".join(modification_alternatives),
+            "modification": format_modification_alternatives(
+                modification_alternatives,
+                str(unmodified.sequence or ""),
+            ),
             "modification_alternatives": modification_alternatives,
             "modification_mass_delta": modified.neutral_mass - unmodified.neutral_mass,
             "modified_candidate_id": modified.candidate_id,
-            "modified_candidate_ids": [candidate.candidate_id for candidate in group["modified_candidates"]],
+            "modified_candidate_ids": sorted(modified_candidate_ids),
             "unmodified_candidate_id": unmodified.candidate_id,
-            "linked_feature_ids": sorted({str(row.get("feature_or_candidate_id") or "") for row in annotations_for_group}),
+            "linked_feature_ids": sorted(linked_feature_ids),
+            "modified_linked_feature_ids": sorted(modified_linked_feature_ids),
+            "unmodified_linked_feature_ids": sorted(unmodified_linked_feature_ids),
             "modified_ms2_confidence": best_annotation.get("confidence"),
-            "feature_ranking": max(float(row.get("feature_ranking") or 0.0) for row in annotations_for_group),
+            "feature_ranking": max(feature_rankings, default=0.0),
             "reference_sample": reference_sample,
             "modified_form": modified_summary,
             "unmodified_form": unmodified_summary,
@@ -4608,3 +6406,502 @@ def build_peptide_form_comparisons(
         row["rank"] = rank
         row["pair_id"] = f"PAIR_{rank:04d}"
     return comparisons
+
+
+def build_modification_level_quantitation(
+    peptide_form_comparisons: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Aggregate paired peptide forms into site/proteoform-level proportions.
+
+    The result is deliberately labelled as relative MS-response composition.
+    B-level localized evidence can enter the formal relative summary; C-level
+    evidence remains visible as tentative, while D-level/mass-only hypotheses
+    are excluded from the denominator.
+    """
+    confidence_order = {
+        "B_high_confidence_inferred": 3,
+        "C_tentative": 2,
+        "D_low_evidence": 1,
+    }
+    families: dict[str, dict[str, object]] = {}
+    for comparison in peptide_form_comparisons:
+        confidence = str(comparison.get("modified_ms2_confidence") or "")
+        if confidence_order.get(confidence, 0) < confidence_order["C_tentative"]:
+            continue
+        modification = str(comparison.get("modification") or "").strip()
+        is_terminal_lys = "C-terminal Lys clipping" in modification
+        is_glycan = "glycan" in modification.lower()
+        if is_terminal_lys:
+            event_type = "c_terminal_lys_processing"
+            event_name = "重链 C 端 Lys 剪切/保留"
+            family_key = (
+                f"terminal-lys:{comparison.get('chain')}:{comparison.get('start')}:"
+                f"{comparison.get('unmodified_candidate_id')}"
+            )
+        else:
+            event_type = "glycoform_distribution" if is_glycan else "site_modification_distribution"
+            event_name = "糖型相对构成" if is_glycan else "位点/肽段修饰水平"
+            family_key = f"peptide:{comparison.get('unmodified_candidate_id')}"
+        family = families.setdefault(family_key, {
+            "event_type": event_type,
+            "event_name": event_name,
+            "base_peptide_id": comparison.get("base_peptide_id"),
+            "chain": comparison.get("chain"),
+            "start": comparison.get("start"),
+            "end": comparison.get("end"),
+            "sequence": comparison.get("sequence"),
+            "reference_sample": comparison.get("reference_sample"),
+            "forms": {},
+            "linked_feature_ids": set(),
+            "feature_ranking": 0.0,
+        })
+        family["linked_feature_ids"].update(comparison.get("linked_feature_ids") or [])
+        family["feature_ranking"] = max(
+            float(family.get("feature_ranking") or 0.0),
+            float(comparison.get("feature_ranking") or 0.0),
+        )
+
+        unmodified_summary = dict(comparison.get("unmodified_form") or {})
+        unmodified_label = "C端 Lys 保留" if is_terminal_lys else "未修饰"
+        unmodified_id = f"unmodified:{comparison.get('unmodified_candidate_id')}"
+        unmodified_form = family["forms"].setdefault(unmodified_id, {
+            "form_id": unmodified_id,
+            "label": unmodified_label,
+            "modification": "Unmodified",
+            "is_unmodified": True,
+            "ms2_confidence": "B_high_confidence_inferred" if unmodified_summary.get("status") == "ms2_confirmed" else "C_tentative",
+            "status": unmodified_summary.get("status"),
+            "normalized_area_by_sample": {},
+            "charge_states_by_sample": unmodified_summary.get("charge_states_by_sample") or {},
+            "consensus_rts": [],
+            "linked_feature_ids": set(),
+            "neutral_mass": unmodified_summary.get("neutral_mass"),
+            "best_psm": unmodified_summary.get("best_psm"),
+            "candidate_ids": [comparison.get("unmodified_candidate_id")],
+        })
+        unmodified_form["linked_feature_ids"].update(
+            comparison.get("unmodified_linked_feature_ids") or []
+        )
+        if float(dict(unmodified_summary.get("best_psm") or {}).get("score") or 0.0) > float(dict(unmodified_form.get("best_psm") or {}).get("score") or 0.0):
+            unmodified_form["best_psm"] = unmodified_summary.get("best_psm")
+        for sample_id, area in dict(unmodified_summary.get("normalized_area_by_sample") or {}).items():
+            # The same unmodified denominator is extracted once per paired form;
+            # retain its largest estimate rather than counting it repeatedly.
+            unmodified_form["normalized_area_by_sample"][sample_id] = max(
+                float(unmodified_form["normalized_area_by_sample"].get(sample_id) or 0.0),
+                float(area or 0.0),
+            )
+        if unmodified_summary.get("consensus_rt") is not None:
+            rt = float(unmodified_summary["consensus_rt"])
+            if rt not in unmodified_form["consensus_rts"]:
+                unmodified_form["consensus_rts"].append(rt)
+
+        modified_summary = dict(comparison.get("modified_form") or {})
+        modified_label = "C端 Lys 已剪切" if is_terminal_lys else modification
+        modified_id = (
+            f"modified:{round(float(comparison.get('modification_mass_delta') or 0.0), 5)}:"
+            f"{modified_label}"
+        )
+        modified_form = family["forms"].setdefault(modified_id, {
+            "form_id": modified_id,
+            "label": modified_label,
+            "modification": modification,
+            "is_unmodified": False,
+            "ms2_confidence": confidence,
+            "status": modified_summary.get("status"),
+            "normalized_area_by_sample": {},
+            "charge_states_by_sample": modified_summary.get("charge_states_by_sample") or {},
+            "consensus_rts": [],
+            "linked_feature_ids": set(),
+            "neutral_mass": modified_summary.get("neutral_mass"),
+            "best_psm": modified_summary.get("best_psm"),
+            "candidate_ids": list(comparison.get("modified_candidate_ids") or []),
+        })
+        modified_form["linked_feature_ids"].update(
+            comparison.get("modified_linked_feature_ids") or []
+        )
+        modified_form["candidate_ids"] = sorted({
+            *[str(candidate_id) for candidate_id in modified_form.get("candidate_ids") or [] if candidate_id],
+            *[str(candidate_id) for candidate_id in comparison.get("modified_candidate_ids") or [] if candidate_id],
+        })
+        if float(dict(modified_summary.get("best_psm") or {}).get("score") or 0.0) > float(dict(modified_form.get("best_psm") or {}).get("score") or 0.0):
+            modified_form["best_psm"] = modified_summary.get("best_psm")
+        if confidence_order.get(confidence, 0) > confidence_order.get(str(modified_form.get("ms2_confidence") or ""), 0):
+            modified_form["ms2_confidence"] = confidence
+        for sample_id, area in dict(modified_summary.get("normalized_area_by_sample") or {}).items():
+            modified_form["normalized_area_by_sample"][sample_id] = (
+                float(modified_form["normalized_area_by_sample"].get(sample_id) or 0.0)
+                + float(area or 0.0)
+            )
+        if modified_summary.get("consensus_rt") is not None:
+            rt = float(modified_summary["consensus_rt"])
+            if rt not in modified_form["consensus_rts"]:
+                modified_form["consensus_rts"].append(rt)
+
+    rows: list[dict[str, object]] = []
+    for family_key, family in families.items():
+        forms = list(dict(family.pop("forms")).values())
+        if family["event_type"] == "glycoform_distribution":
+            denominator_forms = [form for form in forms if not form["is_unmodified"]]
+            denominator_scope = "identified_glycoforms_only"
+        else:
+            denominator_forms = forms
+            denominator_scope = "unmodified_plus_eligible_modified_forms"
+        sample_ids = sorted({
+            str(sample_id)
+            for form in denominator_forms
+            for sample_id in dict(form.get("normalized_area_by_sample") or {})
+        })
+        quantifiable = len(denominator_forms) >= 2 and bool(sample_ids)
+        totals = {
+            sample_id: sum(
+                float(dict(form.get("normalized_area_by_sample") or {}).get(sample_id) or 0.0)
+                for form in denominator_forms
+            )
+            for sample_id in sample_ids
+        }
+        for form in forms:
+            form["linked_feature_ids"] = sorted(form.get("linked_feature_ids") or [])
+            areas = dict(form.get("normalized_area_by_sample") or {})
+            included = form in denominator_forms
+            form["included_in_denominator"] = included
+            form["relative_level_by_sample"] = {
+                sample_id: (
+                    float(areas.get(sample_id) or 0.0) / totals[sample_id]
+                    if included and quantifiable and totals[sample_id] > 0 else None
+                )
+                for sample_id in sample_ids
+            }
+        reference_sample = str(family.get("reference_sample") or (sample_ids[0] if sample_ids else ""))
+        pairwise: list[dict[str, object]] = []
+        for test_sample in sample_ids:
+            if not reference_sample or test_sample == reference_sample:
+                continue
+            form_changes = []
+            for form in denominator_forms:
+                levels = dict(form.get("relative_level_by_sample") or {})
+                reference_level = levels.get(reference_sample)
+                test_level = levels.get(test_sample)
+                if reference_level is None or test_level is None:
+                    continue
+                delta = float(test_level) - float(reference_level)
+                form_changes.append({
+                    "form_id": form["form_id"],
+                    "label": form["label"],
+                    "reference_level": reference_level,
+                    "test_level": test_level,
+                    "percentage_point_difference": delta,
+                    "level_fold_test_over_reference": (
+                        float(test_level) / float(reference_level)
+                        if float(reference_level) > 0 else None
+                    ),
+                    "direction": "increased" if delta > 0.005 else ("decreased" if delta < -0.005 else "stable"),
+                })
+            strongest = max(form_changes, key=lambda item: abs(float(item["percentage_point_difference"])), default=None)
+            pairwise.append({
+                "reference_sample": reference_sample,
+                "test_sample": test_sample,
+                "form_changes": form_changes,
+                "strongest_change": strongest,
+            })
+        formal_forms = [
+            form for form in denominator_forms
+            if str(form.get("ms2_confidence") or "").startswith("B_")
+            and form.get("status") == "ms2_confirmed"
+        ]
+        if not quantifiable:
+            quantitation_status = "insufficient_complementary_forms"
+        elif len(formal_forms) == len(denominator_forms):
+            quantitation_status = "formal_relative_quantitation"
+        else:
+            quantitation_status = "tentative_relative_quantitation"
+        strongest_overall = max(
+            (item["strongest_change"] for item in pairwise if item.get("strongest_change")),
+            key=lambda item: abs(float(item["percentage_point_difference"])),
+            default=None,
+        )
+        rows.append({
+            **family,
+            "family_id": family_key,
+            "denominator_scope": denominator_scope,
+            "quantifiable": quantifiable,
+            "quantitation_status": quantitation_status,
+            "relative_ms_response_only": True,
+            "total_area_by_sample": totals,
+            "forms": forms,
+            "pairwise_comparisons": pairwise,
+            "max_percentage_point_difference": (
+                abs(float(strongest_overall["percentage_point_difference"]))
+                if strongest_overall else None
+            ),
+            "high_value_candidate": bool(
+                strongest_overall
+                and quantitation_status == "formal_relative_quantitation"
+                and abs(float(strongest_overall["percentage_point_difference"])) >= 0.05
+            ),
+            "linked_feature_ids": sorted(family["linked_feature_ids"]),
+        })
+    rows.sort(key=lambda row: (
+        bool(row.get("high_value_candidate")),
+        row.get("quantitation_status") == "formal_relative_quantitation",
+        float(row.get("max_percentage_point_difference") or 0.0),
+        float(row.get("feature_ranking") or 0.0),
+    ), reverse=True)
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
+        row["quantitation_id"] = f"MODLEVEL_{rank:04d}"
+    return rows
+
+
+def build_proteolytic_modification_families(
+    modification_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Summarize nested peptide backbones without adding unlike MS responses.
+
+    Peptides sharing one terminus where one sequence contains the other are
+    treated as alternative proteolytic forms.  Their raw areas remain separate;
+    only within-backbone modification proportions and directions are combined
+    into a site-level consensus.
+    """
+    eligible = [
+        row for row in modification_rows
+        if row.get("event_type") in {"site_modification_distribution", "glycoform_distribution"}
+        and row.get("quantifiable")
+        and row.get("chain")
+        and row.get("start") is not None
+        and row.get("end") is not None
+        and row.get("sequence")
+    ]
+    parents = list(range(len(eligible)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(first: int, second: int) -> None:
+        first_root, second_root = find(first), find(second)
+        if first_root != second_root:
+            parents[second_root] = first_root
+
+    def nested(first: dict[str, object], second: dict[str, object]) -> bool:
+        if str(first.get("chain")) != str(second.get("chain")):
+            return False
+        first_start, first_end = int(first["start"]), int(first["end"])
+        second_start, second_end = int(second["start"]), int(second["end"])
+        if first_start == second_start and first_end == second_end:
+            return False
+        contains = (
+            first_start <= second_start <= second_end <= first_end
+            or second_start <= first_start <= first_end <= second_end
+        )
+        if not contains or not (first_start == second_start or first_end == second_end):
+            return False
+        shorter, longer = sorted(
+            (str(first.get("sequence") or ""), str(second.get("sequence") or "")),
+            key=len,
+        )
+        return shorter in longer
+
+    for first_index, first in enumerate(eligible):
+        for second_index in range(first_index + 1, len(eligible)):
+            if nested(first, eligible[second_index]):
+                union(first_index, second_index)
+
+    components: dict[int, list[dict[str, object]]] = {}
+    for index, row in enumerate(eligible):
+        components.setdefault(find(index), []).append(row)
+
+    summaries: list[dict[str, object]] = []
+    for members in components.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda row: (int(row["start"]), int(row["end"])))
+        reference_samples = {
+            str(row.get("reference_sample") or "") for row in members
+            if row.get("reference_sample")
+        }
+        if len(reference_samples) != 1:
+            continue
+        reference_sample = next(iter(reference_samples))
+        sample_ids = sorted({
+            str(sample_id)
+            for row in members
+            for sample_id in dict(row.get("total_area_by_sample") or {})
+        })
+
+        event_support: dict[str, list[dict[str, object]]] = {}
+        member_summaries: list[dict[str, object]] = []
+        for row in members:
+            row_start = int(row["start"])
+            sequence = str(row.get("sequence") or "")
+            totals = dict(row.get("total_area_by_sample") or {})
+            member_summaries.append({
+                "quantitation_id": row.get("quantitation_id"),
+                "rank": row.get("rank"),
+                "start": row.get("start"),
+                "end": row.get("end"),
+                "sequence": sequence,
+                "quantitation_status": row.get("quantitation_status"),
+                "total_area_by_sample": totals,
+            })
+            pairwise_by_test = {
+                str(pair.get("test_sample") or ""): pair
+                for pair in row.get("pairwise_comparisons") or []
+            }
+            for form in row.get("forms") or []:
+                if form.get("is_unmodified") or not form.get("included_in_denominator"):
+                    continue
+                modification = str(form.get("modification") or "").strip()
+                # Ambiguous or compound forms remain in peptide details, but do
+                # not create a cross-peptide localized site conclusion.
+                if any(marker in modification for marker in (";", "；", "/", "位点未区分", "方案")):
+                    continue
+                match = MODIFICATION_SITE_PATTERN.match(modification)
+                if not match:
+                    continue
+                local_position = int(match.group("position"))
+                if not 1 <= local_position <= len(sequence):
+                    continue
+                absolute_position = row_start + local_position - 1
+                residue = sequence[local_position - 1]
+                modification_name = match.group("name")
+                site_label = str(absolute_position) if modification_name.endswith(f"-{residue}") else f"{residue}{absolute_position}"
+                event_label = f"{modification_name}@{site_label}"
+                changes_by_test: dict[str, dict[str, object]] = {}
+                for test_sample, pair in pairwise_by_test.items():
+                    change = next((
+                        item for item in pair.get("form_changes") or []
+                        if item.get("form_id") == form.get("form_id")
+                    ), None)
+                    if change is not None:
+                        changes_by_test[test_sample] = dict(change)
+                event_support.setdefault(event_label, []).append({
+                    "quantitation_id": row.get("quantitation_id"),
+                    "sequence": sequence,
+                    "form_label": form.get("label"),
+                    "ms2_confidence": form.get("ms2_confidence"),
+                    "status": form.get("status"),
+                    "changes_by_test": changes_by_test,
+                })
+
+        site_conclusions: list[dict[str, object]] = []
+        for event_label, support in event_support.items():
+            unique_members = {str(item.get("quantitation_id") or "") for item in support}
+            if len(unique_members) < 2:
+                continue
+            comparisons = []
+            for test_sample in sample_ids:
+                if test_sample == reference_sample:
+                    continue
+                evidence = []
+                for item in support:
+                    change = dict(dict(item.get("changes_by_test") or {}).get(test_sample) or {})
+                    if not change:
+                        continue
+                    evidence.append({
+                        "quantitation_id": item.get("quantitation_id"),
+                        "sequence": item.get("sequence"),
+                        "reference_level": change.get("reference_level"),
+                        "test_level": change.get("test_level"),
+                        "percentage_point_difference": change.get("percentage_point_difference"),
+                        "direction": change.get("direction"),
+                        "evidence_grade": (
+                            "B" if str(item.get("ms2_confidence") or "").startswith("B_")
+                            and item.get("status") == "ms2_confirmed" else "C"
+                        ),
+                    })
+                informative = [item for item in evidence if item.get("direction") in {"increased", "decreased"}]
+                directions = {str(item.get("direction")) for item in informative}
+                consistent = len(evidence) >= 2 and len(informative) == len(evidence) and len(directions) == 1
+                deltas = [float(item.get("percentage_point_difference") or 0.0) for item in evidence]
+                comparisons.append({
+                    "reference_sample": reference_sample,
+                    "test_sample": test_sample,
+                    "evidence": evidence,
+                    "support_count": len(evidence),
+                    "consistent": consistent,
+                    "direction": next(iter(directions)) if consistent else "mixed_or_stable",
+                    "min_percentage_point_difference": min(deltas) if deltas else None,
+                    "max_percentage_point_difference": max(deltas) if deltas else None,
+                    "median_percentage_point_difference": statistics.median(deltas) if deltas else None,
+                    "all_b_grade": bool(evidence) and all(item["evidence_grade"] == "B" for item in evidence),
+                })
+            strongest = max(
+                comparisons,
+                key=lambda item: abs(float(item.get("median_percentage_point_difference") or 0.0)),
+                default=None,
+            )
+            site_conclusions.append({
+                "event_label": event_label,
+                "support": support,
+                "pairwise_comparisons": comparisons,
+                "high_value_consensus": bool(
+                    strongest
+                    and strongest.get("consistent")
+                    and strongest.get("all_b_grade")
+                    and abs(float(strongest.get("median_percentage_point_difference") or 0.0)) >= 0.05
+                ),
+            })
+
+        digestion_comparisons = []
+        for test_sample in sample_ids:
+            if test_sample == reference_sample:
+                continue
+            member_folds = []
+            for member in member_summaries:
+                totals = dict(member.get("total_area_by_sample") or {})
+                reference_area = float(totals.get(reference_sample) or 0.0)
+                test_area = float(totals.get(test_sample) or 0.0)
+                fold = test_area / reference_area if reference_area > 0 and test_area > 0 else None
+                member_folds.append({
+                    "quantitation_id": member.get("quantitation_id"),
+                    "sequence": member.get("sequence"),
+                    "reference_area": reference_area,
+                    "test_area": test_area,
+                    "test_over_reference_fold": fold,
+                })
+            valid_folds = [float(item["test_over_reference_fold"]) for item in member_folds if item["test_over_reference_fold"]]
+            opposite = any(fold >= 1.2 for fold in valid_folds) and any(fold <= 1 / 1.2 for fold in valid_folds)
+            combined_reference = sum(float(item["reference_area"]) for item in member_folds)
+            combined_test = sum(float(item["test_area"]) for item in member_folds)
+            digestion_comparisons.append({
+                "reference_sample": reference_sample,
+                "test_sample": test_sample,
+                "member_folds": member_folds,
+                "opposite_member_directions": opposite,
+                "suspected_digestion_redistribution": opposite,
+                "uncorrected_combined_area_by_sample": {
+                    reference_sample: combined_reference,
+                    test_sample: combined_test,
+                },
+                "uncorrected_combined_test_over_reference_fold": (
+                    combined_test / combined_reference if combined_reference > 0 and combined_test > 0 else None
+                ),
+            })
+
+        if not site_conclusions and not any(
+            item.get("suspected_digestion_redistribution") for item in digestion_comparisons
+        ):
+            continue
+        chain = str(members[0].get("chain") or "")
+        summaries.append({
+            "family_id": f"proteolytic:{chain}:{min(int(row['start']) for row in members)}-{max(int(row['end']) for row in members)}",
+            "chain": chain,
+            "start": min(int(row["start"]) for row in members),
+            "end": max(int(row["end"]) for row in members),
+            "reference_sample": reference_sample,
+            "members": member_summaries,
+            "site_conclusions": site_conclusions,
+            "digestion_comparisons": digestion_comparisons,
+            "high_value_consensus": any(item.get("high_value_consensus") for item in site_conclusions),
+            "relative_ms_response_only": True,
+        })
+    summaries.sort(key=lambda item: (
+        bool(item.get("high_value_consensus")),
+        len(item.get("members") or []),
+    ), reverse=True)
+    for rank, summary in enumerate(summaries, start=1):
+        summary["rank"] = rank
+    return summaries

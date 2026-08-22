@@ -56,8 +56,19 @@ class PeakFirstParams:
     # defaults below so the full report remains responsive on vendor data.
     top_n_mz: int = 40
     top_n_changed_mz: int = 15
+    # Dynamic background candidates are screened cheaply from the summed
+    # spectrum, then confirmed by XIC quality. top_n_changed_mz remains the
+    # report/display limit when this mode is enabled.
+    dynamic_background_candidates: bool = False
+    candidate_spectral_noise_multiplier: float = 3.0
+    candidate_min_local_tic_ppm: float = 1500.0
+    candidate_max_per_tic: int = 200
+    candidate_min_consecutive_scans: int = 3
+    candidate_min_xic_tic_area_fraction: float = 0.0003
     min_changed_mz_gap_da: float = 0.02
-    top_n_peaks: int = 80
+    # Analyze every TIC peak that passes the peak-quality criteria. A positive
+    # value is retained only as an optional diagnostic safety limit.
+    top_n_peaks: int = 0
     max_spectrum_points_per_scan: int = 500
     min_relative_intensity: float = 0.0
     resample_points: int = 100
@@ -1295,6 +1306,13 @@ def find_top_changed_mz(
             }
         )
     changes.sort(key=lambda item: float(item["ranking_score"]), reverse=True)
+    positive_strengths = sorted(
+        max((float(value) for value in dict(item["raw_intensity_by_sample"]).values()), default=0.0)
+        for item in changes
+        if max((float(value) for value in dict(item["raw_intensity_by_sample"]).values()), default=0.0) > 0
+    )
+    lower_strengths = positive_strengths[: max(1, len(positive_strengths) // 2)]
+    spectral_noise = statistics.median(lower_strengths) if lower_strengths else 0.0
     selected: list[dict[str, object]] = []
     for change in changes:
         mz = float(change["mz"])
@@ -1307,10 +1325,43 @@ def find_top_changed_mz(
             for item in selected
         ):
             continue
+        if params.dynamic_background_candidates:
+            raw_strength = max(
+                (float(value) for value in dict(change["raw_intensity_by_sample"]).values()),
+                default=0.0,
+            )
+            local_tic_ppm = max(
+                (float(value) for value in dict(change["normalized_intensity_by_sample"]).values()),
+                default=0.0,
+            )
+            noise_ratio = raw_strength / spectral_noise if spectral_noise > 0 else float("inf")
+            change["candidate_spectral_strength"] = raw_strength
+            change["candidate_spectral_noise"] = spectral_noise
+            change["candidate_spectral_noise_ratio"] = noise_ratio
+            change["candidate_local_tic_ppm"] = local_tic_ppm
+            if noise_ratio < params.candidate_spectral_noise_multiplier:
+                continue
+            if local_tic_ppm < params.candidate_min_local_tic_ppm:
+                continue
         selected.append(change)
-        if params.top_n_changed_mz > 0 and len(selected) >= params.top_n_changed_mz:
+        if params.dynamic_background_candidates:
+            if params.candidate_max_per_tic > 0 and len(selected) >= params.candidate_max_per_tic:
+                break
+        elif params.top_n_changed_mz > 0 and len(selected) >= params.top_n_changed_mz:
             break
     return selected
+
+
+def max_consecutive_positive(values: list[float]) -> int:
+    longest = 0
+    current = 0
+    for value in values:
+        if float(value) > 0:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
 
 
 def extract_xic_points_for_peak(
@@ -1388,11 +1439,16 @@ def detect_xic_lcms_feature(
             "area": 0.0,
             "height": 0.0,
             "signal_to_noise": 0.0,
+            "observed_scan_count": 0,
+            "max_consecutive_observed_scans": 0,
+            "peak_observed_scan_count": 0,
             "match_status": "missing",
             "gap_filled": True,
         }
     rt = [point[0] for point in xic_points]
     intensity = [point[1] for point in xic_points]
+    observed_scan_count = sum(float(value) > 0 for value in intensity)
+    max_consecutive_observed_scans = max_consecutive_positive(intensity)
     max_height = max(intensity, default=0.0)
     apex_index = intensity.index(max_height) if max_height > 0 else 0
     low_values = [value for value in intensity if value <= quantile(intensity, 0.4)]
@@ -1413,6 +1469,7 @@ def detect_xic_lcms_feature(
     for index in range(left + 1, right + 1):
         area += (intensity[index - 1] + intensity[index]) * 0.5 * max(rt[index] - rt[index - 1], 0.0)
     mz_points = [(point[2], point[1]) for point in xic_points[left : right + 1] if point[1] > 0]
+    peak_observed_scan_count = sum(float(value) > 0 for value in intensity[left : right + 1])
     observed_mz = weighted_mz(mz_points) if mz_points else target_mz
     status = "matched" if is_detected else "gap_filled"
     return {
@@ -1434,6 +1491,9 @@ def detect_xic_lcms_feature(
         "area": area,
         "height": max_height,
         "signal_to_noise": max_height / noise if noise > 0 else 0.0,
+        "observed_scan_count": observed_scan_count,
+        "max_consecutive_observed_scans": max_consecutive_observed_scans,
+        "peak_observed_scan_count": peak_observed_scan_count,
         "match_status": status,
         "gap_filled": status == "gap_filled",
     }
@@ -1474,6 +1534,7 @@ def build_peak_feature_groups(
     params: PeakFirstParams,
     area_normalization_factors: dict[str, float] | None = None,
     reference_sample: str | None = None,
+    tic_area_by_sample: dict[str, float] | None = None,
 ) -> list[dict[str, object]]:
     groups: list[dict[str, object]] = []
     sample_ids = list(scans_by_sample)
@@ -1578,6 +1639,27 @@ def build_peak_feature_groups(
             }
         abundance_score = math.log1p(max_area)
         abundance_weighted_score = difference * ranking_confidence_weight * (1.0 + params.feature_abundance_weight * abundance_score)
+        tic_areas = tic_area_by_sample or {}
+        xic_tic_area_fraction_by_sample = {
+            sample_id: (
+                float(areas.get(sample_id) or 0.0) / float(tic_areas.get(sample_id) or 0.0)
+                if float(tic_areas.get(sample_id) or 0.0) > 0
+                else 0.0
+            )
+            for sample_id in sample_ids
+        }
+        max_xic_tic_area_fraction = max(xic_tic_area_fraction_by_sample.values(), default=0.0)
+        xic_quality_pass = any(
+            feature.get("match_status") == "matched"
+            and int(feature.get("max_consecutive_observed_scans") or 0)
+            >= params.candidate_min_consecutive_scans
+            for feature in features.values()
+        )
+        if params.dynamic_background_candidates and (
+            not xic_quality_pass
+            or max_xic_tic_area_fraction < params.candidate_min_xic_tic_area_fraction
+        ):
+            continue
         groups.append(
             {
                 "feature_group_id": f"{tic_peak_id}_FG_{rank:04d}",
@@ -1610,6 +1692,9 @@ def build_peak_feature_groups(
                 "higher_abundance_sample": metrics["higher_abundance_sample"],
                 "lower_abundance_sample": metrics["lower_abundance_sample"],
                 "height_by_sample": heights,
+                "xic_tic_area_fraction_by_sample": xic_tic_area_fraction_by_sample,
+                "max_xic_tic_area_fraction": max_xic_tic_area_fraction,
+                "dynamic_candidate_quality_pass": xic_quality_pass,
                 "features_by_sample": features,
                 "rt_correction_by_sample": {
                     sample_id: float(local_shifts.get(sample_id, 0.0))
@@ -1626,6 +1711,11 @@ def build_peak_feature_groups(
         ),
         reverse=True,
     )
+    for background_rank, group in enumerate(groups, start=1):
+        group["background_candidate_rank"] = background_rank
+        group["primary_report_candidate"] = (
+            params.top_n_changed_mz <= 0 or background_rank <= params.top_n_changed_mz
+        )
     return groups
 
 
@@ -1706,6 +1796,8 @@ def global_feature_groups_from_peaks(
                 "detection_count": group.get("detection_count"),
                 "quantitation_confidence": group.get("quantitation_confidence"),
                 "ranking_confidence_weight": ranking_confidence_weight,
+                "background_candidate_rank": group.get("background_candidate_rank"),
+                "primary_report_candidate": bool(group.get("primary_report_candidate", True)),
                 "higher_abundance_sample": group.get("higher_abundance_sample"),
                 "lower_abundance_sample": group.get("lower_abundance_sample"),
                 "match_score_by_sample": group.get("match_score_by_sample"),
@@ -1874,6 +1966,11 @@ def prepare_peak_first_payload(
     )
     if params.top_n_peaks > 0:
         confirmed = confirmed[: params.top_n_peaks]
+    selected_tic_peak_ids = {str(peak.get("tic_peak_id") or "") for peak in confirmed}
+    for peak in tic_peaks:
+        peak["selected_for_analysis"] = str(peak.get("tic_peak_id") or "") in selected_tic_peak_ids
+        peak["tic_detection_support_samples"] = list(peak.get("supporting_samples") or [])
+        peak["single_sample_tic_support"] = len(peak["tic_detection_support_samples"]) == 1
     peak_results: list[dict[str, object]] = []
     raw_file_by_sample = {raw_file.sample_id: raw_file for raw_file in raw_files}
     area_normalization = tic_area_normalization(scans_by_sample)
@@ -1939,6 +2036,7 @@ def prepare_peak_first_payload(
             params,
             area_normalization_factors=area_normalization_factors,
             reference_sample=reference_sample,
+            tic_area_by_sample=areas,
         )
         top_changed = feature_groups_to_top_changed_mz(feature_groups, params) or spectrum_changed
         status = classify_tic_peak_status(chrom_scores, spectrum_scores, local)
@@ -1962,6 +2060,13 @@ def prepare_peak_first_payload(
                 "top_changed_mz": top_changed,
                 "spectrum_top_changed_mz": spectrum_changed,
                 "feature_groups": feature_groups,
+                "candidate_selection_summary": {
+                    "mode": "dynamic" if params.dynamic_background_candidates else "fixed_rank",
+                    "initial_spectrum_bin_count": len(bins),
+                    "background_candidate_count": len(spectrum_changed),
+                    "qualified_feature_group_count": len(feature_groups),
+                    "displayed_feature_count": len(top_changed),
+                },
                 "feature_alignment_method": "mzmine_join_aligner_with_tic_peak_local_rt_correction",
                 "spectrum_mz_bins": bins,
                 "spectrum_raw_matrix": raw_matrix,
@@ -1978,6 +2083,17 @@ def prepare_peak_first_payload(
         "alignment": alignment,
         "feature_area_normalization": area_normalization,
         "params": params.__dict__,
+        "tic_peak_selection_summary": {
+            "candidate_peak_count": len(tic_peaks),
+            "quality_confirmed_peak_count": sum(
+                peak.get("status") == "confirmed_peak" for peak in tic_peaks
+            ),
+            "analyzed_peak_count": len(confirmed),
+            "single_sample_supported_peak_count": sum(
+                bool(peak.get("single_sample_tic_support")) for peak in confirmed
+            ),
+            "selection_mode": "quality_threshold" if params.top_n_peaks <= 0 else "quality_threshold_with_safety_limit",
+        },
         "chromatograms": {
             sample_id: {
                 "raw": chromatogram_points(scans, 0.0),

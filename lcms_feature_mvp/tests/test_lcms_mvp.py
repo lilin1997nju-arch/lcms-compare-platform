@@ -22,6 +22,7 @@ from core.lcms_peak_first import (  # noqa: E402
     detect_tic_peaks,
     extract_xic_points_for_peak,
     filter_tic_peaks,
+    find_top_changed_mz,
     global_feature_groups_from_peaks,
     local_align_peak_by_apex,
     prepare_peak_first_payload,
@@ -175,14 +176,43 @@ class LCMSMvpTests(unittest.TestCase):
         self.assertIn("feature-analysis-grid", PEAK_FIRST_TEMPLATE)
         self.assertIn('id="featureMs2Canvas"', PEAK_FIRST_TEMPLATE)
         self.assertIn("function ensureMsmsData", PEAK_FIRST_TEMPLATE)
+        self.assertNotIn('id="globalOpenModificationModule"', PEAK_FIRST_TEMPLATE)
+        self.assertNotIn("function renderGlobalOpenModifications", PEAK_FIRST_TEMPLATE)
+        self.assertNotIn("已知修饰优先汇总与开放质量筛查", PEAK_FIRST_TEMPLATE)
         self.assertIn('apiUrl("/api/msms")', PEAK_FIRST_TEMPLATE)
         self.assertIn("function selectedMs2Evidence", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function componentCandidateEvidence", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function componentDisplayLabel", PEAK_FIRST_TEMPLATE)
+        self.assertIn("low_evidence_sequence_candidate", PEAK_FIRST_TEMPLATE)
+        self.assertIn("displaying the best stored covering scan", PEAK_FIRST_TEMPLATE)
+        self.assertIn("component_isotope_fit_score", PEAK_FIRST_TEMPLATE)
+        self.assertIn("isotope fit ${nice(isotopeFit,2)}", PEAK_FIRST_TEMPLATE)
+        self.assertIn('"monoisotope_corrected"', PEAK_FIRST_TEMPLATE)
         self.assertIn("function drawFeatureMs2", PEAK_FIRST_TEMPLATE)
         self.assertIn('queryParams.get("feature_group_id")', PEAK_FIRST_TEMPLATE)
         self.assertIn("b ions", PEAK_FIRST_TEMPLATE)
         self.assertIn("y ions", PEAK_FIRST_TEMPLATE)
         self.assertIn("feature_group_id", PEAK_FIRST_TEMPLATE)
         self.assertIn('id="globalSequenceTracks"', PEAK_FIRST_TEMPLATE)
+        self.assertIn('id="sequenceOverlapDetails"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("function residueHasDirectionOverlap", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function sequenceEvidenceSegment", PEAK_FIRST_TEMPLATE)
+        self.assertIn("选中区域（无方向冲突）", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function renderSequenceOverlapDetails", PEAK_FIRST_TEMPLATE)
+        self.assertIn("data-overlap-position", PEAK_FIRST_TEMPLATE)
+        self.assertIn("diff-overlap-selected", PEAK_FIRST_TEMPLATE)
+        self.assertIn("sequence-overlap-modified-site", PEAK_FIRST_TEMPLATE)
+        self.assertIn("sequence-overlap-fold", PEAK_FIRST_TEMPLATE)
+        self.assertIn("state.sequenceOverlapSelection=null", PEAK_FIRST_TEMPLATE)
+        self.assertIn("红蓝重叠：不同 Feature 方向相反", PEAK_FIRST_TEMPLATE)
+        self.assertIn("9. 修饰水平与蛋白形式差异定量", PEAK_FIRST_TEMPLATE)
+        self.assertIn("10. 差异组分的序列与三级结构定位", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function renderModificationQuantitation", PEAK_FIRST_TEMPLATE)
+        self.assertIn('id="sequenceHigherLegend"', PEAK_FIRST_TEMPLATE)
+        self.assertIn('id="sequenceLowerLegend"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("function updateSequenceDirectionLegend", PEAK_FIRST_TEMPLATE)
+        self.assertIn("红色：${sampleShort(pair.test)} 高于 ${sampleShort(pair.reference)}", PEAK_FIRST_TEMPLATE)
+        self.assertIn("蓝色：${sampleShort(pair.reference)} 高于 ${sampleShort(pair.test)}", PEAK_FIRST_TEMPLATE)
         self.assertIn("function globalSequenceLocations", PEAK_FIRST_TEMPLATE)
         self.assertIn("function preferredStructureChains", PEAK_FIRST_TEMPLATE)
         self.assertIn("PROJECT_STRUCTURE_DEFAULTS", PEAK_FIRST_TEMPLATE)
@@ -590,6 +620,37 @@ class LCMSMvpTests(unittest.TestCase):
 
         self.assertEqual(strict["match_status"], "gap_filled")
         self.assertEqual(permissive["match_status"], "matched")
+        self.assertEqual(permissive["observed_scan_count"], 5)
+        self.assertEqual(permissive["max_consecutive_observed_scans"], 5)
+
+    def test_dynamic_background_candidates_are_thresholded_not_top15_limited(self) -> None:
+        bins = [300.0 + index for index in range(40)]
+        strong = [10_000.0 for _ in range(20)]
+        weak = [100.0 for _ in range(20)]
+        raw_matrix = {
+            "reference": strong + weak,
+            "sample": [value * (2.0 if index % 2 else 0.5) for index, value in enumerate(strong + weak)],
+        }
+        fixed = find_top_changed_mz(
+            bins,
+            raw_matrix,
+            PeakFirstParams(top_n_changed_mz=15),
+        )
+        dynamic = find_top_changed_mz(
+            bins,
+            raw_matrix,
+            PeakFirstParams(
+                top_n_changed_mz=15,
+                dynamic_background_candidates=True,
+                candidate_spectral_noise_multiplier=3.0,
+                candidate_min_local_tic_ppm=0.0,
+                candidate_max_per_tic=200,
+            ),
+        )
+
+        self.assertEqual(len(fixed), 15)
+        self.assertEqual(len(dynamic), 20)
+        self.assertTrue(all(float(item["candidate_spectral_noise_ratio"]) >= 3.0 for item in dynamic))
 
     def test_centroid_consensus_keeps_z3_isotopes_as_real_peaks(self) -> None:
         params = PeakFirstParams(mz_tolerance_ppm=10.0, mz_tolerance_da=0.16)

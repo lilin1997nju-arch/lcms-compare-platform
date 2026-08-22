@@ -121,6 +121,63 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .feature-ms2-status.identified { background:#e7f8f0; color:#087b55; }
     .feature-ms2-status.unresolved { background:#fff5e8; color:#a45d0c; }
     .feature-ms2-status.missing { background:#f1f4f7; color:#667085; }
+    #featureMs2Annotations { margin-top:9px; padding:9px 11px; color:#6a4b0b; border:1px solid #f0d790; border-radius:10px; background:#fffbeb; }
+    .agent-annotation { margin-top:7px; padding-top:7px; border-top:1px solid #f5e7b8; }
+    .mod-quant-summary { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 11px; }
+    .digestion-warning { color:#9a3412; font-weight:750; }
+    .mod-view-switch { display:inline-flex; overflow:hidden; border:1px solid #b9cbe4; border-radius:8px; background:#f8fbff; }
+    .mod-view-switch button { min-width:82px; border:0; border-radius:0; color:#536a86; background:transparent; }
+    .mod-view-switch button.active { color:#fff; background:#2563eb; }
+    .mod-quant-badge { display:inline-flex; padding:3px 8px; border-radius:999px; color:#175cd3; background:#eff8ff; font-size:11px; font-weight:750; }
+    .mod-quant-badge.formal { color:#067647; background:#ecfdf3; }
+    .mod-quant-badge.high-value { color:#9a3412; background:#fff2df; }
+    .mod-quant-table { min-width:1050px; table-layout:fixed; }
+    .mod-quant-table td { vertical-align:top; }
+    .mod-quant-table td.wrap { white-space:normal; text-align:left; }
+    .mod-quant-table th:nth-child(1), .mod-quant-table td:nth-child(1) { width:38px; }
+    .mod-quant-table th:nth-child(2), .mod-quant-table td:nth-child(2) { width:48px; }
+    .mod-quant-table th:nth-child(3), .mod-quant-table td:nth-child(3) { width:190px; }
+    .mod-quant-table th:nth-child(4), .mod-quant-table td:nth-child(4) { width:230px; }
+    .mod-quant-table th:nth-child(6), .mod-quant-table td:nth-child(6) { width:135px; }
+    .mod-quant-table th:nth-child(7), .mod-quant-table td:nth-child(7) { width:70px; }
+    .mod-quant-event { color:#172033; font-weight:780; }
+    .mod-quant-site { margin-top:2px; color:#667085; font-size:10px; }
+    .mod-quant-toggle { width:28px; height:26px; padding:0; border-radius:7px; color:#175cd3; background:#eff8ff; }
+    .mod-quant-conclusion { white-space:normal; color:#344054; text-align:left; }
+    .mod-quant-conclusion.high-value { color:#9a3412; font-weight:750; }
+    .mod-quant-detail-row > td { padding:0 !important; background:#f8fbff; }
+    .mod-proteolytic-group-row > td { background:#eef5ff; border-top:2px solid #b8d1f5; }
+    .mod-proteolytic-group-row.high-value > td { background:#fff8e8; border-top-color:#efb65b; }
+    .mod-proteolytic-member-row > td { background:#fbfdff; }
+    .mod-proteolytic-member-row td:nth-child(3) { padding-left:20px; }
+    .mod-group-sequences { margin-top:4px; color:#667085; font-size:10px; line-height:1.45; }
+    .mod-quant-detail { padding:14px 16px 16px 54px; border-top:1px solid #dbeafe; }
+    .mod-quant-detail-grid { display:grid; grid-template-columns:minmax(300px,.8fr) minmax(520px,1.5fr); gap:16px; align-items:start; }
+    .mod-composition-panel, .mod-form-panel { padding:11px; border:1px solid #dbe3ef; border-radius:10px; background:#fff; }
+    .mod-detail-title { margin-bottom:8px; color:#344054; font-size:11px; font-weight:780; }
+    .mod-composition-row { display:grid; grid-template-columns:86px 1fr; gap:8px; align-items:center; margin:8px 0; }
+    .mod-composition-sample { overflow:hidden; color:#475467; font-size:10px; font-weight:750; text-overflow:ellipsis; }
+    .mod-composition-bar { display:flex; height:24px; overflow:hidden; border:1px solid #d0d5dd; border-radius:6px; background:#f2f4f7; }
+    .mod-composition-scale { display:flex; width:0; height:100%; overflow:hidden; transition:width .58s cubic-bezier(.22,.8,.3,1); }
+    .mod-composition-segment { min-width:0; height:100%; border-right:1px solid rgba(255,255,255,.7); opacity:.9; transition:opacity .35s ease; }
+    .mod-composition-scale.animated .mod-composition-segment { opacity:1; }
+    .mod-form-matrix { width:100%; min-width:0; font-size:10px; }
+    .mod-form-matrix th, .mod-form-matrix td { padding:6px 7px; text-align:right; white-space:nowrap; }
+    .mod-form-matrix th:first-child, .mod-form-matrix td:first-child { width:auto; text-align:left; white-space:normal; }
+    .mod-form-label { display:flex; gap:6px; align-items:flex-start; }
+    .mod-form-swatch { flex:0 0 9px; width:9px; height:9px; margin-top:3px; border-radius:2px; }
+    .mod-form-link { padding:0; border:0; color:#175cd3; background:transparent; font:inherit; text-align:left; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; cursor:pointer; }
+    .mod-form-link:hover { color:#0b4cac; }
+    .mod-form-link-count { flex:0 0 auto; margin-left:3px; color:#667085; font-size:9px; white-space:nowrap; }
+    .mod-form-matrix tr.mod-form-selected td { background:#eef6ff; box-shadow:inset 0 1px #b9d4fb,inset 0 -1px #b9d4fb; }
+    .mod-delta-up { color:#b42318; font-weight:750; }
+    .mod-delta-down { color:#175cd3; font-weight:750; }
+    .mod-delta-stable { color:#667085; }
+    .mod-feature-details { margin-top:10px; }
+    .mod-feature-details summary { cursor:pointer; color:#475467; font-size:10px; font-weight:700; }
+    .mod-quant-feature { margin:2px 3px 2px 0; padding:2px 5px; color:#175cd3; font-size:10px; background:#eff8ff; }
+    @media(max-width:1100px){ .mod-quant-detail-grid{grid-template-columns:1fr;} }
+    @media(prefers-reduced-motion:reduce){ .mod-composition-scale,.mod-composition-segment{transition:none;} }
     @media (max-width:1100px) { main { grid-template-columns:1fr; } .left,.right { grid-column:1; } .feature-analysis-grid { grid-template-columns:1fr; } .settings-layout { grid-template-columns:repeat(2,minmax(0,1fr)); } .settings-layout .settings-group:last-child { grid-column:1 / -1; } }
     .tooltip { position:fixed; display:none; z-index:20; max-width:360px; padding:10px 12px; color:#284360; border:1px solid #cfdcea; border-radius:10px; background:rgba(255,255,255,.97); box-shadow:0 12px 28px rgba(15,23,42,.15); font-size:11px; line-height:1.5; pointer-events:none; }
     .tooltip-title { display:flex; gap:7px; align-items:center; margin-bottom:5px; color:#1d3554; font-weight:800; }
@@ -175,6 +232,7 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .component-tree { display:inline-block; width:24px; color:#98a2b3; text-align:center; }
     .identification-badge { display:inline-block; margin-left:6px; padding:1px 5px; border-radius:10px; background:#ecfdf3; color:#027a48; font-size:10px; font-weight:600; }
     .inference-badge { display:inline-block; margin-left:6px; padding:1px 5px; border-radius:10px; background:#eff8ff; color:#175cd3; font-size:10px; font-weight:600; }
+    .candidate-badge { display:inline-block; margin-left:6px; padding:1px 5px; border-radius:10px; background:#fff5e8; color:#a45d0c; font-size:10px; font-weight:600; }
     .structure-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px; align-items:start; }
     .structure-pane { min-width:0; padding:15px; border:1px solid #e2eaf3; border-radius:13px; background:#f8fafd; }
     .structure-pane h3 { margin:0 0 10px; color:#294866; font-size:13px; }
@@ -203,19 +261,48 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .sequence-residue.global-difference { color:#fff; cursor:pointer; font-weight:700; }
     .sequence-residue.diff-higher { background:#dc2626; }
     .sequence-residue.diff-lower { background:#2563eb; }
-    .sequence-residue.diff-conflict { background:#7c3aed; }
+    .sequence-residue.diff-conflict { background:linear-gradient(135deg,#dc2626 0 46%,#fff 46% 54%,#2563eb 54% 100%); box-shadow:0 0 0 1px #6d28d9 inset; }
+    .sequence-residue.diff-overlap-selected { border-top:2px solid #111827; border-bottom:2px solid #111827; border-radius:0; opacity:1; position:relative; z-index:2; }
+    .sequence-residue.diff-overlap-start { border-left:2px solid #111827; border-radius:4px 0 0 4px; }
+    .sequence-residue.diff-overlap-end { border-right:2px solid #111827; border-radius:0 4px 4px 0; }
     .sequence-residue.diff-tentative { opacity:.62; }
     .sequence-residue.diff-selected { outline:2px solid #111827; outline-offset:1px; opacity:1; position:relative; z-index:1; }
-    .sequence-residue.peptide { color:#fff; background:#dc2626; font-weight:700; }
+    .sequence-residue.peptide { color:#fff; font-weight:700; }
     .sequence-residue.modified { box-shadow:0 0 0 2px #f59e0b inset; }
     .sequence-legend { display:flex; gap:12px; flex-wrap:wrap; margin:7px 0 0; }
     .sequence-legend span { display:inline-flex; align-items:center; gap:5px; }
     .legend-swatch { width:12px; height:12px; border-radius:3px; background:#dc2626; display:inline-block; }
     .legend-swatch.higher { background:#dc2626; }
     .legend-swatch.lower { background:#2563eb; }
-    .legend-swatch.conflict { background:#7c3aed; }
+    .legend-swatch.conflict { background:linear-gradient(135deg,#dc2626 0 46%,#fff 46% 54%,#2563eb 54% 100%); box-shadow:0 0 0 1px #6d28d9 inset; }
     .legend-swatch.tentative { background:#64748b; opacity:.62; }
     .legend-swatch-site { width:12px; height:12px; border-radius:50%; background:#f59e0b; display:inline-block; }
+    .sequence-overlap-details { margin-top:12px; padding:12px; border:1px solid #c4b5fd; border-radius:11px; background:#faf8ff; }
+    .sequence-overlap-heading { display:flex; gap:10px; align-items:center; justify-content:space-between; margin-bottom:7px; }
+    .sequence-overlap-heading b { color:#4c1d95; }
+    .sequence-overlap-heading button { padding:3px 8px; }
+    .sequence-overlap-note { margin-bottom:9px; color:#667085; font-size:12px; }
+    .sequence-overlap-scroll { overflow:auto; padding:9px; border:1px solid #e4def7; border-radius:9px; background:#fff; }
+    .sequence-overlap-reference { display:grid; grid-template-columns:268px minmax(390px,1fr); column-gap:10px; align-items:center; min-height:28px; padding-bottom:5px; border-bottom:1px solid #edf0f5; color:#475467; }
+    .sequence-overlap-row { display:grid; grid-template-columns:108px 150px minmax(390px,1fr); column-gap:10px; align-items:center; min-height:28px; }
+    .sequence-overlap-row { padding:5px 0; border-bottom:1px dashed #edf0f5; }
+    .sequence-overlap-row:last-child { border-bottom:0; }
+    .sequence-overlap-direction { display:flex; flex-direction:column; align-items:flex-start; gap:2px; font-size:12px; white-space:nowrap; }
+    .sequence-overlap-direction-label { display:inline-flex; align-items:center; gap:5px; font-weight:700; }
+    .sequence-overlap-direction-label::before { content:""; width:9px; height:9px; border-radius:3px; background:#dc2626; }
+    .sequence-overlap-direction.lower .sequence-overlap-direction-label::before { background:#2563eb; }
+    .sequence-overlap-fold { padding-left:14px; color:#344054; font-size:13px; font-weight:700; }
+    .sequence-overlap-evidence { display:inline-flex; width:max-content; max-width:150px; padding:3px 6px; border:1px solid #d0d5dd; border-radius:8px; color:#475467; background:#f8fafc; font-size:10px; font-weight:750; line-height:1.3; white-space:normal; }
+    .sequence-overlap-evidence.confirmed { color:#087b55; border-color:#a7e6c7; background:#ecfdf3; }
+    .sequence-overlap-evidence.tentative { color:#a45d0c; border-color:#f5cf7c; background:#fff7e8; }
+    .sequence-overlap-evidence.low { color:#9a6700; border-color:#efd99b; background:#fffaeb; }
+    .sequence-overlap-evidence.mass-only { color:#667085; border-color:#d0d5dd; background:#f2f4f7; }
+    .sequence-overlap-track { white-space:pre; font:12.5px/1.7 Consolas,"Courier New",monospace; letter-spacing:1.5px; color:#344054; }
+    .sequence-overlap-peptide { display:inline; padding:2px 1px; border:0; border-radius:3px; background:#dc2626; color:#fff; font:inherit; letter-spacing:inherit; cursor:pointer; }
+    .sequence-overlap-peptide.lower { background:#2563eb; }
+    .sequence-overlap-modified-site { padding:1px 0; border-radius:2px; background:#facc15; color:#111827; font-weight:800; box-shadow:0 0 0 1px #d97706 inset; }
+    .sequence-overlap-modifications { display:block; min-height:18px; padding:3px 0 1px; color:#92400e; font:11.5px/1.4 Arial,sans-serif; letter-spacing:0; white-space:normal; }
+    .sequence-overlap-modification { display:inline-block; margin-right:6px; padding:1px 5px; border-radius:8px; background:#fef3c7; border:1px solid #f59e0b; }
     #structureViewer { position:relative; width:100%; height:500px; overflow:hidden; border:1px solid #dbe6f2; border-radius:10px; background:#fff; }
     .structure-source-link { color:#175cd3; font-size:12px; }
     @media (max-width:1100px) { .structure-grid { grid-template-columns:1fr; } #structureViewer { height:430px; } }
@@ -338,23 +425,38 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
         <div id="featureMs2Detail" class="feature-ms2-detail">Select a Feature from the heatmap or Feature list.</div>
         <canvas id="featureMs2Canvas" width="900" height="430"></canvas>
         <div id="featureMs2Info" class="note"></div>
+        <div id="featureMs2Annotations" class="note" hidden></div>
       </div>
     </div>
   </section>
 
+  <section class="wide" id="modificationQuantitationModule">
+    <h2>9. 修饰水平与蛋白形式差异定量</h2>
+    <div class="note">将同一肽段骨架的未修饰、已知修饰及末端加工形式归并，合并电荷态和同位素包络后计算各样本的相对 MS 响应构成。B 级进入正式相对定量，C 级仅作暂定结果；仅质量预测不进入分母。</div>
+    <div class="controls">
+      <label>筛选 <input id="modQuantFilter" type="text" placeholder="序列、修饰、事件或 Feature"></label>
+      <label>结果 <select id="modQuantStatus"><option value="quantifiable">可定量</option><option value="formal">仅正式</option><option value="all">全部</option></select></label>
+      <span class="mod-view-switch" aria-label="定量图表显示方式"><button id="modViewComposition" type="button">组成比例</button><button id="modViewXic" type="button">XIC面积</button></span>
+    </div>
+    <div id="modQuantSummary" class="mod-quant-summary"></div>
+    <div class="scroll tall-scroll"><table id="modQuantTable" class="mod-quant-table"></table></div>
+    <div class="note" style="margin-top:8px">“构成变化”表示该形式占同肽段合格形式总响应的比例变化；“形式响应倍数”表示该形式自身归一化面积的组间倍数，两者含义不同。包含关系的长短肽会先形成“酶切形态族”：最终结论采用各肽段内部修饰比例的一致性，不直接相加不同序列面积；族内合计响应只用于判断酶切分配。比例未经标准品或相对响应因子校正，不等同于申报级绝对占有率。</div>
+  </section>
+
   <section class="wide" id="structureMappingModule">
-    <h2>9. 差异组分的序列与三级结构定位</h2>
-    <div class="note">全局视图把所有已获得肽段候选的差异组分定位到轻链（LC）或重链（HC），颜色表示当前所选供试组相对参照组的升降方向；点击有颜色的残基可反选对应Feature。三级结构可从RCSB PDB自动获取或上传PDB/mmCIF。结构定位只显示证据覆盖，不会提高原MS2鉴定置信等级。</div>
+    <h2>10. 差异组分的序列与三级结构定位</h2>
+    <div class="note">全局视图把所有已获得肽段候选的差异组分定位到轻链（LC）或重链（HC）。红色和蓝色分别表示当前所选两个样本中哪一个丰度更高，具体样本名称见下方动态图例；点击有颜色的残基可反选对应Feature。三级结构可从RCSB PDB自动获取或上传PDB/mmCIF。结构定位只显示证据覆盖，不会提高原MS2鉴定置信等级。</div>
     <div class="structure-grid">
       <div class="sequence-overview-pane">
         <div class="global-sequence-overview">
           <h3>LC/HC 全序列差异覆盖总览</h3>
           <div id="globalSequenceStatus" class="structure-status note">正在载入MS2序列证据…</div>
           <div id="globalSequenceTracks" class="global-sequence-tracks"></div>
+          <div id="sequenceOverlapDetails" class="sequence-overlap-details" hidden></div>
           <div class="sequence-legend note">
-            <span><i class="legend-swatch higher"></i>供试组升高</span>
-            <span><i class="legend-swatch lower"></i>供试组降低</span>
-            <span><i class="legend-swatch conflict"></i>方向冲突</span>
+            <span id="sequenceHigherLegend"><i class="legend-swatch higher"></i>红色：当前第二个样本更高</span>
+            <span id="sequenceLowerLegend"><i class="legend-swatch lower"></i>蓝色：当前第一个样本更高</span>
+            <span><i class="legend-swatch conflict"></i>红蓝重叠：不同 Feature 方向相反（点击查看）</span>
             <span><i class="legend-swatch tentative"></i>候选证据</span>
             <span><i class="legend-swatch-site"></i>修饰位点</span>
           </div>
@@ -380,7 +482,7 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
 <script>
 let DATA = null;
 let COMPARISONS = [];
-let state = { comparison:null, selectedPeakId:null, selectedMz:null, selectedFeatureRt:null, selectedFeatureGroupId:null, scrollGlobalSelectionIntoView:false, chromZoom:null, detailZoom:null, xicZoom:null, xicFull:true, xic:null, xicLoading:false, xicRequestId:0, featureMapZoom:null, pairReference:null, pairTest:null, featureMapMode:"direction", globalSort:{key:"ranking_score",dir:"desc"}, mzSort:{key:"ranking_score",dir:"desc"}, expandedComponents:new Set(), features:[], msms:null, msmsLoading:false, msmsLoaded:false, msmsError:null, msmsPromise:null, structureViewer:null, structureModel:null, structureText:null, structureFormat:null, structureLabel:null, structureSourceMeta:null, structureChains:[], structureSourceChainMap:{}, structureSelectedChain:"", structureRenderSignature:"", structureRequestId:0, structureLoading:false, structureAutoAttemptedComparison:null };
+let state = { comparison:null, selectedPeakId:null, selectedMz:null, selectedFeatureRt:null, selectedFeatureGroupId:null, selectedModificationFormKey:null, selectedModificationFormContext:null, scrollGlobalSelectionIntoView:false, chromZoom:null, detailZoom:null, xicZoom:null, xicFull:true, xic:null, xicLoading:false, xicRequestId:0, featureMapZoom:null, pairReference:null, pairTest:null, featureMapMode:"direction", globalSort:{key:"ranking_score",dir:"desc"}, mzSort:{key:"ranking_score",dir:"desc"}, expandedComponents:new Set(), expandedModificationFamilies:new Set(), expandedProteolyticFamilies:new Set(), modQuantViewMode:"composition", features:[], agentAnnotations:[], msms:null, msmsLoading:false, msmsLoaded:false, msmsError:null, msmsPromise:null, sequenceOverlapSelection:null, structureViewer:null, structureModel:null, structureText:null, structureFormat:null, structureLabel:null, structureSourceMeta:null, structureChains:[], structureSourceChainMap:{}, structureSelectedChain:"", structureRenderSignature:"", structureRequestId:0, structureLoading:false, structureAutoAttemptedComparison:null };
 const colors = ["#1f77b4","#e74c3c","#2ecc71","#9b59b6","#f39c12","#00bcd4","#795548","#e91e63"];
 const REPORT_MODULES = [
   {key:"chromModule", label:"TIC / BPC 图"},
@@ -390,6 +492,7 @@ const REPORT_MODULES = [
   {key:"xicModule", label:"XIC 图"},
   {key:"globalFeatureModule", label:"低相似度 Feature 组"},
   {key:"featureMapModule", label:"Feature 热图与 MS/MS"},
+  {key:"modificationQuantitationModule", label:"修饰水平与蛋白形式定量"},
   {key:"structureMappingModule", label:"序列与三级结构"}
 ];
 const TABLE_COLUMN_CONFIG = {
@@ -537,6 +640,10 @@ const ms2StatusText={
   tentative_sequence_region_candidate:"partial b/y sequence-region candidate",
   tentative_feature_consensus_identification:"single-Feature consensus candidate",
   tentative_feature_guided_identification:"MS1-guided tentative identification",
+  tentative_feature_open_mass_identification:"single-Feature open-mass candidate",
+  tentative_feature_glycopeptide_identification:"targeted glycopeptide candidate",
+  tentative_global_open_modification_identification:"global open-modification search",
+  low_evidence_sequence_candidate:"low-evidence sequence candidate",
   selected_precursor_unidentified:"selected precursor, unidentified",
   coisolated_ms2_unresolved:"isolation window covered, unresolved",
   no_ms2_acquired:"no MS2 scan acquired"
@@ -560,6 +667,47 @@ function selectedMs2Evidence(){
   const related=evidence.filter(item=>componentIds.has(String(item.feature_group_id||"")));
   related.sort((a,b)=>Number(Boolean(b.best_psm))-Number(Boolean(a.best_psm)) || Number(a.rank||1e9)-Number(b.rank||1e9));
   return related.length?{feature:related[0],relation:"linked component member"}:null;
+}
+function componentCandidateEvidence(item){
+  if(item?.component_candidate_sequence)return {sequence:item.component_candidate_sequence,modification:item.component_candidate_modification,confidence:item.component_candidate_confidence||"D_low_evidence"};
+  const ids=new Set(featureGroupIds(item));
+  (item?.members||[]).forEach(member=>featureGroupIds(member).forEach(id=>ids.add(id)));
+  const candidates=(state.msms?.feature_evidence||[]).filter(evidence=>ids.has(String(evidence.feature_group_id||""))&&evidence.sequence&&String(evidence.confidence||"")==="D_low_evidence");
+  candidates.sort((a,b)=>Number(b.best_psm?.score||b.candidate_psm?.score||0)-Number(a.best_psm?.score||a.candidate_psm?.score||0));
+  return candidates[0]||null;
+}
+function preferredComponentEvidenceFeatureId(item){
+  const ids=new Set(featureGroupIds(item));
+  (item?.members||[]).forEach(member=>featureGroupIds(member).forEach(id=>ids.add(id)));
+  const statusPriority={
+    identified_direct_precursor:900,
+    tentative_feature_glycopeptide_identification:850,
+    identified_isotope_envelope:800,
+    identified_charge_state_envelope:790,
+    tentative_feature_open_mass_identification:760,
+    tentative_feature_guided_identification:750,
+    tentative_feature_consensus_identification:740,
+    tentative_component_consensus_identification:730,
+    tentative_backbone_sequence_support:720,
+    tentative_truncation_sequence_support:710,
+    tentative_sequence_region_candidate:700,
+    low_evidence_sequence_candidate:600,
+    selected_precursor_unidentified:200,
+    coisolated_ms2_unresolved:100,
+    no_ms2_acquired:0,
+  };
+  const candidates=(state.msms?.feature_evidence||[]).filter(evidence=>ids.has(String(evidence.feature_group_id||"")));
+  candidates.sort((a,b)=>{
+    const aPriority=Number(statusPriority[String(a.ms2_status||"")]||0), bPriority=Number(statusPriority[String(b.ms2_status||"")]||0);
+    return bPriority-aPriority || Number(b.best_psm?.score||b.candidate_psm?.score||0)-Number(a.best_psm?.score||a.candidate_psm?.score||0) || Number(a.rank||1e9)-Number(b.rank||1e9);
+  });
+  return String(candidates[0]?.feature_group_id||item?.component_primary_feature_id||item?.feature_group_id||"");
+}
+function componentDisplayLabel(item){
+  const base=String(item?.component_label||item?.feature_group_id||"");
+  if(item?.identified_component)return base;
+  const candidate=componentCandidateEvidence(item), sequence=String(candidate?.sequence||"");
+  return sequence&&!base.includes(sequence)?`${base} | candidate ${sequence}`:base;
 }
 const residueCode={
   ALA:"A",ARG:"R",ASN:"N",ASP:"D",CYS:"C",GLN:"Q",GLU:"E",GLY:"G",HIS:"H",ILE:"I",
@@ -614,8 +762,18 @@ function sequenceLocationForEvidence(f,relation=""){
   };
 }
 function selectedSequenceLocation(){
+  const context=state.selectedModificationFormContext;
+  if(context){
+    const pair=selectedPair(),areas=context.normalized_area_by_sample||{},referenceValue=Number(areas[pair.reference]||0),testValue=Number(areas[pair.test]||0);
+    return {featureId:String(state.selectedFeatureGroupId||""),featureIds:[String(state.selectedFeatureGroupId||"")].filter(Boolean),evidenceFeatureId:String(state.selectedFeatureGroupId||""),sequence:cleanPeptideSequence(context.sequence),chain:String(context.chain||""),start:Number(context.start),end:Number(context.end),modification:String(context.form_label||context.modification||""),confidence:String(context.ms2_confidence||""),status:String(context.status||""),relation:"第9节选中修饰形式",evidence:context,source:context,direction:testValue>referenceValue?"higher":(testValue<referenceValue?"lower":"equal"),fold:Math.max(referenceValue,testValue)/Math.max(Math.min(referenceValue,testValue),1e-12),logRatio:Math.log(Math.max(testValue,1e-12)/Math.max(referenceValue,1e-12))};
+  }
   const matched=selectedMs2Evidence();
-  return matched?sequenceLocationForEvidence(matched.feature,matched.relation):null;
+  if(!matched)return null;
+  const location=sequenceLocationForEvidence(matched.feature,matched.relation);
+  if(!location)return null;
+  const feature=featureItemById(location.featureId)||matched.feature, pair=pairMetrics(feature);
+  location.direction=pair.direction; location.fold=pair.fold; location.logRatio=pair.logRatio;
+  return location;
 }
 function modificationPositions(location){
   const positions=new Set();
@@ -628,7 +786,38 @@ function modificationPositions(location){
 }
 function evidenceIsTentative(location){
   const confidence=String(location?.confidence||"").toLowerCase(), status=String(location?.status||"").toLowerCase();
-  return confidence.startsWith("c_")||confidence.includes("tentative")||status.startsWith("tentative_");
+  return confidence.startsWith("c_")||confidence.startsWith("d_")||confidence.includes("tentative")||status.startsWith("tentative_")||status==="low_evidence_sequence_candidate";
+}
+function sequenceEvidenceLabel(location){
+  const status=String(location?.status||"").toLowerCase(), confidence=String(location?.confidence||"").toLowerCase();
+  if(["selected_precursor_unidentified","coisolated_ms2_unresolved","no_ms2_acquired"].includes(status)){
+    return {kind:"mass-only",label:"仅质量预测",detail:"无可用于序列定位的碎片证据；序列、修饰和位点均未确认。"};
+  }
+  if(status==="identified_direct_precursor"){
+    return {kind:"confirmed",label:"B级：直接 MS2 定性",detail:"前体与碎片离子支持该序列。"};
+  }
+  if(["identified_isotope_envelope","identified_charge_state_envelope"].includes(status)){
+    return {kind:"confirmed",label:"B级：MS2 包络关联",detail:"由已鉴定 MS2 前体的同位素或电荷态包络关联。"};
+  }
+  if(status==="low_evidence_sequence_candidate"||confidence.startsWith("d_")){
+    return {kind:"low",label:"D级：低证据候选",detail:"存在有限的 MS2 线索，但不足以支持可靠定性。"};
+  }
+  if(status==="tentative_feature_open_mass_identification"){
+    return {kind:"tentative",label:"C级：开放质量候选",detail:"有 MS2 骨架证据，但质量偏移的修饰类型或位点仍待确认。"};
+  }
+  if(status==="tentative_feature_glycopeptide_identification"){
+    return {kind:"tentative",label:"C级：定向糖肽候选",detail:"有糖链诊断离子、核心 Y 离子及肽骨架证据，仍需人工或正交方法确认。"};
+  }
+  if(status.startsWith("tentative_")||confidence.startsWith("c_")){
+    return {kind:"tentative",label:"C级：MS2 暂定候选",detail:"有部分 MS2 支持，但未达到高可信定性标准。"};
+  }
+  return {kind:"low",label:"证据等级未定",detail:"请结合对应 Feature 的 MS2 状态和谱图复核。"};
+}
+function updateSequenceDirectionLegend(){
+  const pair=selectedPair(), higher=$("sequenceHigherLegend"), lower=$("sequenceLowerLegend");
+  const reference=sampleShort(pair.reference||"样本1"), test=sampleShort(pair.test||"样本2");
+  if(higher){higher.innerHTML=`<i class="legend-swatch higher"></i>红色：${escapeHtml(test)} 高于 ${escapeHtml(reference)}`;higher.title=`${pair.test||test} > ${pair.reference||reference}`;}
+  if(lower){lower.innerHTML=`<i class="legend-swatch lower"></i>蓝色：${escapeHtml(reference)} 高于 ${escapeHtml(test)}`;lower.title=`${pair.reference||reference} > ${pair.test||test}`;}
 }
 function globalSequenceLocations(){
   const groups=new Map();
@@ -664,14 +853,74 @@ function chainDisplayName(chain){
   if(upper.includes("_LC")||upper.endsWith("LC"))return `LC（轻链） · ${chain}`;
   return chain||"未命名链";
 }
-async function selectMappedFeature(featureId){
+async function selectMappedFeature(featureId,preserveModificationContext=false){
   const item=featureItemById(featureId);
   if(!item)return;
-  await selectGlobalFeature({...item,feature_group_id:String(featureId)});
+  await selectGlobalFeature({...item,feature_group_id:String(featureId)},preserveModificationContext);
+}
+function residueHasDirectionOverlap(hits){
+  const directions=new Set((hits||[]).map(item=>item.direction));
+  return directions.has("higher")&&directions.has("lower");
+}
+function sequenceEvidenceSegment(locations,chains,selection){
+  if(!selection)return null;
+  const chainEntry=chains.find(([chain])=>chain===selection.chain);
+  if(!chainEntry)return null;
+  const [chain,sequence]=chainEntry, chainLocations=locations.filter(item=>item.chain===chain);
+  const coverage=Array.from({length:sequence.length},()=>[]);
+  chainLocations.forEach(location=>{
+    for(let position=Math.max(1,location.start);position<=Math.min(sequence.length,location.end);position++)coverage[position-1].push(location);
+  });
+  const selectedPosition=Math.max(1,Math.min(sequence.length,Number(selection.position)||1));
+  const selectedHits=coverage[selectedPosition-1]||[];
+  if(!selectedHits.length)return null;
+  let start=selectedPosition, end=selectedPosition;
+  const hasDirectionConflict=residueHasDirectionOverlap(selectedHits);
+  if(hasDirectionConflict){
+    while(start>1&&residueHasDirectionOverlap(coverage[start-2]))start-=1;
+    while(end<sequence.length&&residueHasDirectionOverlap(coverage[end]))end+=1;
+  }else{
+    while(start>1&&coverage[start-2].length&&!residueHasDirectionOverlap(coverage[start-2]))start-=1;
+    while(end<sequence.length&&coverage[end].length&&!residueHasDirectionOverlap(coverage[end]))end+=1;
+  }
+  return {chain,sequence,chainLocations,coverage,selectedPosition,start,end,hasDirectionConflict};
+}
+function renderSequenceOverlapDetails(locations,chains){
+  const panel=$("sequenceOverlapDetails"), selection=state.sequenceOverlapSelection;
+  if(!panel)return;
+  if(!selection){panel.hidden=true;panel.innerHTML="";return;}
+  const segment=sequenceEvidenceSegment(locations,chains,selection);
+  if(!segment){state.sequenceOverlapSelection=null;panel.hidden=true;panel.innerHTML="";return;}
+  const {chain,sequence,chainLocations,start:segmentStart,end:segmentEnd,hasDirectionConflict}=segment;
+  const viewStart=Math.max(1,segmentStart-5), viewEnd=Math.min(sequence.length,segmentEnd+5), pair=selectedPair();
+  const relevant=chainLocations.filter(item=>item.start<=segmentEnd&&item.end>=segmentStart).sort((a,b)=>a.direction.localeCompare(b.direction)||a.start-b.start||b.fold-a.fold);
+  const referenceSequence=sequence.slice(viewStart-1,viewEnd), referenceTrack=`${viewStart}  ${referenceSequence}  ${viewEnd}`;
+  const rows=relevant.map(item=>{
+    const clippedStart=Math.max(viewStart,item.start), clippedEnd=Math.min(viewEnd,item.end);
+    const prefix=" ".repeat(clippedStart-viewStart+String(viewStart).length+2);
+    const lower=item.direction==="lower", higherSample=lower?pair.reference:pair.test;
+    const featureId=item.featureIds?.[0]||"", modification=String(item.modification||"");
+    const evidenceLabel=sequenceEvidenceLabel(item);
+    const annotations=[...modification.matchAll(/(?:^|;\s*)([^;@]+)@(\d+)/g)].map(match=>({name:String(match[1]||"").trim(),relative:Number(match[2]),absolute:item.start+Number(match[2])-1})).filter(annotation=>annotation.name&&Number.isFinite(annotation.relative));
+    const peptideHtml=sequence.slice(clippedStart-1,clippedEnd).split("").map((aa,index)=>{
+      const absolute=clippedStart+index, labels=annotations.filter(annotation=>annotation.absolute===absolute).map(annotation=>annotation.name);
+      return labels.length?`<span class="sequence-overlap-modified-site" title="${escapeHtml(labels.join("; "))} @ ${absolute}">${escapeHtml(aa)}</span>`:escapeHtml(aa);
+    }).join("");
+    const namedModification=modification&&modification!=="Unmodified";
+    const annotationHtml=annotations.length?annotations.map(annotation=>`<span class="sequence-overlap-modification">${escapeHtml(annotation.name)}：${annotation.absolute}</span>`).join(""):(namedModification?`<span class="sequence-overlap-modification">${escapeHtml(modification)}（位点未确定）</span>`:"");
+    const title=`点击选择 ${(item.featureIds||[]).join(", ")}${namedModification?` | ${modification}`:""} | ${evidenceLabel.label}`;
+    return `<div class="sequence-overlap-row"><span class="sequence-overlap-direction ${lower?"lower":"higher"}"><span class="sequence-overlap-direction-label">${escapeHtml(sampleShort(higherSample))} 较高</span><span class="sequence-overlap-fold">${nice(item.fold,2)}x</span></span><span class="sequence-overlap-evidence ${escapeHtml(evidenceLabel.kind)}" title="${escapeHtml(evidenceLabel.detail)}">${escapeHtml(evidenceLabel.label)}</span><span class="sequence-overlap-track">${prefix}<button class="sequence-overlap-peptide ${lower?"lower":"higher"}" data-overlap-feature-id="${escapeHtml(featureId)}" title="${escapeHtml(title)}">${peptideHtml}</button>${annotationHtml?`<span class="sequence-overlap-modifications">${annotationHtml}</span>`:""}</span></div>`;
+  }).join("");
+  panel.hidden=false;
+  const title=hasDirectionConflict?"重叠区（不同 Feature 方向相反）":"选中区域（无方向冲突）";
+  panel.innerHTML=`<div class="sequence-overlap-heading"><b>${title}：${escapeHtml(chainDisplayName(chain))} ${segmentStart}-${segmentEnd}</b><button id="closeSequenceOverlap" type="button">关闭</button></div><div class="sequence-overlap-note">按一级序列真实位置对齐；红色表示 ${escapeHtml(sampleShort(pair.test))} 较高，蓝色表示 ${escapeHtml(sampleShort(pair.reference))} 较高，黄色表示修饰位点。中间的证据标签说明该肽段属于 B/C/D 级，或仅质量预测。点击肽段可反选对应 Feature 和 MS/MS。</div><div class="sequence-overlap-scroll"><div class="sequence-overlap-reference"><b>原序列</b><span class="sequence-overlap-track">${escapeHtml(referenceTrack)}</span></div>${rows}</div>`;
+  $("closeSequenceOverlap").onclick=()=>{state.sequenceOverlapSelection=null;renderGlobalSequenceOverview(locations);};
+  panel.querySelectorAll("[data-overlap-feature-id]").forEach(element=>element.onclick=()=>selectMappedFeature(element.dataset.overlapFeatureId));
 }
 function renderGlobalSequenceOverview(locations){
   const status=$("globalSequenceStatus"), container=$("globalSequenceTracks");
   if(!status||!container)return;
+  updateSequenceDirectionLegend();
   if(state.msmsLoading||!state.msmsLoaded){
     status.innerHTML='<span class="structure-badge">载入MS2证据</span>正在整理全部差异肽段的LC/HC位置。';
     container.innerHTML="";
@@ -689,7 +938,7 @@ function renderGlobalSequenceOverview(locations){
     container.innerHTML="";
     return;
   }
-  const selectedIds=selectedComponentFeatureIds(), pair=selectedPair();
+  const selectedIds=selectedComponentFeatureIds(), pair=selectedPair(), selectedOverlap=sequenceEvidenceSegment(locations,chains,state.sequenceOverlapSelection);
   let coveredResidues=0;
   const cards=chains.map(([chain,sequence])=>{
     const chainLocations=locations.filter(item=>item.chain===chain);
@@ -704,17 +953,21 @@ function renderGlobalSequenceOverview(locations){
     for(let offset=0;offset<sequence.length;offset+=50){
       const residues=sequence.slice(offset,offset+50).split("").map((aa,index)=>{
         const position=offset+index+1, hits=coverage[position-1]||[];
-        const classes=["sequence-residue"], directions=new Set(hits.map(item=>item.direction));
+        const classes=["sequence-residue"], directions=new Set(hits.map(item=>item.direction)), conflict=residueHasDirectionOverlap(hits);
         if(hits.length){
-          classes.push("global-difference",directions.size>1?"diff-conflict":(directions.has("higher")?"diff-higher":"diff-lower"));
+          classes.push("global-difference",conflict?"diff-conflict":(directions.has("higher")?"diff-higher":"diff-lower"));
           if(hits.every(item=>item.tentative))classes.push("diff-tentative");
           if(hits.some(item=>item.featureIds.some(id=>selectedIds.has(id))))classes.push("diff-selected");
           if(hits.some(item=>item.modifiedPositions?.has(position)))classes.push("modified");
+          if(selectedOverlap?.chain===chain&&position>=selectedOverlap.start&&position<=selectedOverlap.end){
+            classes.push("diff-overlap-selected");
+            if(position===selectedOverlap.start)classes.push("diff-overlap-start");
+            if(position===selectedOverlap.end)classes.push("diff-overlap-end");
+          }
         }
-        const best=[...hits].sort((a,b)=>Number(b.featureIds.some(id=>selectedIds.has(id)))-Number(a.featureIds.some(id=>selectedIds.has(id)))||b.fold-a.fold||b.abundance-a.abundance)[0];
-        const details=hits.slice(0,5).map(item=>`${item.direction==="higher"?"↑":"↓"} ${sampleShort(pair.test)} ${nice(item.fold,2)}x | ${item.featureIds.join(", ")} | ${item.sequence}${item.modification&&item.modification!=="Unmodified"?` | ${item.modification}`:""} | ${item.confidence||item.status}`).join("\n");
+        const details=hits.slice(0,5).map(item=>`${item.direction==="higher"?"↑":"↓"} ${item.direction==="higher"?`${sampleShort(pair.test)} > ${sampleShort(pair.reference)}`:`${sampleShort(pair.reference)} > ${sampleShort(pair.test)}`} ${nice(item.fold,2)}x | ${item.featureIds.join(", ")} | ${item.sequence}${item.modification&&item.modification!=="Unmodified"?` | ${item.modification}`:""} | ${item.confidence||item.status}`).join("\n");
         const title=`${chain} ${position} ${aa}${details?`\n${details}`:""}`;
-        const data=best?.featureIds?.[0]?` data-feature-id="${escapeHtml(best.featureIds[0])}"`:"";
+        const data=hits.length?` data-overlap-chain="${escapeHtml(chain)}" data-overlap-position="${position}"`:"";
         return `<span class="${classes.join(" ")}"${data} title="${escapeHtml(title)}">${aa}</span>`;
       }).join("");
       blocks.push(`<div class="sequence-block"><span class="sequence-position">${offset+1}</span><span class="sequence-residues">${residues}</span></div>`);
@@ -722,7 +975,11 @@ function renderGlobalSequenceOverview(locations){
     return `<div class="global-chain-card"><div class="global-chain-heading"><b>${escapeHtml(chainDisplayName(chain))}</b><span class="global-chain-summary">${sequence.length} aa；${chainLocations.length}个非重复差异区域；覆盖${chainCovered}个残基（${nice(chainCovered/sequence.length*100,1)}%）</span></div><div class="global-chain-track">${blocks.join("")}</div></div>`;
   });
   container.innerHTML=cards.join("");
-  container.querySelectorAll("[data-feature-id]").forEach(element=>element.onclick=()=>selectMappedFeature(element.dataset.featureId));
+  container.querySelectorAll("[data-overlap-position]").forEach(element=>element.onclick=()=>{
+    state.sequenceOverlapSelection={chain:element.dataset.overlapChain,position:Number(element.dataset.overlapPosition)};
+    renderGlobalSequenceOverview(locations);
+  });
+  renderSequenceOverlapDetails(locations,chains);
   const mappedFeatureIds=new Set(locations.flatMap(item=>item.featureIds));
   const sequenceEvidenceCount=(state.msms?.feature_evidence||[]).reduce((count,item)=>count+Number(Boolean(sequenceLocationForEvidence(item))),0);
   status.innerHTML=`<span class="structure-badge mapped">全序列差异定位</span><b>${escapeHtml(sampleShort(pair.test))}</b> 相对 <b>${escapeHtml(sampleShort(pair.reference))}</b>：${locations.length}个非重复差异肽段区域，关联${mappedFeatureIds.size}个Feature，覆盖LC/HC共${coveredResidues}个残基。MS2报告中共有${sequenceEvidenceCount}个含主鉴定或候选序列的Feature证据；common/low-confidence及无法解析链位置的证据不着色。`;
@@ -758,7 +1015,7 @@ async function renderSequenceTrack(location){
     const residues=displaySequence.slice(offset,offset+50).split("").map((aa,index)=>{
       const position=offset+index+1;
       const classes=["sequence-residue"];
-      if(Number.isFinite(start)&&Number.isFinite(end)&&position>=start&&position<=end)classes.push("peptide");
+      if(Number.isFinite(start)&&Number.isFinite(end)&&position>=start&&position<=end)classes.push("peptide",location.direction==="lower"?"diff-lower":"diff-higher");
       if(modifiedPositions.has(position))classes.push("modified");
       return `<span class="${classes.join(" ")}" title="${escapeHtml(`${location.chain||"chain"} ${position} ${aa}`)}">${aa}</span>`;
     }).join("");
@@ -768,7 +1025,8 @@ async function renderSequenceTrack(location){
   const positionText=Number.isFinite(start)&&Number.isFinite(end)?`${start}-${end}`:"位置未解析";
   const confidence=location.confidence?` | 证据等级 ${escapeHtml(location.confidence)}`:"";
   const modification=location.modification?` | ${escapeHtml(location.modification)}`:"";
-  status.innerHTML=`<span class="structure-badge mapped">已映射到序列</span><b>${escapeHtml(location.chain||"未命名链")}</b> ${escapeHtml(positionText)} | ${escapeHtml(location.sequence)}${modification}${confidence}`;
+  const pair=selectedPair(), directionText=location.direction==="higher"?`${sampleShort(pair.test)} 高于 ${sampleShort(pair.reference)}`:(location.direction==="lower"?`${sampleShort(pair.reference)} 高于 ${sampleShort(pair.test)}`:"两样本接近");
+  status.innerHTML=`<span class="structure-badge mapped">已映射到序列</span><b>${escapeHtml(location.chain||"未命名链")}</b> ${escapeHtml(positionText)} | ${escapeHtml(location.sequence)} | ${escapeHtml(directionText)}${modification}${confidence}`;
   const first=track.querySelector(".sequence-residue.peptide");
   if(first)track.scrollTop=Math.max(0,first.offsetTop-track.clientHeight/2);
 }
@@ -885,7 +1143,8 @@ function applyStructureMapping(locations,selectedLocation){
     if(selectedMatch){
       const resi=[...new Set(selectedMatch.residues.map(item=>item.resi))];
       selectedSelection={chain:selectedMatch.chain,resi};
-      viewer.setStyle(selectedSelection,{cartoon:{color:"#f59e0b"},stick:{colorscheme:"orangeCarbon",radius:0.18}});
+      const selectedColor=selectedLocation.direction==="lower"?structureColors.lower:(selectedLocation.direction==="higher"?structureColors.higher:structureColors.conflict);
+      viewer.setStyle(selectedSelection,{cartoon:{color:selectedColor},stick:{colorscheme:"orangeCarbon",radius:0.18}});
       for(const siteMatch of String(selectedLocation.modification||"").matchAll(/@(\d+)/g)){
         const queryIndex=Number(siteMatch[1])-1, targetIndex=selectedMatch.queryToTarget?.[queryIndex];
         if(Number.isFinite(targetIndex)){
@@ -911,7 +1170,8 @@ function applyStructureMapping(locations,selectedLocation){
   }else if(selectedLocation){
     selectedText="；选中Feature在该结构中未达到55%覆盖率和55%一致性";
   }
-  status.innerHTML=`${templateBadge}${escapeHtml(state.structureLabel||"结构文件")}：全局${matchedRegions.length}/${(locations||[]).length}个差异肽段区域可映射，红/蓝表示供试组升高/降低，紫色表示重叠方向冲突，橙色表示当前选中Feature${selectedText}。${templateNote}`;
+  const pair=selectedPair(), directionLegend=`红色：${sampleShort(pair.test)} 高于 ${sampleShort(pair.reference)}；蓝色：${sampleShort(pair.reference)} 高于 ${sampleShort(pair.test)}`;
+  status.innerHTML=`${templateBadge}${escapeHtml(state.structureLabel||"结构文件")}：全局${matchedRegions.length}/${(locations||[]).length}个差异肽段区域可映射。${escapeHtml(directionLegend)}；紫色表示重叠方向冲突，橙色棒状表示当前选中Feature${selectedText}。${templateNote}`;
 }
 function drawStructureModule(){
   const locations=globalSequenceLocations(), selectedLocation=selectedSequenceLocation();
@@ -1038,17 +1298,294 @@ function wireStructureControls(){
   $("structureChainSelect").onchange=event=>{state.structureSelectedChain=event.target.value;state.structureRenderSignature="";drawStructureModule();};
   $("resetStructureView").onclick=()=>{if(state.structureViewer){state.structureViewer.zoomTo();state.structureViewer.render();}};
 }
+function modificationQuantitationStatusLabel(status){
+  return {formal_relative_quantitation:"正式相对定量",tentative_relative_quantitation:"暂定相对定量",insufficient_complementary_forms:"互补形式不足"}[status]||status||"";
+}
+function renderProteolyticFamilies(pair,query){
+  const container=$("proteolyticFamilySummary"),families=Array.isArray(state.msms?.proteolytic_modification_families)?state.msms.proteolytic_modification_families:[];
+  if(!container)return new Set();
+  const visible=families.filter(family=>!query||[family.chain,...(family.members||[]).map(member=>member.sequence),...(family.site_conclusions||[]).map(site=>site.event_label)].join(" ").toLowerCase().includes(query));
+  const memberIds=new Set(visible.flatMap(family=>(family.members||[]).map(member=>String(member.quantitation_id||""))));
+  if(!visible.length){container.innerHTML="";return memberIds;}
+  const orientedSiteComparison=site=>{
+    const comparisons=site.pairwise_comparisons||[];
+    const direct=comparisons.find(item=>item.reference_sample===pair.reference&&item.test_sample===pair.test);
+    if(direct)return {...direct,evidence:(direct.evidence||[]).map(item=>({...item}))};
+    const reverse=comparisons.find(item=>item.reference_sample===pair.test&&item.test_sample===pair.reference);
+    if(!reverse)return null;
+    return {...reverse,reference_sample:pair.reference,test_sample:pair.test,direction:reverse.direction==="increased"?"decreased":(reverse.direction==="decreased"?"increased":reverse.direction),min_percentage_point_difference:reverse.max_percentage_point_difference==null?null:-Number(reverse.max_percentage_point_difference),max_percentage_point_difference:reverse.min_percentage_point_difference==null?null:-Number(reverse.min_percentage_point_difference),median_percentage_point_difference:reverse.median_percentage_point_difference==null?null:-Number(reverse.median_percentage_point_difference),evidence:(reverse.evidence||[]).map(item=>({...item,reference_level:item.test_level,test_level:item.reference_level,percentage_point_difference:-Number(item.percentage_point_difference||0),direction:item.direction==="increased"?"decreased":(item.direction==="decreased"?"increased":item.direction)}))};
+  };
+  container.innerHTML=visible.map(family=>{
+    const sites=(family.site_conclusions||[]).map(site=>({site,comparison:orientedSiteComparison(site)})).filter(item=>item.comparison).sort((a,b)=>Math.abs(Number(b.comparison.median_percentage_point_difference||0))-Math.abs(Number(a.comparison.median_percentage_point_difference||0)));
+    const lead=sites[0],comparison=lead?.comparison,site=lead?.site;
+    let conclusion='<span class="note">嵌套肽段已归组，但当前样本对尚无共同定位修饰结论。</span>';
+    if(comparison){
+      if(comparison.consistent){
+        const delta=Number(comparison.median_percentage_point_difference||0),higher=delta>=0?pair.test:pair.reference;
+        const magnitudes=[Math.abs(Number(comparison.min_percentage_point_difference||0)),Math.abs(Number(comparison.max_percentage_point_difference||0))].sort((a,b)=>a-b);
+        conclusion=`<b>${escapeHtml(site.event_label)}</b>：${escapeHtml(sampleShort(higher))} 较高；${comparison.support_count}/${comparison.support_count} 种酶切形态方向一致，变化范围 <b>${(magnitudes[0]*100).toFixed(2)}–${(magnitudes[1]*100).toFixed(2)} 个百分点</b>。`;
+      }else conclusion=`<b>${escapeHtml(site.event_label)}</b>：不同酶切形态的修饰比例方向不一致，暂不形成位点级高价值结论。`;
+    }
+    const totals=(family.members||[]).map(member=>{const area=member.total_area_by_sample||{},referenceArea=Number(area[pair.reference]||0),testArea=Number(area[pair.test]||0),fold=referenceArea>0&&testArea>0?testArea/referenceArea:null;return {member,referenceArea,testArea,fold};});
+    const folds=totals.map(item=>item.fold).filter(Boolean),redistribution=folds.some(fold=>fold>=1.2)&&folds.some(fold=>fold<=1/1.2);
+    const combinedReference=totals.reduce((sum,item)=>sum+item.referenceArea,0),combinedTest=totals.reduce((sum,item)=>sum+item.testArea,0),combinedFold=combinedReference>0&&combinedTest>0?combinedTest/combinedReference:null;
+    const digestionText=redistribution?`<span class="digestion-warning">检测到酶切分配差异：</span>长短肽总响应呈相反方向，不能把任一肽段的总响应差异直接解释为蛋白或修饰丰度差异。`:'各酶切形态总响应未出现明显相反方向。';
+    let combinedText="";
+    if(combinedFold!=null){const higher=combinedFold>=1?pair.test:pair.reference,ratio=combinedFold>=1?combinedFold:1/combinedFold;combinedText=`不同序列未校正合计仅作辅助：${escapeHtml(sampleShort(higher))} ${ratio.toFixed(2)}x。`;}
+    const memberRows=totals.map(({member,referenceArea,testArea,fold})=>{
+      const memberEvidence=comparison?.evidence?.find(item=>item.quantitation_id===member.quantitation_id),delta=memberEvidence?Number(memberEvidence.percentage_point_difference||0):null;
+      let totalDirection="NA";if(fold!=null){const higher=fold>=1?pair.test:pair.reference,ratio=fold>=1?fold:1/fold;totalDirection=`${escapeHtml(sampleShort(higher))} ${ratio.toFixed(2)}x`;}
+      return `<tr><td><b>${escapeHtml(member.sequence||"")}</b><br><span class="note">${member.start||""}-${member.end||""}</span></td><td>${memberEvidence?`${(Number(memberEvidence.reference_level||0)*100).toFixed(2)}% → ${(Number(memberEvidence.test_level||0)*100).toFixed(2)}%`:"NA"}</td><td class="${delta!=null&&delta>0.005?"mod-delta-up":(delta!=null&&delta<-0.005?"mod-delta-down":"mod-delta-stable")}">${delta==null?"NA":`${delta>0?"+":""}${(delta*100).toFixed(2)} pp`}</td><td>${totalDirection}</td><td>${memberEvidence?.evidence_grade||"—"}级</td></tr>`;
+    }).join("");
+    const high=Boolean(site?.high_value_consensus&&comparison?.consistent&&comparison?.all_b_grade);
+    return `<div class="proteolytic-family-card ${high?"high-value":""}"><div class="proteolytic-family-title"><span>位点结论优先</span>${high?'<span class="mod-quant-badge high-value">跨酶切形态高价值</span>':''}${redistribution?'<span class="mod-quant-badge high-value">疑似酶切分配差异</span>':''}<span class="note">${escapeHtml(family.chain||"")} ${family.start||""}-${family.end||""}</span></div><div class="proteolytic-family-conclusion">${conclusion}</div><div class="proteolytic-family-grid"><div class="proteolytic-family-note">${digestionText}<br><span class="note">${combinedText} 不同长度肽段没有响应因子时不计算绝对合并修饰率。</span></div><div class="scroll"><table class="proteolytic-member-table"><tr><th>酶切形态</th><th>${escapeHtml(site?.event_label||"共同修饰")} 构成</th><th>变化</th><th>该肽段总响应</th><th>证据</th></tr>${memberRows}</table></div></div></div>`;
+  }).join("");
+  return memberIds;
+}
+function renderModificationQuantitationLegacy(){
+  const table=$("modQuantTable"),summary=$("modQuantSummary"),filter=$("modQuantFilter"),statusSelect=$("modQuantStatus");
+  if(!table||!summary)return;
+  if(filter&&!filter.dataset.bound){filter.dataset.bound="1";filter.oninput=renderModificationQuantitation;}
+  if(statusSelect&&!statusSelect.dataset.bound){statusSelect.dataset.bound="1";statusSelect.onchange=renderModificationQuantitation;}
+  if(state.msmsLoading||!state.msmsLoaded){
+    summary.innerHTML='<span class="mod-quant-badge">正在载入修饰形式定量…</span>';
+    if($("proteolyticFamilySummary"))$("proteolyticFamilySummary").innerHTML="";
+    table.innerHTML="";
+    return;
+  }
+  if(state.msmsError){
+    summary.innerHTML=`<span class="mod-quant-badge">不可用</span><span class="note">${escapeHtml(state.msmsError)}</span>`;
+    if($("proteolyticFamilySummary"))$("proteolyticFamilySummary").innerHTML="";
+    table.innerHTML="";
+    return;
+  }
+  const all=Array.isArray(state.msms?.modification_level_quantitation)?state.msms.modification_level_quantitation:[];
+  const pair=selectedPair(), query=String(filter?.value||"").trim().toLowerCase(), mode=statusSelect?.value||"quantifiable";
+  const nestedFamilyIds=renderProteolyticFamilies(pair,query);
+  const evaluated=all.map(item=>{
+    const changes=(item.forms||[]).filter(form=>form.included_in_denominator).map(form=>{
+      const levels=form.relative_level_by_sample||{},areas=form.normalized_area_by_sample||{},referenceLevel=levels[pair.reference],testLevel=levels[pair.test];
+      if(referenceLevel==null||testLevel==null)return null;
+      const referenceArea=Number(areas[pair.reference]||0),testArea=Number(areas[pair.test]||0),delta=Number(testLevel)-Number(referenceLevel);
+      const responseFold=referenceArea>0&&testArea>0?testArea/referenceArea:null;
+      return {form,referenceLevel:Number(referenceLevel),testLevel:Number(testLevel),referenceArea,testArea,responseFold,delta};
+    }).filter(Boolean).sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta));
+    const totalAreas=item.total_area_by_sample||{},familyReferenceArea=Number(totalAreas[pair.reference]||0),familyTestArea=Number(totalAreas[pair.test]||0);
+    const familyResponseFold=familyReferenceArea>0&&familyTestArea>0?familyTestArea/familyReferenceArea:null;
+    const familyResponseImbalance=familyResponseFold!=null&&(familyResponseFold>2||familyResponseFold<0.5);
+    return {...item,currentChanges:changes,currentStrongest:changes[0]||null,familyReferenceArea,familyTestArea,familyResponseFold,familyResponseImbalance};
+  }).filter(item=>{
+    if(mode==="formal"&&item.quantitation_status!=="formal_relative_quantitation")return false;
+    if(mode==="quantifiable"&&!item.quantifiable)return false;
+    if(!query)return true;
+    return [item.event_name,item.event_type,item.sequence,item.chain,...(item.linked_feature_ids||[]),...(item.forms||[]).map(form=>form.label)].join(" ").toLowerCase().includes(query);
+  }).sort((a,b)=>Math.abs(Number(b.currentStrongest?.delta||0))-Math.abs(Number(a.currentStrongest?.delta||0))||Number(b.high_value_candidate)-Number(a.high_value_candidate)||Number(a.rank)-Number(b.rank));
+  const formal=all.filter(item=>item.quantitation_status==="formal_relative_quantitation").length,standaloneHigh=all.filter(item=>item.high_value_candidate&&!nestedFamilyIds.has(String(item.quantitation_id||""))).length,siteHigh=(state.msms?.proteolytic_modification_families||[]).filter(item=>item.high_value_consensus).length;
+  summary.innerHTML=`<span class="mod-quant-badge">${all.length} 个肽段形式族</span><span class="mod-quant-badge formal">${formal} 个正式相对定量</span><span class="mod-quant-badge high-value">${siteHigh} 个跨酶切形态高价值结论</span>${standaloneHigh?`<span class="mod-quant-badge high-value">${standaloneHigh} 个独立高价值候选</span>`:""}<span class="note">当前显示 ${evaluated.length} 个；${escapeHtml(sampleShort(pair.test))} 对 ${escapeHtml(sampleShort(pair.reference))}</span>`;
+  if(!evaluated.length){table.innerHTML='<tr><td class="note">当前筛选条件下没有可显示的修饰形式族。</td></tr>';return;}
+  const formPalette=["#2563eb","#f59e0b","#10b981","#8b5cf6","#ef4444","#06b6d4","#84cc16","#f97316","#64748b"];
+  table.innerHTML='<tr><th></th><th>rank</th><th>事件 / 位置</th><th>肽段</th><th>主要变化</th><th>定量等级</th><th>形式数</th></tr>'+evaluated.map(item=>{
+    const changes=item.currentChanges||[], strongest=item.currentStrongest;
+    let conclusion='<span class="note">暂不能形成组间比例结论</span>';
+    if(strongest){
+      const higher=strongest.delta>=0?pair.test:pair.reference;
+      const higherLevel=strongest.delta>=0?strongest.testLevel:strongest.referenceLevel, lowerLevel=strongest.delta>=0?strongest.referenceLevel:strongest.testLevel;
+      let responseText="";
+      if(strongest.responseFold!=null){
+        const responseHigher=strongest.responseFold>=1?pair.test:pair.reference,responseRatio=strongest.responseFold>=1?strongest.responseFold:1/strongest.responseFold;
+        responseText=`；${escapeHtml(sampleShort(responseHigher))} 的该形式归一化响应为 ${responseRatio.toFixed(2)}x`;
+      }
+      conclusion=`<b>${escapeHtml(sampleShort(higher))}</b> 的“${escapeHtml(strongest.form.label)}”构成较高 <b>${(Math.abs(strongest.delta)*100).toFixed(2)} 个百分点</b><br><span class="note">${(lowerLevel*100).toFixed(2)}% → ${(higherLevel*100).toFixed(2)}%${responseText}</span>`;
+    }
+    const location=`${escapeHtml(item.chain||"")} ${item.start||""}-${item.end||""}`;
+    const familyKey=String(item.quantitation_id||item.family_id||item.rank||""), expanded=state.expandedModificationFamilies.has(familyKey);
+    const confidenceGrade=changes.some(change=>String(change.form.ms2_confidence||"").startsWith("C_"))?"含C级定位":"B级形式";
+    const isNestedMember=nestedFamilyIds.has(String(item.quantitation_id||"")),standaloneHighValue=item.high_value_candidate&&!isNestedMember;
+    const imbalanceBadge=item.familyResponseImbalance?' <span class="mod-quant-badge high-value">该肽段总响应不平衡</span>':"";
+    const contextBadge=isNestedMember?' <span class="mod-quant-badge">酶切族成员</span>':"";
+    const summaryRow=`<tr class="${standaloneHighValue?"high-value":""}"><td><button type="button" class="mod-quant-toggle" data-mod-quant-toggle="${escapeHtml(familyKey)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${item.rank||""}</td><td class="wrap"><div class="mod-quant-event">${escapeHtml(item.event_name||"")}${standaloneHighValue?' <span class="mod-quant-badge high-value">独立高价值候选</span>':""}${contextBadge}${imbalanceBadge}</div><div class="mod-quant-site">${location}</div></td><td class="wrap"><b>${escapeHtml(item.sequence||"")}</b></td><td class="mod-quant-conclusion ${standaloneHighValue?"high-value":""}">${conclusion}${isNestedMember?'<br><span class="note">该肽段属于上方酶切形态族，最终判断以位点级一致性结论为准。</span>':""}${item.familyResponseImbalance?'<br><span class="note">该肽段自身总响应相差超过2倍，不单独解释为修饰或蛋白丰度变化。</span>':""}</td><td class="wrap"><b>${escapeHtml(modificationQuantitationStatusLabel(item.quantitation_status))}</b><br><span class="note">${escapeHtml(confidenceGrade)}</span></td><td>${changes.length}</td></tr>`;
+    if(!expanded)return summaryRow;
+    const barForSample=sample=>`<div class="mod-composition-row"><div class="mod-composition-sample" title="${escapeHtml(sample)}">${escapeHtml(sampleShort(sample))}</div><div class="mod-composition-bar">${changes.map((change,index)=>{const level=sample===pair.reference?change.referenceLevel:change.testLevel;return `<span class="mod-composition-segment" style="width:${Math.max(0,level*100)}%;background:${formPalette[index%formPalette.length]}" title="${escapeHtml(change.form.label)}：${(level*100).toFixed(2)}%"></span>`;}).join("")}</div></div>`;
+    const matrixRows=changes.map((change,index)=>{
+      const sign=change.delta>0?"+":"", deltaClass=change.delta>0.005?"mod-delta-up":(change.delta<-0.005?"mod-delta-down":"mod-delta-stable");
+      const evidence=String(change.form.ms2_confidence||"").startsWith("B_")?"B级":(String(change.form.ms2_confidence||"").startsWith("C_")?"C级":"D级");
+      let responseFoldText="NA";
+      if(change.responseFold!=null){const responseHigher=change.responseFold>=1?pair.test:pair.reference,responseRatio=change.responseFold>=1?change.responseFold:1/change.responseFold;responseFoldText=`${escapeHtml(sampleShort(responseHigher))} ${responseRatio.toFixed(2)}x`;}
+      else if(change.referenceArea<=0&&change.testArea>0)responseFoldText=`仅 ${escapeHtml(sampleShort(pair.test))} 检出`;
+      else if(change.testArea<=0&&change.referenceArea>0)responseFoldText=`仅 ${escapeHtml(sampleShort(pair.reference))} 检出`;
+      return `<tr><td><div class="mod-form-label"><span class="mod-form-swatch" style="background:${formPalette[index%formPalette.length]}"></span><span>${escapeHtml(change.form.label)}</span></div></td><td>${(change.referenceLevel*100).toFixed(2)}%</td><td>${(change.testLevel*100).toFixed(2)}%</td><td class="${deltaClass}">${sign}${(change.delta*100).toFixed(2)}</td><td>${responseFoldText}</td><td>${evidence}</td></tr>`;
+    }).join("")||'<tr><td colspan="6" class="note">互补形式不足，暂不能计算构成比例</td></tr>';
+    let familyResponseText="";
+    if(item.familyResponseFold!=null){const familyHigher=item.familyResponseFold>=1?pair.test:pair.reference,familyRatio=item.familyResponseFold>=1?item.familyResponseFold:1/item.familyResponseFold;familyResponseText=`同肽段形式族总归一化响应：${escapeHtml(sampleShort(familyHigher))} 为 ${familyRatio.toFixed(2)}x。`;}
+    const featureButtons=(item.linked_feature_ids||[]).map(id=>`<button type="button" class="mod-quant-feature" data-mod-quant-feature="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join("");
+    const detailRow=`<tr class="mod-quant-detail-row"><td colspan="7"><div class="mod-quant-detail"><div class="mod-quant-detail-grid"><div class="mod-composition-panel"><div class="mod-detail-title">两个样本的形式构成（每条合计100%）</div>${barForSample(pair.reference)}${barForSample(pair.test)}<div class="note">色块对应右侧各形式；极低比例形式可能仅在数值表中可见。${familyResponseText}</div></div><div class="mod-form-panel"><div class="mod-detail-title">逐形式定量：构成比例与该形式自身响应分开显示</div><table class="mod-form-matrix"><tr><th>形式</th><th>${escapeHtml(sampleShort(pair.reference))} 构成</th><th>${escapeHtml(sampleShort(pair.test))} 构成</th><th>构成变化/百分点</th><th>形式响应倍数</th><th>证据</th></tr>${matrixRows}</table></div></div><details class="mod-feature-details"><summary>关联 Feature（${(item.linked_feature_ids||[]).length}）</summary><div>${featureButtons||'<span class="note">无</span>'}</div></details></div></td></tr>`;
+    return summaryRow+detailRow;
+  }).join("");
+  table.querySelectorAll("[data-mod-quant-toggle]").forEach(button=>button.onclick=()=>{const key=String(button.dataset.modQuantToggle||"");if(state.expandedModificationFamilies.has(key))state.expandedModificationFamilies.delete(key);else state.expandedModificationFamilies.add(key);renderModificationQuantitation();});
+  table.querySelectorAll("[data-mod-quant-feature]").forEach(button=>button.onclick=()=>selectMappedFeature(button.dataset.modQuantFeature));
+}
+function modOrientedSiteComparison(site,pair){
+  const comparisons=site?.pairwise_comparisons||[];
+  const direct=comparisons.find(item=>item.reference_sample===pair.reference&&item.test_sample===pair.test);
+  if(direct)return {...direct,evidence:(direct.evidence||[]).map(item=>({...item}))};
+  const reverse=comparisons.find(item=>item.reference_sample===pair.test&&item.test_sample===pair.reference);
+  if(!reverse)return null;
+  const flipDirection=direction=>direction==="increased"?"decreased":(direction==="decreased"?"increased":direction);
+  return {...reverse,reference_sample:pair.reference,test_sample:pair.test,direction:flipDirection(reverse.direction),min_percentage_point_difference:reverse.max_percentage_point_difference==null?null:-Number(reverse.max_percentage_point_difference),max_percentage_point_difference:reverse.min_percentage_point_difference==null?null:-Number(reverse.min_percentage_point_difference),median_percentage_point_difference:reverse.median_percentage_point_difference==null?null:-Number(reverse.median_percentage_point_difference),evidence:(reverse.evidence||[]).map(item=>({...item,reference_level:item.test_level,test_level:item.reference_level,percentage_point_difference:-Number(item.percentage_point_difference||0),direction:flipDirection(item.direction)}))};
+}
+function modFormatArea(value){
+  const number=Number(value||0);
+  if(!Number.isFinite(number))return "NA";
+  return number.toLocaleString("zh-CN",{maximumFractionDigits:0});
+}
+function modEvaluateItem(item,pair){
+  const changes=(item.forms||[]).filter(form=>form.included_in_denominator).map(form=>{
+    const levels=form.relative_level_by_sample||{},areas=form.normalized_area_by_sample||{},referenceLevel=levels[pair.reference],testLevel=levels[pair.test];
+    if(referenceLevel==null||testLevel==null)return null;
+    const referenceArea=Number(areas[pair.reference]||0),testArea=Number(areas[pair.test]||0),delta=Number(testLevel)-Number(referenceLevel);
+    return {form,referenceLevel:Number(referenceLevel),testLevel:Number(testLevel),referenceArea,testArea,responseFold:referenceArea>0&&testArea>0?testArea/referenceArea:null,delta};
+  }).filter(Boolean).sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta));
+  const totals=item.total_area_by_sample||{},familyReferenceArea=Number(totals[pair.reference]||0),familyTestArea=Number(totals[pair.test]||0),familyResponseFold=familyReferenceArea>0&&familyTestArea>0?familyTestArea/familyReferenceArea:null;
+  return {...item,currentChanges:changes,currentStrongest:changes[0]||null,familyReferenceArea,familyTestArea,familyResponseFold,familyResponseImbalance:familyResponseFold!=null&&(familyResponseFold>2||familyResponseFold<0.5)};
+}
+function modItemDetailRow(item,pair,formPalette){
+  const changes=item.currentChanges||[],mode=state.modQuantViewMode||"composition",maxTotal=Math.max(item.familyReferenceArea,item.familyTestArea,1);
+  const barForSample=sample=>{
+    const isReference=sample===pair.reference,total=isReference?item.familyReferenceArea:item.familyTestArea;
+    const scaleWidth=mode==="composition"?100:Math.max(0,total/maxTotal*100);
+    const segments=changes.map((change,index)=>{
+      const value=isReference?change.referenceArea:change.testArea,level=isReference?change.referenceLevel:change.testLevel;
+      const segmentWidth=mode==="composition"?Math.max(0,level*100):(total>0?Math.max(0,value/total*100):0);
+      const title=mode==="composition"?`${change.form.label}：${(level*100).toFixed(2)}%`:`${change.form.label}：${modFormatArea(value)}`;
+      return `<span class="mod-composition-segment" style="width:${segmentWidth}%;background:${formPalette[index%formPalette.length]}" title="${escapeHtml(title)}"></span>`;
+    }).join("");
+    return `<div class="mod-composition-row"><div class="mod-composition-sample" title="${escapeHtml(sample)}">${escapeHtml(sampleShort(sample))}</div><div class="mod-composition-bar"><div class="mod-composition-scale" data-target-width="${scaleWidth.toFixed(4)}">${segments}</div></div></div>`;
+  };
+  const matrixRows=changes.map((change,index)=>{
+    const evidence=String(change.form.ms2_confidence||"").startsWith("B_")?"B级":(String(change.form.ms2_confidence||"").startsWith("C_")?"C级":"D级");
+    let responseFoldText="NA";
+    if(change.responseFold!=null){const responseHigher=change.responseFold>=1?pair.test:pair.reference,responseRatio=change.responseFold>=1?change.responseFold:1/change.responseFold;responseFoldText=`${escapeHtml(sampleShort(responseHigher))} ${responseRatio.toFixed(2)}x`;}
+    else if(change.referenceArea<=0&&change.testArea>0)responseFoldText=`仅 ${escapeHtml(sampleShort(pair.test))} 检出`;
+    else if(change.testArea<=0&&change.referenceArea>0)responseFoldText=`仅 ${escapeHtml(sampleShort(pair.reference))} 检出`;
+    const linkedIds=(change.form.linked_feature_ids||[]).map(String).filter(Boolean),formKey=`${item.quantitation_id||item.family_id||""}::${change.form.form_id||change.form.label||index}`,selected=state.selectedModificationFormKey===formKey,targetable=linkedIds.length||Number.isFinite(Number(change.form.neutral_mass))&&Boolean((change.form.consensus_rts||[]).length);
+    const formText=targetable?`<button type="button" class="mod-form-link" data-mod-form-key="${escapeHtml(formKey)}" data-mod-form-links="${escapeHtml(linkedIds.join("|"))}" title="${linkedIds.length?"点击后联动 Feature、热图、XIC、MS/MS、序列及结构模块":"该形式不在差异Feature表中；点击后联动目标XIC、MS/MS、序列及结构模块"}">${escapeHtml(change.form.label)}</button><span class="mod-form-link-count">↗ ${linkedIds.length||"XIC"}</span>`:`<span title="该形式暂无可关联信号">${escapeHtml(change.form.label)}</span>`;
+    const label=`<div class="mod-form-label"><span class="mod-form-swatch" style="background:${formPalette[index%formPalette.length]}"></span>${formText}</div>`;
+    if(mode==="xic")return `<tr class="${selected?"mod-form-selected":""}"><td>${label}</td><td>${modFormatArea(change.referenceArea)}</td><td>${modFormatArea(change.testArea)}</td><td>${responseFoldText}</td><td>${evidence}</td></tr>`;
+    const sign=change.delta>0?"+":"",deltaClass=change.delta>0.005?"mod-delta-up":(change.delta<-0.005?"mod-delta-down":"mod-delta-stable");
+    return `<tr class="${selected?"mod-form-selected":""}"><td>${label}</td><td>${(change.referenceLevel*100).toFixed(2)}%</td><td>${(change.testLevel*100).toFixed(2)}%</td><td class="${deltaClass}">${sign}${(change.delta*100).toFixed(2)}</td><td>${responseFoldText}</td><td>${evidence}</td></tr>`;
+  }).join("")||`<tr><td colspan="${mode==="xic"?5:6}" class="note">互补形式不足，暂不能计算</td></tr>`;
+  let familyResponseText="";
+  if(item.familyResponseFold!=null){const higher=item.familyResponseFold>=1?pair.test:pair.reference,ratio=item.familyResponseFold>=1?item.familyResponseFold:1/item.familyResponseFold;familyResponseText=`同肽段形式族总归一化 XIC 响应：${escapeHtml(sampleShort(higher))} 为 ${ratio.toFixed(2)}x。`;}
+  const panelTitle=mode==="xic"?"两个样本的归一化 XIC 面积（条形总长度使用同一尺度）":"两个样本的形式构成（每条合计100%）";
+  const panelNote=mode==="xic"?`色块宽度表示各形式的 XIC 面积；较长样本条代表该肽段总响应更高。数值已按总 TIC 归一化以便跨样本比较，不是未经校正的原始面积。${familyResponseText}`:`色块对应右侧各形式；极低比例形式可能仅在数值表中可见。${familyResponseText}`;
+  const tableTitle=mode==="xic"?"逐形式归一化 XIC 面积":"逐形式定量：构成比例与形式自身响应分开显示";
+  const tableHead=mode==="xic"?`<tr><th>形式</th><th>${escapeHtml(sampleShort(pair.reference))} XIC面积</th><th>${escapeHtml(sampleShort(pair.test))} XIC面积</th><th>XIC面积比</th><th>证据</th></tr>`:`<tr><th>形式</th><th>${escapeHtml(sampleShort(pair.reference))} 构成</th><th>${escapeHtml(sampleShort(pair.test))} 构成</th><th>构成变化/百分点</th><th>形式响应倍数</th><th>证据</th></tr>`;
+  const featureButtons=(item.linked_feature_ids||[]).map(id=>`<button type="button" class="mod-quant-feature" data-mod-quant-feature="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join("");
+  return `<tr class="mod-quant-detail-row"><td colspan="7"><div class="mod-quant-detail"><div class="mod-quant-detail-grid"><div class="mod-composition-panel"><div class="mod-detail-title">${panelTitle}</div>${barForSample(pair.reference)}${barForSample(pair.test)}<div class="note">${panelNote}</div></div><div class="mod-form-panel"><div class="mod-detail-title">${tableTitle}</div><table class="mod-form-matrix">${tableHead}${matrixRows}</table></div></div><details class="mod-feature-details"><summary>关联 Feature（${(item.linked_feature_ids||[]).length}）</summary><div>${featureButtons||'<span class="note">无</span>'}</div></details></div></td></tr>`;
+}
+function modItemRows(item,pair,formPalette,nestedMember=false){
+  const changes=item.currentChanges||[],strongest=item.currentStrongest;
+  let conclusion='<span class="note">暂不能形成组间比例结论</span>';
+  if(strongest){
+    const higher=strongest.delta>=0?pair.test:pair.reference,higherLevel=strongest.delta>=0?strongest.testLevel:strongest.referenceLevel,lowerLevel=strongest.delta>=0?strongest.referenceLevel:strongest.testLevel;
+    let responseText="";
+    if(strongest.responseFold!=null){const responseHigher=strongest.responseFold>=1?pair.test:pair.reference,responseRatio=strongest.responseFold>=1?strongest.responseFold:1/strongest.responseFold;responseText=`；${escapeHtml(sampleShort(responseHigher))} 的该形式归一化响应为 ${responseRatio.toFixed(2)}x`;}
+    conclusion=`<b>${escapeHtml(sampleShort(higher))}</b> 的“${escapeHtml(strongest.form.label)}”构成较高 <b>${(Math.abs(strongest.delta)*100).toFixed(2)} 个百分点</b><br><span class="note">${(lowerLevel*100).toFixed(2)}% → ${(higherLevel*100).toFixed(2)}%${responseText}</span>`;
+  }
+  const familyKey=String(item.quantitation_id||item.family_id||item.rank||""),expanded=state.expandedModificationFamilies.has(familyKey),standaloneHigh=item.high_value_candidate&&!nestedMember;
+  const confidenceGrade=changes.some(change=>String(change.form.ms2_confidence||"").startsWith("C_"))?"含C级定位":"B级形式";
+  const badges=`${standaloneHigh?'<span class="mod-quant-badge high-value">独立高价值候选</span>':""}${nestedMember?'<span class="mod-quant-badge">分组内序列</span>':""}${item.familyResponseImbalance?'<span class="mod-quant-badge high-value">该肽段总响应不平衡</span>':""}`;
+  const rowClass=`${nestedMember?"mod-proteolytic-member-row ":""}${standaloneHigh?"high-value":""}`;
+  const summaryRow=`<tr class="${rowClass}"><td><button type="button" class="mod-quant-toggle" data-mod-quant-toggle="${escapeHtml(familyKey)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${item.rank||""}</td><td class="wrap"><div class="mod-quant-event">${escapeHtml(item.event_name||"")} ${badges}</div><div class="mod-quant-site">${escapeHtml(item.chain||"")} ${item.start||""}-${item.end||""}</div></td><td class="wrap"><b>${escapeHtml(item.sequence||"")}</b></td><td class="mod-quant-conclusion ${standaloneHigh?"high-value":""}">${conclusion}${item.familyResponseImbalance?'<br><span class="note">该肽段自身总响应不单独解释为修饰或蛋白丰度变化。</span>':""}</td><td class="wrap"><b>${escapeHtml(modificationQuantitationStatusLabel(item.quantitation_status))}</b><br><span class="note">${escapeHtml(confidenceGrade)}</span></td><td>${changes.length}</td></tr>`;
+  return summaryRow+(expanded?modItemDetailRow(item,pair,formPalette):"");
+}
+function modProteolyticGroupRows(family,members,pair,formPalette){
+  const key=String(family.family_id||family.rank||""),expanded=state.expandedProteolyticFamilies.has(key);
+  const sites=(family.site_conclusions||[]).map(site=>({site,comparison:modOrientedSiteComparison(site,pair)})).filter(item=>item.comparison).sort((a,b)=>Math.abs(Number(b.comparison.median_percentage_point_difference||0))-Math.abs(Number(a.comparison.median_percentage_point_difference||0)));
+  const lead=sites[0],comparison=lead?.comparison,site=lead?.site;
+  const totals=members.map(member=>{const fold=member.familyReferenceArea>0&&member.familyTestArea>0?member.familyTestArea/member.familyReferenceArea:null;return {member,fold};}),folds=totals.map(item=>item.fold).filter(Boolean),redistribution=folds.some(fold=>fold>=1.2)&&folds.some(fold=>fold<=1/1.2);
+  let conclusion='<span class="note">展开查看各条重叠肽段的定量结果。</span>';
+  if(comparison?.consistent){
+    const delta=Number(comparison.median_percentage_point_difference||0),higher=delta>=0?pair.test:pair.reference,magnitudes=[Math.abs(Number(comparison.min_percentage_point_difference||0)),Math.abs(Number(comparison.max_percentage_point_difference||0))].sort((a,b)=>a-b);
+    conclusion=`<b>${escapeHtml(site.event_label)}</b>：${escapeHtml(sampleShort(higher))} 较高；${comparison.support_count}/${comparison.support_count} 条重叠肽段方向一致，变化范围 <b>${(magnitudes[0]*100).toFixed(2)}–${(magnitudes[1]*100).toFixed(2)} 个百分点</b>。`;
+  }else if(comparison)conclusion=`<b>${escapeHtml(site.event_label)}</b>：重叠肽段间方向不一致，暂不形成位点级结论。`;
+  const high=Boolean(site?.high_value_consensus&&comparison?.consistent&&comparison?.all_b_grade),rank=Math.min(...members.map(member=>Number(member.rank||9999))),sequences=members.map(member=>member.sequence).join(" / ");
+  const groupRow=`<tr class="mod-proteolytic-group-row ${high?"high-value":""}"><td><button type="button" class="mod-quant-toggle" data-proteolytic-toggle="${escapeHtml(key)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${rank}</td><td class="wrap"><div class="mod-quant-event">重叠肽段修饰组 ${high?'<span class="mod-quant-badge high-value">跨序列高价值</span>':""}${redistribution?'<span class="mod-quant-badge high-value">疑似酶切分配差异</span>':""}</div><div class="mod-quant-site">${escapeHtml(family.chain||"")} ${family.start||""}-${family.end||""}</div></td><td class="wrap"><b>${members.length} 条互相包含序列</b><div class="mod-group-sequences">${escapeHtml(sequences)}</div></td><td class="mod-quant-conclusion ${high?"high-value":""}">${conclusion}${redistribution?'<br><span class="note">长短肽总响应呈相反方向，展开后分别复核；不同序列面积不直接合并为绝对修饰率。</span>':""}</td><td class="wrap"><b>位点一致性判断</b><br><span class="note">各序列独立定量</span></td><td>${members.length} 序列</td></tr>`;
+  if(!expanded)return groupRow;
+  return groupRow+members.map(member=>modItemRows(member,pair,formPalette,true)).join("");
+}
+function modBestLinkedFeatureId(featureIds){
+  return (featureIds||[]).map(id=>({id:String(id),item:featureItemById(id)})).filter(entry=>entry.item).sort((first,second)=>{
+    const significant=item=>["presence_absence","area_changed","moderate_difference"].includes(String(item?.difference_type||""))?1:0;
+    return significant(second.item)-significant(first.item)||Number(second.item.ranking_score||0)-Number(first.item.ranking_score||0)||Math.max(...Object.values(second.item.normalized_area_by_sample||second.item.area_by_sample||{}).map(Number),0)-Math.max(...Object.values(first.item.normalized_area_by_sample||first.item.area_by_sample||{}).map(Number),0);
+  })[0]?.id||null;
+}
+function modFormContextByKey(formKey){
+  for(const item of state.msms?.modification_level_quantitation||[]){
+    for(const form of item.forms||[]){
+      const key=`${item.quantitation_id||item.family_id||""}::${form.form_id||form.label||""}`;
+      if(key===formKey)return {...form,quantitation_id:item.quantitation_id,family_id:item.family_id,sequence:item.sequence,chain:item.chain,start:item.start,end:item.end,reference_sample:item.reference_sample,form_label:form.label};
+    }
+  }
+  return null;
+}
+async function selectTargetedModificationForm(context){
+  if(!context)return;
+  const bestPsm=context.best_psm||{},charges=[Number(bestPsm.precursor_charge||0),...Object.values(context.charge_states_by_sample||{}).flat().map(Number)].filter(charge=>Number.isFinite(charge)&&charge>0),charge=charges[0]||1,neutralMass=Number(context.neutral_mass),rts=(context.consensus_rts||[]).map(Number).filter(Number.isFinite),rt=rts.length?rts.sort((a,b)=>a-b)[Math.floor(rts.length/2)]:Number(bestPsm.rt),mz=neutralMass/charge+1.007276466621;
+  if(!Number.isFinite(mz)||!Number.isFinite(rt))return;
+  const peaks=DATA.peak_results||[],containing=peaks.find(peak=>Number(peak.rt_start)<=rt&&rt<=Number(peak.rt_end)),nearest=containing||[...peaks].sort((first,second)=>Math.abs(Number(first.rt_apex)-rt)-Math.abs(Number(second.rt_apex)-rt))[0];
+  state.selectedPeakId=nearest?.tic_peak_id||null;state.selectedFeatureGroupId=null;state.scrollGlobalSelectionIntoView=false;state.detailZoom=null;state.xic=null;state.xicZoom=null;
+  await selectSpectrumMz(mz,rt,null,false,true);
+}
+function renderModificationQuantitation(){
+  const table=$("modQuantTable"),summary=$("modQuantSummary"),filter=$("modQuantFilter"),statusSelect=$("modQuantStatus"),compositionButton=$("modViewComposition"),xicButton=$("modViewXic");
+  if(!table||!summary)return;
+  if(filter&&!filter.dataset.bound){filter.dataset.bound="1";filter.oninput=renderModificationQuantitation;}
+  if(statusSelect&&!statusSelect.dataset.bound){statusSelect.dataset.bound="1";statusSelect.onchange=renderModificationQuantitation;}
+  if(compositionButton&&!compositionButton.dataset.bound){compositionButton.dataset.bound="1";compositionButton.onclick=()=>{state.modQuantViewMode="composition";renderModificationQuantitation();};}
+  if(xicButton&&!xicButton.dataset.bound){xicButton.dataset.bound="1";xicButton.onclick=()=>{state.modQuantViewMode="xic";renderModificationQuantitation();};}
+  if(compositionButton)compositionButton.classList.toggle("active",state.modQuantViewMode==="composition");
+  if(xicButton)xicButton.classList.toggle("active",state.modQuantViewMode==="xic");
+  if(state.msmsLoading||!state.msmsLoaded){summary.innerHTML='<span class="mod-quant-badge">正在载入修饰形式定量…</span>';table.innerHTML="";return;}
+  if(state.msmsError){summary.innerHTML=`<span class="mod-quant-badge">不可用</span><span class="note">${escapeHtml(state.msmsError)}</span>`;table.innerHTML="";return;}
+  const all=Array.isArray(state.msms?.modification_level_quantitation)?state.msms.modification_level_quantitation:[],pair=selectedPair(),query=String(filter?.value||"").trim().toLowerCase(),filterMode=statusSelect?.value||"quantifiable";
+  const evaluated=all.map(item=>modEvaluateItem(item,pair)).filter(item=>{
+    if(filterMode==="formal"&&item.quantitation_status!=="formal_relative_quantitation")return false;
+    if(filterMode==="quantifiable"&&!item.quantifiable)return false;
+    if(!query)return true;
+    return [item.event_name,item.event_type,item.sequence,item.chain,...(item.linked_feature_ids||[]),...(item.forms||[]).map(form=>form.label)].join(" ").toLowerCase().includes(query);
+  }).sort((a,b)=>Math.abs(Number(b.currentStrongest?.delta||0))-Math.abs(Number(a.currentStrongest?.delta||0))||Number(b.high_value_candidate)-Number(a.high_value_candidate)||Number(a.rank)-Number(b.rank));
+  const byId=new Map(evaluated.map(item=>[String(item.quantitation_id||""),item])),consumed=new Set(),entries=[];
+  for(const family of state.msms?.proteolytic_modification_families||[]){
+    const members=(family.members||[]).map(member=>byId.get(String(member.quantitation_id||""))).filter(Boolean);
+    if(members.length<2)continue;
+    members.forEach(member=>consumed.add(String(member.quantitation_id||"")));
+    entries.push({kind:"group",family,members,sortRank:Math.min(...members.map(member=>Number(member.rank||9999))),sortScore:Math.max(...members.map(member=>Math.abs(Number(member.currentStrongest?.delta||0))))});
+  }
+  evaluated.filter(item=>!consumed.has(String(item.quantitation_id||""))).forEach(item=>entries.push({kind:"item",item,sortRank:Number(item.rank||9999),sortScore:Math.abs(Number(item.currentStrongest?.delta||0))}));
+  entries.sort((a,b)=>b.sortScore-a.sortScore||a.sortRank-b.sortRank);
+  const formal=all.filter(item=>item.quantitation_status==="formal_relative_quantitation").length,siteHigh=(state.msms?.proteolytic_modification_families||[]).filter(item=>item.high_value_consensus).length,standaloneHigh=all.filter(item=>item.high_value_candidate&&!Array.from(consumed).includes(String(item.quantitation_id||""))).length;
+  summary.innerHTML=`<span class="mod-quant-badge">${entries.length} 个表格分组（${all.length} 个序列形式族）</span><span class="mod-quant-badge formal">${formal} 个正式相对定量</span><span class="mod-quant-badge high-value">${siteHigh} 个跨序列高价值结论</span>${standaloneHigh?`<span class="mod-quant-badge high-value">${standaloneHigh} 个独立高价值候选</span>`:""}<span class="note">当前图表：${state.modQuantViewMode==="xic"?"归一化 XIC 面积":"组成比例"}；${escapeHtml(sampleShort(pair.test))} 对 ${escapeHtml(sampleShort(pair.reference))}</span>`;
+  if(!entries.length){table.innerHTML='<tr><td class="note">当前筛选条件下没有可显示的修饰形式族。</td></tr>';return;}
+  const formPalette=["#2563eb","#f59e0b","#10b981","#8b5cf6","#ef4444","#06b6d4","#84cc16","#f97316","#64748b"];
+  table.innerHTML='<tr><th></th><th>rank</th><th>事件 / 位置</th><th>肽段 / 分组</th><th>主要变化</th><th>定量等级</th><th>形式数</th></tr>'+entries.map(entry=>entry.kind==="group"?modProteolyticGroupRows(entry.family,entry.members,pair,formPalette):modItemRows(entry.item,pair,formPalette,false)).join("");
+  table.querySelectorAll("[data-proteolytic-toggle]").forEach(button=>button.onclick=()=>{const key=String(button.dataset.proteolyticToggle||"");if(state.expandedProteolyticFamilies.has(key))state.expandedProteolyticFamilies.delete(key);else state.expandedProteolyticFamilies.add(key);renderModificationQuantitation();});
+  table.querySelectorAll("[data-mod-quant-toggle]").forEach(button=>button.onclick=()=>{const key=String(button.dataset.modQuantToggle||"");if(state.expandedModificationFamilies.has(key))state.expandedModificationFamilies.delete(key);else state.expandedModificationFamilies.add(key);renderModificationQuantitation();});
+  table.querySelectorAll("[data-mod-form-key]").forEach(button=>button.onclick=async event=>{event.stopPropagation();const formKey=String(button.dataset.modFormKey||""),context=modFormContextByKey(formKey),ids=String(button.dataset.modFormLinks||"").split("|").filter(Boolean),featureId=modBestLinkedFeatureId(ids);state.selectedModificationFormKey=formKey;state.selectedModificationFormContext=context;renderModificationQuantitation();if(featureId)await selectMappedFeature(featureId,true);else await selectTargetedModificationForm(context);});
+  table.querySelectorAll("[data-mod-quant-feature]").forEach(button=>button.onclick=()=>selectMappedFeature(button.dataset.modQuantFeature));
+  requestAnimationFrame(()=>requestAnimationFrame(()=>table.querySelectorAll(".mod-composition-scale[data-target-width]").forEach(scale=>{scale.style.width=`${Math.max(0,Math.min(100,Number(scale.dataset.targetWidth||0)))}%`;scale.classList.add("animated");})));
+}
 async function ensureMsmsData(){
   if(state.msmsLoaded||state.msmsLoading)return state.msmsPromise;
   const configuredStatus=String(DATA?.analysis_metadata?.ms2?.status||"");
   if(DATA?.analysis_metadata&&configuredStatus!=="completed"){
     state.msmsError=String(DATA?.analysis_metadata?.ms2?.reason||"未提供 FASTA，未执行 MS2 计算。");
     state.msmsLoaded=true;
-    drawFeatureMs2(); drawStructureModule(); maybeLoadProjectStructure();
+    drawFeatureMs2(); renderModificationQuantitation(); drawStructureModule(); maybeLoadProjectStructure();
     return Promise.resolve();
   }
   const requestComparison=state.comparison;
-  state.msmsLoading=true; state.msmsError=null; drawFeatureMs2(); drawStructureModule();
+  state.msmsLoading=true; state.msmsError=null; drawFeatureMs2(); renderModificationQuantitation(); drawStructureModule();
   state.msmsPromise=fetchJson(apiUrl("/api/msms")).then(payload=>{
     if(state.comparison!==requestComparison)return;
     state.msms=payload; state.msmsLoaded=true;
@@ -1057,18 +1594,34 @@ async function ensureMsmsData(){
     state.msmsError=String(err?.message||err); state.msmsLoaded=true;
   }).finally(()=>{
     if(state.comparison!==requestComparison)return;
-    state.msmsLoading=false; state.msmsPromise=null; drawFeatureMs2(); drawStructureModule(); maybeLoadProjectStructure();
+    state.msmsLoading=false; state.msmsPromise=null; drawFeatureMs2(); renderModificationQuantitation(); drawStructureModule(); maybeLoadProjectStructure();
     renderGlobalFeatureTable(); drawFeatureMap();
   });
   return state.msmsPromise;
 }
+function renderAgentAnnotations(feature=null){
+  const container=$("featureMs2Annotations");
+  if(!container)return;
+  const featureIds=new Set([String(state.selectedFeatureGroupId||""),String(feature?.feature_group_id||"")].filter(Boolean));
+  const annotations=(state.agentAnnotations||[]).filter(item=>featureIds.has(String(item?.feature_group_id||"")));
+  if(!annotations.length){ container.hidden=true; container.innerHTML=""; return; }
+  const rows=annotations.map(item=>{
+    const agent=escapeHtml(item.agent_name||"MCP agent"), created=escapeHtml(item.created_at||"");
+    const suggestion=escapeHtml(item.suggestion||""), rationale=escapeHtml(item.rationale||"");
+    return `<div class="agent-annotation"><b>待人工确认</b> · ${agent}${created?` · ${created}`:""}<br>建议：${suggestion}${rationale?`<br>依据：${rationale}`:""}</div>`;
+  });
+  container.hidden=false;
+  container.innerHTML=`<b>Agent 待人工确认注释（${annotations.length}）</b>${rows.join("")}`;
+}
 function drawFeatureMs2(){
   const canvas=$("featureMs2Canvas"),detail=$("featureMs2Detail"),info=$("featureMs2Info");
   if(!canvas||!detail||!info)return;
+  renderAgentAnnotations();
   const ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
   canvas._featureMs2Peaks=[]; canvas._featureMs2Domain=null;
   const featureId=String(state.selectedFeatureGroupId||"");
-  if(!featureId){
+  const formContext=state.selectedModificationFormContext;
+  if(!featureId&&!formContext){
     detail.textContent="Select a Feature from the heatmap or Feature list.";
     info.textContent="The corresponding best identified spectrum, or the best covering unresolved MS2 scan, will appear here.";
     return;
@@ -1089,27 +1642,36 @@ function drawFeatureMs2(){
     info.textContent="";
     return;
   }
-  const matched=selectedMs2Evidence();
+  const matched=featureId?selectedMs2Evidence():(formContext?.best_psm?{feature:{feature_group_id:"",best_psm:formContext.best_psm,sequence:formContext.sequence,chain:formContext.chain,start:formContext.start,end:formContext.end,modification:formContext.form_label,confidence:formContext.ms2_confidence,ms2_status:formContext.status},relation:"第9节目标形式"}:null);
   if(!matched){
-    detail.innerHTML=`<span class="feature-ms2-status missing">no linked MS2 evidence</span>${escapeHtml(featureId)}`;
-    info.textContent="This Feature is not represented in the current significant MS1 → MS2 evidence set. 主报告内仅显示当前 Feature 对应的 MS2 证据；其它 Feature 可通过主报告中的列表逐项查看。";
+    if(formContext){detail.innerHTML=`<span class="feature-ms2-status unresolved">目标 XIC 形式</span><b>${escapeHtml(formContext.form_label||"")}</b><br>sequence <b>${escapeHtml(formContext.sequence||"")}</b>`;info.textContent="该形式已联动目标 XIC 和序列/结构定位，但没有可显示的代表 MS/MS 谱图，也未进入差异 Feature 表。";}
+    else {detail.innerHTML=`<span class="feature-ms2-status missing">MS2 evidence index unavailable</span>${escapeHtml(featureId)}`;info.textContent="该 Feature 未出现在当前报告的 MS2 关联索引中，通常表示这是尚未重新计算的旧报告，而不是已经确认未采集 MS2。重新运行 MS2 后会区分“未采集 MS2”和“已采集但未定性”。";}
     return;
   }
-  const f=matched.feature, p=f.best_psm||f.candidate_psm||f.coverage_scan, identified=Boolean(f.best_psm), candidate=Boolean(f.candidate_psm);
-  const status=ms2StatusText[f.ms2_status]||f.ms2_status||"unknown MS2 status";
-  const statusClass=identified?"identified":((candidate||p)?"unresolved":"missing");
-  const sequence=f.sequence||p?.sequence||"", modification=f.modification||p?.modification_text||"";
-  const relation=String(f.feature_group_id||"")===featureId?"":` | evidence Feature ${f.feature_group_id} (${matched.relation})`;
-  detail.innerHTML=`<span class="feature-ms2-status ${statusClass}">${escapeHtml(status)}</span><b>${escapeHtml(featureId)}</b>${escapeHtml(relation)}<br>${sequence?`sequence <b>${escapeHtml(sequence)}</b>${modification?` | ${escapeHtml(modification)}`:""}`:"No peptide sequence assigned"}`;
+  const f=matched.feature, evidenceP=f.best_psm||f.candidate_psm||f.coverage_scan;
+  const spectrumP=[f.best_psm,f.candidate_psm,f.coverage_scan].find(item=>Array.isArray(item?.spectrum_peaks)&&item.spectrum_peaks.length)||evidenceP;
+  const confidence=String(f.confidence||""), identified=Boolean(f.best_psm)&&confidence.startsWith("B_"), candidate=Boolean(f.candidate_psm)||confidence.startsWith("C_")||confidence.startsWith("D_");
+  // Older task databases labelled some D-level sequence matches as identified.
+  // Derive the display status from confidence so reopening an old report cannot
+  // overstate a low-evidence candidate.
+  const effectiveStatus=confidence.startsWith("D_")?"low_evidence_sequence_candidate":f.ms2_status;
+  const status=ms2StatusText[effectiveStatus]||effectiveStatus||"unknown MS2 status";
+  const statusClass=identified?"identified":((candidate||evidenceP)?"unresolved":"missing");
+  const sequence=f.sequence||evidenceP?.sequence||"", modification=f.modification||evidenceP?.modification_text||"";
+  const displayId=featureId||(formContext?.form_label||"目标 XIC 形式"),relation=!featureId||String(f.feature_group_id||"")===featureId?"":` | evidence Feature ${f.feature_group_id} (${matched.relation})`;
+  detail.innerHTML=`<span class="feature-ms2-status ${statusClass}">${escapeHtml(status)}</span><b>${escapeHtml(displayId)}</b>${escapeHtml(relation)}<br>${sequence?`sequence <b>${escapeHtml(sequence)}</b>${modification?` | ${escapeHtml(modification)}`:""}`:"No peptide sequence assigned"}`;
   const reason=f.unidentified_reason||f.hypothesis||"";
-  const scanText=p?`${p.sample_id||""} | scan ${p.scan_id||""} | RT ${nice(p.rt,3)} min | precursor ${nice(p.precursor_mz,5)} z${p.precursor_charge||"?"}`:"No covering MS2 scan";
-  const scoreText=(identified||candidate)?` | ${candidate&&!identified?"candidate ":""}score ${nice(p.score,1)} | q ${nice(p.q_value,4)} | matched ions ${p.matched_ion_count||0} | fragment coverage ${nice(p.fragment_coverage,2)}${p.sequence_tag_length!=null?` | sequence tag ${p.sequence_tag_length} aa`:""}${p.mass_delta!=null?` | ΔMass ${nice(p.mass_delta,4)} Da`:""}`:"";
-  info.textContent=`${scanText}${scoreText}${reason?` | ${reason}`:""}`;
-  const peaks=(p?.spectrum_peaks||[]).map(v=>({mz:Number(v.mz),intensity:Number(v.intensity),label:String(v.label||"")})).filter(v=>Number.isFinite(v.mz)&&Number.isFinite(v.intensity)&&v.intensity>0);
+  const scanText=spectrumP?`${spectrumP.sample_id||""} | scan ${spectrumP.scan_id||""} | RT ${nice(spectrumP.rt,3)} min | precursor ${nice(spectrumP.precursor_mz,5)} z${spectrumP.precursor_charge||"?"}`:"No covering MS2 scan";
+  const glycanText=evidenceP?.glycan_name?` | glycan diagnostic ions ${evidenceP.glycan_diagnostic_ion_count||0} | core Y ions ${evidenceP.glycan_core_y_ion_count||0} | HexNAc-retaining fragments ${evidenceP.glycan_hexnac_fragment_count||0}`:"";
+  const scoreText=(identified||candidate)&&evidenceP?` | ${candidate&&!identified?"candidate ":""}score ${nice(evidenceP.score,1)} | q ${nice(evidenceP.q_value,4)} | matched ions ${evidenceP.matched_ion_count||0} | fragment coverage ${nice(evidenceP.fragment_coverage,2)}${evidenceP.sequence_tag_length!=null?` | sequence tag ${evidenceP.sequence_tag_length} aa`:""}${evidenceP.mass_delta!=null?` | ΔMass ${nice(evidenceP.mass_delta,4)} Da`:""}${glycanText}`:"";
+  const fallbackText=spectrumP&&evidenceP&&spectrumP!==evidenceP?" | displaying the best stored covering scan":"";
+  info.textContent=`${scanText}${scoreText}${fallbackText}${reason?` | ${reason}`:""}`;
+  if(featureId)renderAgentAnnotations(f);
+  const peaks=(spectrumP?.spectrum_peaks||[]).map(v=>({mz:Number(v.mz),intensity:Number(v.intensity),label:String(v.label||"")})).filter(v=>Number.isFinite(v.mz)&&Number.isFinite(v.intensity)&&v.intensity>0);
   canvas._featureMs2Peaks=peaks;
   if(!peaks.length){
     ctx.fillStyle="#667085"; ctx.font="14px Arial"; ctx.textAlign="center";
-    ctx.fillText(p?"The stored covering scan has no displayable fragment peaks.":"No MS2 scan was acquired for this Feature.",canvas.width/2,canvas.height/2);
+    ctx.fillText(evidenceP?"No displayable fragment peaks are stored for this evidence.":"No MS2 scan was acquired for this Feature.",canvas.width/2,canvas.height/2);
     ctx.textAlign="left";
     return;
   }
@@ -1218,7 +1780,7 @@ function updatePairLegend(){
   legend.innerHTML=`<span><span class="sample-dot" style="background:${sampleColor(pair.reference)}"></span>Reference: ${escapeHtml(pair.reference||"")}</span><span><span class="sample-dot" style="background:${sampleColor(pair.test)}"></span>Test: ${escapeHtml(pair.test||"")}</span>`;
 }
 function redrawPairViews(){
-  hideDetailTooltip(); updatePairLegend(); renderMzTable(); renderGlobalFeatureTable(); drawFeatureMap(); drawStructureModule();
+  hideDetailTooltip(); updatePairLegend(); renderMzTable(); renderGlobalFeatureTable(); drawFeatureMap(); renderModificationQuantitation(); drawStructureModule();
 }
 function renderPairControls(reset=false){
   const samples=DATA?.sample_ids||[], referenceSelect=$("featureMapReference"), testSelect=$("featureMapTest"), swap=$("swapFeatureMapSamples"), mode=$("featureMapMode");
@@ -1532,11 +2094,12 @@ function showFeatureMapTooltip(e, item){
   tip.innerHTML=featureMapTooltipRows(item);
   positionTooltip(tip,e); tip.style.display="block";
 }
-async function selectSpectrumMz(mz, representativeRt=null, featureGroupId=null){
+async function selectSpectrumMz(mz, representativeRt=null, featureGroupId=null, allowFeatureAutoMatch=true, preserveModificationContext=false){
   const requestId=++state.xicRequestId;
+  if(!preserveModificationContext){state.selectedModificationFormKey=null;state.selectedModificationFormContext=null;}
   state.selectedMz=Number(mz);
   state.selectedFeatureGroupId=featureGroupId?String(featureGroupId):null;
-  if(!state.selectedFeatureGroupId){
+  if(!state.selectedFeatureGroupId&&allowFeatureAutoMatch){
     const matchedGroup=selectedFeatureGroup();
     state.selectedFeatureGroupId=matchedGroup?.feature_group_id?String(matchedGroup.feature_group_id):null;
   }
@@ -1744,8 +2307,9 @@ function featureMapHitAt(canvas, clientX, clientY){
   });
   return best?.item||null;
 }
-async function selectGlobalFeature(item){
+async function selectGlobalFeature(item,preserveModificationContext=false){
   if(!item)return;
+  if(!preserveModificationContext){state.selectedModificationFormKey=null;state.selectedModificationFormContext=null;}
   state.selectedPeakId=item.parent_tic_peak_id;
   state.selectedMz=null;
   state.selectedFeatureRt=null;
@@ -1754,7 +2318,7 @@ async function selectGlobalFeature(item){
   state.detailZoom=null;
   state.xic=null;
   state.xicZoom=null;
-  await selectSpectrumMz(Number(item.representative_mz),item.representative_rt,state.selectedFeatureGroupId);
+  await selectSpectrumMz(Number(item.representative_mz),item.representative_rt,state.selectedFeatureGroupId,true,preserveModificationContext);
 }
 function drawFeatureMap(){
   const canvas=$("featureMapCanvas"),ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
@@ -1795,13 +2359,16 @@ function renderGlobalFeatureTable(){
     const parentSelected=state.selectedFeatureGroupId?componentSelected&&!expanded:legacySelected;
     const parentFeatureId=String(item.component_primary_feature_id||item.feature_group_id||"");
     const toggle=expandable?`<button class="component-toggle" data-component-toggle="${escapeHtml(componentId)}" title="${expanded?'Collapse':'Expand'} ${members.length} MS1 Features">${expanded?'&#9662;':'&#9656;'}</button>`:`<span class="component-toggle-placeholder"></span>`;
-    const identification=item.identified_component?`<span class="identification-badge">MS2 ${escapeHtml(String(item.component_confidence||"").replace(/_.*/,""))}</span>`:(item.inferred_component?`<span class="inference-badge">${escapeHtml(String(item.component_confidence||"MS1 inferred").replace("_"," "))}</span>`:"");
+    const candidateEvidence=componentCandidateEvidence(item), candidateBadge=!item.identified_component&&candidateEvidence?`<span class="candidate-badge">MS2 D candidate</span>`:"";
+    const identification=(item.identified_component?`<span class="identification-badge">MS2 ${escapeHtml(String(item.component_confidence||"").replace(/_.*/,""))}</span>`:(item.inferred_component?`<span class="inference-badge">${escapeHtml(String(item.component_confidence||"MS1 inferred").replace("_"," "))}</span>`:""))+candidateBadge;
     const chargeText=(item.component_charge_states||[]).length?`z=${item.component_charge_states.join('/')}`:"";
-    const componentMeta=(item.identified_component||item.inferred_component)?`${members.length} ions${chargeText?`; ${chargeText}`:""}`:`unresolved singleton`;
-    rows.push(`<tr data-global-feature="1" data-feature-id="${escapeHtml(parentFeatureId)}" data-selection-target="${parentSelected?'1':'0'}" data-peak="${escapeHtml(item.parent_tic_peak_id)}" data-rt="${item.representative_rt}" data-mz="${itemTrueMz}" class="component-row ${parentSelected?'selected':''}"><td>${i+1}</td><td class="component-cell">${toggle}<span class="component-label">${escapeHtml(item.component_label||item.feature_group_id)}</span>${identification}<span class="component-meta">${escapeHtml(componentMeta)}</span></td><td>${escapeHtml(item.parent_tic_peak_id)}</td><td>${nice(item.representative_rt,3)}</td><td>${nice(itemTrueMz,5)}</td><td>${nice(itemEnvelopeMz,5)}</td><td>${nice(item.component_neutral_mass,4)}</td><td>${pairDifferenceType(item)}</td><td>${pairDirectionHtml(item)}</td><td>${abundanceOrderHtml(item)}</td><td>${nice(pair.fold,2)}</td><td>${nice(pair.logRatio,3)}</td><td>${nice(item.ranking_score,3)}</td><td>${nice(item.max_area,1)}</td><td>${escapeHtml(item.quantitation_confidence||"")}</td><td>${members.length||1}</td><td>${item.merged_feature_count||1}</td><td>${escapeHtml(item.difference_type||"")}</td></tr>`);
+    const isotopeFit=Number(item.component_isotope_fit_score), isotopeFitText=Number.isFinite(isotopeFit)?`; isotope fit ${nice(isotopeFit,2)}${item.component_monoisotope_corrected?"; mono corrected":""}`:"";
+    const componentMeta=(item.identified_component||item.inferred_component)?`${members.length} ions${chargeText?`; ${chargeText}`:""}${isotopeFitText}`:`unresolved singleton`;
+    rows.push(`<tr data-global-feature="1" data-component-parent="1" data-component-id="${escapeHtml(componentId)}" data-feature-id="${escapeHtml(parentFeatureId)}" data-selection-target="${parentSelected?'1':'0'}" data-peak="${escapeHtml(item.parent_tic_peak_id)}" data-rt="${item.representative_rt}" data-mz="${itemTrueMz}" class="component-row ${parentSelected?'selected':''}"><td>${i+1}</td><td class="component-cell">${toggle}<span class="component-label">${escapeHtml(componentDisplayLabel(item))}</span>${identification}<span class="component-meta">${escapeHtml(componentMeta)}</span></td><td>${escapeHtml(item.parent_tic_peak_id)}</td><td>${nice(item.representative_rt,3)}</td><td>${nice(itemTrueMz,5)}</td><td>${nice(itemEnvelopeMz,5)}</td><td>${nice(item.component_neutral_mass,4)}</td><td>${pairDifferenceType(item)}</td><td>${pairDirectionHtml(item)}</td><td>${abundanceOrderHtml(item)}</td><td>${nice(pair.fold,2)}</td><td>${nice(pair.logRatio,3)}</td><td>${nice(item.ranking_score,3)}</td><td>${nice(item.max_area,1)}</td><td>${escapeHtml(item.quantitation_confidence||"")}</td><td>${members.length||1}</td><td>${item.merged_feature_count||1}</td><td>${escapeHtml(item.difference_type||"")}</td></tr>`);
     if(expandable&&expanded)members.forEach(member=>{
       const memberTrueMz=truePeakMz(member), memberEnvelopeMz=envelopeRepresentativeMz(member), childFeatureSelected=state.selectedFeatureGroupId&&featureGroupIds(member).includes(String(state.selectedFeatureGroupId)), childSelected=state.selectedFeatureGroupId?childFeatureSelected:(member.parent_tic_peak_id===state.selectedPeakId&&Math.abs(Number(memberTrueMz)-Number(state.selectedMz||0))<1e-6), childPair=pairMetrics(member), offset=Number(member.component_isotope_offset||0), isotope=offset===0?"M":(offset>0?`M+${offset}`:`M${offset}`), charge=member.component_charge?`z=${member.component_charge}`:"z=?", relation=String(member.component_link_type||"").replace("_envelope","").replaceAll("_"," ");
-      const resolved=member.component_observed_first_isotope_mz?`; first isotope ${nice(member.component_observed_first_isotope_mz,4)}; ${member.component_isotope_peak_count||0} peaks`:"";
+      const memberFit=Number(member.component_isotope_fit_score), fitText=Number.isFinite(memberFit)?`; isotope fit ${nice(memberFit,2)}${Number(member.component_monoisotopic_offset||0)>0?`; M+${member.component_monoisotopic_offset} corrected`:""}`:"";
+      const resolved=member.component_observed_first_isotope_mz?`; first isotope ${nice(member.component_observed_first_isotope_mz,4)}; ${member.component_isotope_peak_count||0} peaks${fitText}`:"";
       rows.push(`<tr data-global-feature="1" data-feature-id="${escapeHtml(member.feature_group_id||"")}" data-selection-target="${childSelected?'1':'0'}" data-peak="${escapeHtml(member.parent_tic_peak_id)}" data-rt="${member.representative_rt}" data-mz="${memberTrueMz}" class="component-child ${childSelected?'selected':''}"><td></td><td class="component-cell"><span class="component-tree">&#8627;</span>${escapeHtml(member.feature_group_id)}<span class="component-meta">${escapeHtml(`${charge}; ${isotope}; ${relation}${resolved}`)}</span></td><td>${escapeHtml(member.parent_tic_peak_id)}</td><td>${nice(member.representative_rt,3)}</td><td>${nice(memberTrueMz,5)}</td><td>${nice(memberEnvelopeMz,5)}</td><td>${nice(member.component_neutral_mass,4)}</td><td>${pairDifferenceType(member)}</td><td>${pairDirectionHtml(member)}</td><td>${abundanceOrderHtml(member)}</td><td>${nice(childPair.fold,2)}</td><td>${nice(childPair.logRatio,3)}</td><td>${nice(member.ranking_score,3)}</td><td>${nice(member.max_area,1)}</td><td>${escapeHtml(member.quantitation_confidence||"")}</td><td>&mdash;</td><td>${member.merged_feature_count||1}</td><td>${escapeHtml(member.difference_type||"")}</td></tr>`);
     });
   });
@@ -1810,7 +2377,14 @@ function renderGlobalFeatureTable(){
   bindSortableHeaders("global",renderGlobalFeatureTable);
   document.querySelectorAll("button[data-component-toggle]").forEach(button=>button.onclick=event=>{event.stopPropagation();const id=button.dataset.componentToggle;if(state.expandedComponents.has(id))state.expandedComponents.delete(id);else state.expandedComponents.add(id);renderGlobalFeatureTable();});
   document.querySelectorAll("tr[data-global-feature]").forEach(row=>row.onclick=async()=>{
-    await selectGlobalFeature({feature_group_id:row.dataset.featureId,parent_tic_peak_id:row.dataset.peak, representative_rt:row.dataset.rt, representative_mz:Number(row.dataset.mz)});
+    let featureId=String(row.dataset.featureId||"");
+    if(row.dataset.componentParent==="1"){
+      await ensureMsmsData();
+      const componentId=String(row.dataset.componentId||"");
+      const component=currentComponentRows().find(item=>String(item.component_group_id||item.feature_group_id||"")===componentId);
+      if(component)featureId=preferredComponentEvidenceFeatureId(component)||featureId;
+    }
+    await selectGlobalFeature({feature_group_id:featureId,parent_tic_peak_id:row.dataset.peak, representative_rt:row.dataset.rt, representative_mz:Number(row.dataset.mz)});
   });
   if(state.scrollGlobalSelectionIntoView){
     const target=$("globalFeatureTable").querySelector('tr[data-selection-target="1"]'), container=$("globalFeatureTable").parentElement;
@@ -1825,15 +2399,15 @@ function renderGlobalFeatureTable(){
 function exportGlobalFeatureTable(){
   const componentRows=currentComponentRows();
   const source=componentRows.length?componentRows:(DATA.global_feature_groups||[]);
-  const headers=["rank","component_or_feature","tic_peak","rt_min","true_peak_mz","envelope_mz","neutral_mass","pair_type","test_direction","abundance_order","pair_fold","ln_test_reference","ranking","max_raw_area","confidence","ions","merged","cohort_type"];
+  const headers=["rank","component_or_feature","tic_peak","rt_min","true_peak_mz","envelope_mz","neutral_mass","isotope_fit","monoisotope_corrected","pair_type","test_direction","abundance_order","pair_fold","ln_test_reference","ranking","max_raw_area","confidence","ions","merged","cohort_type"];
   const lines=[headers];
   source.forEach((item,index)=>{
     const pair=pairMetrics(item), trueMz=truePeakMz(item), envelopeMz=envelopeRepresentativeMz(item), members=item.members||[];
     const order=pair.direction==="higher"?`${sampleShort(pair.test)} > ${sampleShort(pair.reference)}`:pair.direction==="lower"?`${sampleShort(pair.reference)} > ${sampleShort(pair.test)}`:"equal";
-    lines.push([index+1,item.component_label||item.feature_group_id||"",item.parent_tic_peak_id||"",item.representative_rt,trueMz,envelopeMz,item.component_neutral_mass||"",pairDifferenceType(item),pair.direction,order,pair.fold,pair.logRatio,item.ranking_score,item.max_area,item.quantitation_confidence||"",members.length||1,item.merged_feature_count||1,item.difference_type||""]);
+    lines.push([index+1,componentDisplayLabel(item),item.parent_tic_peak_id||"",item.representative_rt,trueMz,envelopeMz,item.component_neutral_mass||"",item.component_isotope_fit_score??"",Boolean(item.component_monoisotope_corrected),pairDifferenceType(item),pair.direction,order,pair.fold,pair.logRatio,item.ranking_score,item.max_area,item.quantitation_confidence||"",members.length||1,item.merged_feature_count||1,item.difference_type||""]);
     members.forEach(member=>{
       const childPair=pairMetrics(member);
-      lines.push(["",member.feature_group_id||"",member.parent_tic_peak_id||"",member.representative_rt,truePeakMz(member),envelopeRepresentativeMz(member),member.component_neutral_mass||"",pairDifferenceType(member),childPair.direction,childPair.direction==="higher"?`${sampleShort(childPair.test)} > ${sampleShort(childPair.reference)}`:childPair.direction==="lower"?`${sampleShort(childPair.reference)} > ${sampleShort(childPair.test)}`:"equal",childPair.fold,childPair.logRatio,member.ranking_score,member.max_area,member.quantitation_confidence||"",1,member.merged_feature_count||1,member.difference_type||""]);
+      lines.push(["",member.feature_group_id||"",member.parent_tic_peak_id||"",member.representative_rt,truePeakMz(member),envelopeRepresentativeMz(member),member.component_neutral_mass||"",member.component_isotope_fit_score??"",Number(member.component_monoisotopic_offset||0)>0,pairDifferenceType(member),childPair.direction,childPair.direction==="higher"?`${sampleShort(childPair.test)} > ${sampleShort(childPair.reference)}`:childPair.direction==="lower"?`${sampleShort(childPair.reference)} > ${sampleShort(childPair.test)}`:"equal",childPair.fold,childPair.logRatio,member.ranking_score,member.max_area,member.quantitation_confidence||"",1,member.merged_feature_count||1,member.difference_type||""]);
     });
   });
   const csv=lines.map(row=>row.map(value=>`"${String(value??"").replaceAll('"','""')}"`).join(",")).join("\r\n");
@@ -1843,6 +2417,14 @@ function exportGlobalFeatureTable(){
 async function loadFeatures(){
   if(!$('featureTable')){ state.features=[]; return; }
   const p=await fetchJson(apiUrl("/api/features")); state.features=p.features||[]; renderFeatures();
+}
+async function loadAgentAnnotations(){
+  try{
+    const payload=await fetchJson(apiUrl("/api/agent-annotations"));
+    state.agentAnnotations=Array.isArray(payload.annotations)?payload.annotations:[];
+  }catch(_error){
+    state.agentAnnotations=[];
+  }
 }
 function renderFeatures(){
   if(!$('featureTable'))return;
@@ -1861,7 +2443,7 @@ async function saveFeature(){
   const feature={feature_id:`PF_${Date.now()}`, parent_tic_peak_id:pk.tic_peak_id, project_id:DATA.project_id, sample_ids:DATA.sample_ids, representative_rt:featureRt, representative_mz:state.selectedMz, true_peak_mz:state.selectedMz, envelope_representative_mz:envelopeRepresentativeMz(group)||state.selectedMz, quantitation_mz:group?.quantitation_mz??state.selectedMz, mz_tolerance:state.xic.mz_tolerance, rt_start:pk.rt_start, rt_apex:featureRt, rt_end:pk.rt_end, raw_area_by_sample:Object.fromEntries(Object.entries(state.xic.integration_by_sample).map(([s,v])=>[s,v.area])), difference_score:1-pk.peak_consistency_score, peak_consistency_score:pk.peak_consistency_score, spectrum_score:pk.spectrum_score, source:"peak_first_local_analysis", annotation_status:"unannotated", created_at:new Date().toISOString()};
   const p=await fetchJson(apiUrl("/api/features"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({features:[...state.features,feature]})}); state.features=p.features||[]; $("featureInfo").textContent=`Saved ${p.saved_count} features`; renderFeatures();
 }
-function drawAll(){ drawChrom(); renderPeakTable(); drawDetail(); renderMzTable(); drawXic(); renderGlobalFeatureTable(); drawFeatureMap(); drawFeatureMs2(); drawStructureModule(); }
+function drawAll(){ drawChrom(); renderPeakTable(); drawDetail(); renderMzTable(); drawXic(); renderGlobalFeatureTable(); drawFeatureMap(); drawFeatureMs2(); renderModificationQuantitation(); drawStructureModule(); }
 function attachHover(canvas, kind){
   if(!canvas)return;
   canvas.onmousemove=e=>{
@@ -1925,7 +2507,7 @@ async function boot(){
   }
 }
 async function loadComparison(){
-  DATA=await fetchJson(apiUrl("/api/bootstrap")); state.selectedPeakId=null; state.selectedMz=null; state.selectedFeatureRt=null; state.selectedFeatureGroupId=null; state.featureMapZoom=null;
+  DATA=await fetchJson(apiUrl("/api/bootstrap")); state.selectedPeakId=null; state.selectedMz=null; state.selectedFeatureRt=null; state.selectedFeatureGroupId=null; state.sequenceOverlapSelection=null; state.featureMapZoom=null;
   const typeCounts=(DATA.global_feature_groups||[]).reduce((acc,item)=>{const key=item.difference_type||"unknown";acc[key]=(acc[key]||0)+1;return acc;},{});
   setupReportSettings();
   renderPairControls(true);
@@ -1936,7 +2518,7 @@ async function loadComparison(){
   wireStructureControls();
   attachZoom($("chromCanvas"),"chrom"); attachZoom($("detailCanvas"),"detail"); attachZoom($("xicCanvas"),"xic"); attachZoom($("featureMapCanvas"),"featureMap");
   attachHover($("featureMs2Canvas"),"featureMs2");
-  await loadFeatures(); drawAll(); ensureMsmsData();
+  await loadFeatures(); await loadAgentAnnotations(); drawAll(); ensureMsmsData();
 }
 boot().catch(err=>{document.body.innerHTML=`<pre>${err.stack||err}</pre>`;});
 </script>
@@ -2006,9 +2588,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spectrum-min-intensity", type=float, default=0.0)
     parser.add_argument("--min-snr", type=float, default=5.0)
     parser.add_argument("--min-area-ratio", type=float, default=0.00001)
-    parser.add_argument("--top-n-peaks", type=int, default=80, help="Peak discovery limit; 0 analyzes all confirmed TIC peaks.")
+    parser.add_argument("--top-n-peaks", type=int, default=0, help="Optional safety limit; 0 analyzes every TIC peak passing the quality thresholds.")
     parser.add_argument("--top-n-mz", type=int, default=40, help="Candidate m/z limit; 0 keeps all centroid bins.")
     parser.add_argument("--top-n-changed-mz", type=int, default=15, help="Changed m/z limit; 0 keeps all candidates for ranking/display.")
+    parser.add_argument("--dynamic-background-candidates", action="store_true", help="Use adaptive summed-spectrum and XIC-quality screening for the background candidate pool.")
+    parser.add_argument("--candidate-spectral-noise-multiplier", type=float, default=3.0)
+    parser.add_argument("--candidate-min-local-tic-ppm", type=float, default=1500.0)
+    parser.add_argument("--candidate-max-per-tic", type=int, default=200)
+    parser.add_argument("--candidate-min-consecutive-scans", type=int, default=3)
+    parser.add_argument("--candidate-min-xic-tic-area-fraction", type=float, default=0.0003)
     parser.add_argument("--max-spectrum-points-per-scan", type=int, default=500, help="Maximum points used for summed spectra; 0 keeps all points.")
     parser.add_argument("--mz-tolerance-da", type=float, default=0.16, help="Half-window used to locate and extract one centroid peak per scan.")
     parser.add_argument("--mz-tolerance-ppm", type=float, default=10.0, help="Centroid clustering and cross-sample peak matching tolerance.")
@@ -2081,6 +2669,12 @@ def main() -> None:
         top_n_peaks=args.top_n_peaks,
         top_n_mz=args.top_n_mz,
         top_n_changed_mz=args.top_n_changed_mz,
+        dynamic_background_candidates=args.dynamic_background_candidates,
+        candidate_spectral_noise_multiplier=args.candidate_spectral_noise_multiplier,
+        candidate_min_local_tic_ppm=args.candidate_min_local_tic_ppm,
+        candidate_max_per_tic=args.candidate_max_per_tic,
+        candidate_min_consecutive_scans=args.candidate_min_consecutive_scans,
+        candidate_min_xic_tic_area_fraction=args.candidate_min_xic_tic_area_fraction,
         max_spectrum_points_per_scan=args.max_spectrum_points_per_scan,
         mz_tolerance_da=args.mz_tolerance_da,
         mz_tolerance_ppm=args.mz_tolerance_ppm,

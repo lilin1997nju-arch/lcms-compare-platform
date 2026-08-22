@@ -16,19 +16,28 @@ from core.lcms_models import LCMSSpectrumScan  # noqa: E402
 from core.lcms_msms import (  # noqa: E402
     ISOTOPE_MASS_DIFF,
     PROTON,
+    TARGETED_N_GLYCANS,
     annotate_feature_groups,
+    build_modification_level_quantitation,
+    build_proteolytic_modification_families,
     build_peptide_form_comparisons,
     build_feature_ms2_evidence,
+    build_global_known_modification_summary,
     build_ms1_component_groups,
     build_modified_peptide_findings,
     differential_annotations,
+    fit_theoretical_isotope_envelope,
+    format_modification_alternatives,
     generate_candidates,
     generate_sequence_inference_candidates,
     search_component_consensus_scans,
     search_component_sequence_tag_scans,
+    search_feature_glycopeptide_scans,
     search_feature_open_mass_scans,
+    search_global_open_modification_scans,
     search_scans,
     search_selected_feature_consensus_scans,
+    theoretical_averagine_isotope_distribution,
     theoretical_fragments,
 )
 from core.lcms_parser import read_mzml  # noqa: E402
@@ -40,6 +49,42 @@ def encoded(values: list[float]) -> str:
 
 
 class LCMSMSMVPTests(unittest.TestCase):
+    def test_ambiguous_modification_sites_use_compact_residue_aware_labels(self) -> None:
+        label = format_modification_alternatives(
+            [
+                "PyroGlu-Q@1; Glycation@12",
+                "PyroGlu-Q@1; Glycation@13",
+            ],
+            "QVQLVQSGAEVKKPGASVK",
+        )
+        deamidation = format_modification_alternatives(
+            ["Deamidation@12", "Deamidation@16", "Deamidation@4"],
+            "SYGNTYLSWYLQKPGQSPQLLIYGISNR",
+        )
+        competing = format_modification_alternatives(
+            ["Glycation@5", "N-terminal glycation@1"],
+            "ADYEKHKVYACEVTHQGLSSPVTK",
+        )
+
+        self.assertEqual(label, "PyroGlu-Q@1；Glycation@K12/K13（位点未区分）")
+        self.assertEqual(deamidation, "Deamidation@N4/Q12/Q16（位点未区分）")
+        self.assertIn("方案A：Glycation@K5", competing)
+        self.assertIn("方案B：N-terminal glycation@1", competing)
+        self.assertTrue(competing.endswith("（方案未区分）"))
+
+    def test_averagine_envelope_fit_recovers_missing_monoisotopic_peak(self) -> None:
+        neutral_mass = 1880.0
+        theoretical = theoretical_averagine_isotope_distribution(neutral_mass, 10)
+        fit = fit_theoretical_isotope_envelope(
+            [value * 1000.0 for value in theoretical[1:5]],
+            neutral_mass + ISOTOPE_MASS_DIFF,
+        )
+
+        self.assertAlmostEqual(sum(theoretical), 1.0, places=8)
+        self.assertEqual(fit["monoisotopic_offset"], 1)
+        self.assertGreater(fit["cosine_score"], 0.99)
+        self.assertGreater(fit["fit_score"], 0.95)
+
     def test_component_search_can_rescue_d_level_feature_links(self) -> None:
         excluded = component_search_excluded_feature_ids([
             {
@@ -431,6 +476,140 @@ class LCMSMSMVPTests(unittest.TestCase):
         self.assertGreaterEqual(psms[0]["matched_ion_count"], 6)
         self.assertGreater(psms[0]["score"], 40.0)
 
+    def test_low_score_target_candidate_keeps_observed_spectrum(self) -> None:
+        candidates = generate_candidates({"HC": "PEPTIDEK"}, max_missed_cleavages=0)
+        target = next(candidate for candidate in candidates if not candidate.is_decoy)
+        scan = LCMSSpectrumScan(
+            scan_id="scan=low",
+            raw_file_id="synthetic",
+            sample_id="reference",
+            rt=10.0,
+            ms_level=2,
+            mz_array=[50.0, 60.0, 70.0],
+            intensity_array=[300.0, 200.0, 100.0],
+            tic=600.0,
+            base_peak_mz=50.0,
+            base_peak_intensity=300.0,
+            precursor_mz=target.neutral_mass / 2 + PROTON,
+            precursor_charge=2,
+        )
+
+        psms = search_scans(
+            [scan],
+            candidates,
+            precursor_tolerance_ppm=10.0,
+            fragment_tolerance_ppm=10.0,
+            min_score=20.0,
+        )
+
+        self.assertEqual(len(psms), 1)
+        self.assertFalse(psms[0]["is_decoy"])
+        self.assertLess(psms[0]["score"], 40.0)
+        self.assertEqual(len(psms[0]["spectrum_peaks"]), 3)
+
+    def test_d_level_sequence_is_candidate_not_identified_component(self) -> None:
+        precursor_mz = 500.0
+        feature = {
+            "feature_group_id": "FG_LOW",
+            "parent_tic_peak_id": "TICP_0001",
+            "representative_mz": precursor_mz,
+            "representative_rt": 10.0,
+            "ranking_score": 2.0,
+            "difference_type": "area_changed",
+            "area_by_sample": {"sample": 100.0},
+            "normalized_area_by_sample": {"sample": 100.0},
+        }
+        payload = {
+            "alignment": {"rt_shift_by_sample": {"sample": 0.0}},
+            "global_feature_groups": [feature],
+            "peak_results": [],
+        }
+        annotation = {
+            "feature_or_candidate_id": "FG_LOW",
+            "candidate_id": "HC:1-8:PEPTIDEK:Unmodified",
+            "base_peptide_id": "HC:1-8:PEPTIDEK",
+            "neutral_mass": (precursor_mz - PROTON) * 2,
+            "chain": "HC",
+            "start": 1,
+            "end": 8,
+            "sequence": "PEPTIDEK",
+            "modification": "Unmodified",
+            "confidence": "D_low_evidence",
+            "feature_link_type": "direct_precursor",
+            "feature_isotope_offset": 0,
+            "feature_charge": 2,
+            "sample_evidence": {"sample": {"score": 39.0}},
+        }
+        psm = {
+            "sample_id": "sample",
+            "scan_id": "scan=low",
+            "rt": 10.0,
+            "precursor_mz": precursor_mz,
+            "precursor_charge": 2,
+            "sequence": "PEPTIDEK",
+            "modification_text": "Unmodified",
+            "score": 39.0,
+            "q_value": 0.005,
+            "matched_ion_count": 8,
+            "fragment_coverage": 0.2,
+            "spectrum_peaks": [{"mz": 100.0, "intensity": 50.0, "label": "b1"}],
+            "feature_links": [{"feature_group_id": "FG_LOW"}],
+        }
+        scan = LCMSSpectrumScan(
+            scan_id="scan=low",
+            raw_file_id="synthetic",
+            sample_id="sample",
+            rt=10.0,
+            ms_level=2,
+            mz_array=[100.0],
+            intensity_array=[50.0],
+            tic=50.0,
+            base_peak_mz=100.0,
+            base_peak_intensity=50.0,
+            precursor_mz=precursor_mz,
+            precursor_charge=2,
+            isolation_window_lower_offset=0.8,
+            isolation_window_upper_offset=0.8,
+        )
+
+        rows, summary = build_feature_ms2_evidence(
+            payload, [scan], [psm], [annotation]
+        )
+        self.assertEqual(rows[0]["ms2_status"], "low_evidence_sequence_candidate")
+        self.assertEqual(
+            rows[0]["unidentified_reason"],
+            "low_evidence_sequence_candidate_below_identification_threshold",
+        )
+        self.assertEqual(summary["low_evidence_sequence_candidate"], 1)
+
+        groups = build_ms1_component_groups(payload, [annotation])
+        self.assertFalse(groups[0]["identified_component"])
+        self.assertTrue(groups[0]["candidate_component"])
+        self.assertEqual(groups[0]["component_candidate_sequence"], "PEPTIDEK")
+        self.assertIn("candidate PEPTIDEK", groups[0]["component_label"])
+
+    def test_feature_ms2_evidence_indexes_non_significant_features(self) -> None:
+        payload = {
+            "alignment": {"rt_shift_by_sample": {"sample": 0.0}},
+            "global_feature_groups": [
+                {
+                    "feature_group_id": "FG_COMMON",
+                    "representative_mz": 500.0,
+                    "representative_rt": 10.0,
+                    "difference_type": "common_feature",
+                    "ranking_score": 0.1,
+                }
+            ],
+        }
+
+        rows, summary = build_feature_ms2_evidence(payload, [], [], [])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["feature_group_id"], "FG_COMMON")
+        self.assertEqual(rows[0]["ms2_status"], "no_ms2_acquired")
+        self.assertEqual(rows[0]["unidentified_reason"], "no_ms2_scan")
+        self.assertEqual(summary["no_ms2_acquired"], 1)
+
     def test_feature_open_mass_search_recovers_known_backbone_with_unknown_delta(self) -> None:
         candidates = generate_sequence_inference_candidates(
             {"HC": "PEPTIDEK"},
@@ -497,6 +676,89 @@ class LCMSMSMVPTests(unittest.TestCase):
         self.assertTrue(matches[0]["spectrum_peaks"])
         self.assertEqual(matches[0]["modification_text"], "Open ΔMass +15.9949 Da")
 
+    def test_feature_targeted_glycopeptide_search_uses_diagnostic_and_y_ions(self) -> None:
+        candidates = generate_candidates(
+            {"HC": "EEQYNSTYR"},
+            max_missed_cleavages=0,
+            max_variable_modifications=0,
+        )
+        target = next(candidate for candidate in candidates if not candidate.is_decoy)
+        glycan = next(
+            row for row in TARGETED_N_GLYCANS
+            if row["name"] == "G0F N-glycan"
+        )
+        glycan_mass = float(glycan["mass"])
+        component_mass = target.neutral_mass + glycan_mass
+        fragment_map = {
+            label: mz for label, mz, _, __ in theoretical_fragments(target)
+            if "^" not in label
+        }
+        pairs = [
+            (138.0550, 2200.0),
+            (204.086649, 6000.0),
+            (366.139472, 4200.0),
+            (target.neutral_mass + PROTON, 1800.0),
+            (
+                target.neutral_mass + 203.0793725330 + PROTON,
+                2600.0,
+            ),
+            (
+                target.neutral_mass + 2 * 203.0793725330 + PROTON,
+                2300.0,
+            ),
+        ]
+        for label in ("b2", "b3", "b4", "y2", "y3", "y4"):
+            pairs.append((fragment_map[label], 1500.0))
+        for label in ("b5", "b6", "y5"):
+            pairs.append((fragment_map[label] + 203.0793725330, 1700.0))
+        pairs.sort(key=lambda pair: pair[0])
+        scan = LCMSSpectrumScan(
+            scan_id="scan=glyco",
+            raw_file_id="raw",
+            sample_id="sample",
+            rt=10.0,
+            ms_level=2,
+            mz_array=[pair[0] for pair in pairs],
+            intensity_array=[pair[1] for pair in pairs],
+            tic=sum(pair[1] for pair in pairs),
+            base_peak_mz=204.086649,
+            base_peak_intensity=6000.0,
+            precursor_mz=component_mass / 2 + PROTON,
+            precursor_charge=2,
+            precursor_intensity=10000.0,
+            isolation_window_lower_offset=0.8,
+            isolation_window_upper_offset=0.8,
+            activation_method="HCD",
+        )
+        payload = {
+            "alignment": {"rt_shift_by_sample": {"sample": 0.0}},
+            "global_feature_groups": [{
+                "feature_group_id": "FG_GLYCO",
+                "representative_mz": component_mass / 2 + PROTON,
+                "true_peak_mz": component_mass / 2 + PROTON,
+                "representative_rt": 10.0,
+                "difference_type": "area_changed",
+                "ranking_score": 2.0,
+            }],
+        }
+
+        matches = search_feature_glycopeptide_scans(
+            payload,
+            [scan],
+            candidates,
+        )
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["sequence"], "EEQYNSTYR")
+        self.assertEqual(matches[0]["glycan_name"], "G0F N-glycan")
+        self.assertEqual(
+            matches[0]["feature_link_type"],
+            "feature_targeted_glycopeptide_search",
+        )
+        self.assertGreaterEqual(matches[0]["glycan_diagnostic_ion_count"], 3)
+        self.assertGreaterEqual(matches[0]["glycan_core_y_ion_count"], 3)
+        self.assertGreaterEqual(matches[0]["glycan_hexnac_fragment_count"], 1)
+
     def test_feature_open_mass_search_skips_features_without_ms2(self) -> None:
         payload = {
             "alignment": {"rt_shift_by_sample": {"sample": 0.0}},
@@ -513,6 +775,104 @@ class LCMSMSMVPTests(unittest.TestCase):
         self.assertEqual(
             search_feature_open_mass_scans(payload, [], candidates),
             [],
+        )
+        self.assertEqual(
+            search_global_open_modification_scans([], candidates),
+            ([], [], []),
+        )
+
+    def test_global_open_search_discovers_and_rescores_recurrent_oxidation(self) -> None:
+        candidates = generate_sequence_inference_candidates(
+            {"HC": "PEPMIDEK"},
+            max_missed_cleavages=0,
+            max_terminal_trim=0,
+        )
+        target = next(
+            candidate for candidate in candidates
+            if not candidate.is_decoy and candidate.sequence == "PEPMIDEK"
+        )
+        delta = 15.99491462
+        site = 3
+        fragments = {
+            label: mz for label, mz, _, __ in theoretical_fragments(target)
+            if "^" not in label
+        }
+
+        def shifted_mz(label: str) -> float:
+            ordinal = int(label[1:])
+            contains_site = (
+                (label.startswith("b") and ordinal > site)
+                or (
+                    label.startswith("y")
+                    and ordinal >= len(target.sequence) - site
+                )
+            )
+            return fragments[label] + (delta if contains_site else 0.0)
+
+        labels = [
+            *(f"b{index}" for index in range(1, len(target.sequence))),
+            *(f"y{index}" for index in range(1, len(target.sequence))),
+        ]
+        mz_values = sorted(shifted_mz(label) for label in labels)
+        component_mass = target.neutral_mass + delta
+        scans = [
+            LCMSSpectrumScan(
+                scan_id=f"scan=global-open-{index}",
+                raw_file_id="raw",
+                sample_id="sample_a" if index < 2 else "sample_b",
+                rt=10.0 + index * 0.25,
+                ms_level=2,
+                mz_array=mz_values,
+                intensity_array=[1500.0 + peak * 75.0 for peak in range(len(mz_values))],
+                tic=30000.0,
+                base_peak_mz=mz_values[-1],
+                base_peak_intensity=3000.0,
+                precursor_mz=component_mass / 2 + PROTON,
+                precursor_charge=2,
+                precursor_intensity=20000.0,
+                activation_method="HCD",
+                collision_energy=25.0,
+            )
+            for index in range(4)
+        ]
+
+        accepted, tentative, clusters = search_global_open_modification_scans(
+            scans,
+            candidates,
+            max_discovery_scans=10,
+            max_delta_clusters=5,
+        )
+        self.assertTrue(accepted)
+        self.assertFalse(tentative)
+        self.assertTrue(clusters)
+        self.assertEqual(accepted[0]["sequence"], "PEPMIDEK")
+        self.assertAlmostEqual(float(accepted[0]["mass_delta"]), delta, places=3)
+        self.assertEqual(
+            accepted[0]["open_modification_confidence"],
+            "B_open_modification_supported",
+        )
+        self.assertIn("Oxidation", accepted[0]["modification_text"])
+        self.assertEqual(clusters[0]["classification"], "supported_open_modification")
+        self.assertGreaterEqual(int(clusters[0]["target_psm_count"]), 2)
+        known = build_global_known_modification_summary(
+            accepted,
+            tentative,
+            clusters,
+        )
+        self.assertEqual(known[0]["modification"], "Oxidation")
+        self.assertEqual(
+            known[0]["classification"],
+            "supported_known_modification",
+        )
+        self.assertEqual(known[0]["sample_count"], 2)
+        self.assertIn("HC:M4", known[0]["localized_sites"])
+        findings = build_modified_peptide_findings(accepted, [])
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["confidence"], "B_high_confidence_inferred")
+        self.assertAlmostEqual(
+            float(findings[0]["modification_mass_delta"]),
+            delta,
+            places=3,
         )
 
     def test_candidate_catalog_includes_antibody_quality_attributes(self) -> None:
@@ -986,12 +1346,16 @@ class LCMSMSMVPTests(unittest.TestCase):
         self.assertEqual(inferred["component_member_count"], 2)
         self.assertEqual(inferred["component_charge_states"], [2, 3])
         self.assertIn("resolved_isotope_envelopes", inferred["component_mass_evidence"])
+        self.assertIn("averagine_full_isotope_envelope", inferred["component_mass_evidence"])
+        self.assertGreater(inferred["component_isotope_fit_score"], 0.85)
         self.assertAlmostEqual(inferred["component_neutral_mass"], 1880.0415, places=2)
         self.assertIsNotNone(inferred["component_representative_mz"])
         self.assertIn(inferred["component_representative_charge"], {2, 3})
         for member in inferred["members"]:
             self.assertIn("true_peak_mz", member)
             self.assertIn("envelope_representative_mz", member)
+            self.assertIn("component_isotope_fit_score", member)
+            self.assertIn("component_theoretical_isotope_intensity", member)
 
     def test_modified_peptide_pairs_unmodified_form_and_merges_charge_states(self) -> None:
         candidates = generate_candidates({"HC": "PEPMIDEK"}, max_missed_cleavages=0)
@@ -1003,13 +1367,20 @@ class LCMSMSMVPTests(unittest.TestCase):
             candidate for candidate in candidates
             if not candidate.is_decoy and candidate.modification_text == "Unmodified"
         )
+        dioxidized = next(
+            candidate for candidate in candidates
+            if not candidate.is_decoy and candidate.modification_text == "Dioxidation@4"
+        )
         sample_ids = ["reference", "test"]
         payload = {
             "sample_ids": sample_ids,
             "reference_sample": "reference",
             "alignment": {"rt_shift_by_sample": {sample: 0.0 for sample in sample_ids}},
             "feature_area_normalization": {"factor_by_sample": {sample: 1.0 for sample in sample_ids}},
-            "global_feature_groups": [{"feature_group_id": "FG_MOD", "difference_type": "area_changed"}],
+            "global_feature_groups": [
+                {"feature_group_id": "FG_MOD", "difference_type": "area_changed"},
+                {"feature_group_id": "FG_DIOX", "difference_type": "common_feature"},
+            ],
         }
         annotations = [{
             "feature_or_candidate_id": "FG_MOD",
@@ -1024,6 +1395,24 @@ class LCMSMSMVPTests(unittest.TestCase):
         ] + [
             {"candidate_id": unmodified.candidate_id, "sample_id": sample, "rt": 12.0}
             for sample in sample_ids
+        ] + [
+            {
+                "candidate_id": dioxidized.candidate_id,
+                "sample_id": sample,
+                "rt": 11.0,
+                "precursor_charge": 2,
+                "score": 80.0,
+                "q_value": 0.0,
+                "matched_ion_count": 8,
+                "fragment_coverage": 0.5,
+                "feature_links": [{
+                    "feature_group_id": "FG_DIOX",
+                    "feature_rt": 11.0,
+                    "feature_ranking": 0.1,
+                    "feature_difference_type": "common_feature",
+                }],
+            }
+            for sample in sample_ids
         ]
 
         def spectra(sample_id: str) -> list[dict[str, object]]:
@@ -1033,6 +1422,7 @@ class LCMSMSMVPTests(unittest.TestCase):
                 points: list[tuple[float, float]] = []
                 for candidate, apex, amplitude in (
                     (modified, 10.0, 8000.0 if sample_id == "test" else 2000.0),
+                    (dioxidized, 11.0, 3000.0),
                     (unmodified, 12.0, 8000.0),
                 ):
                     peak = amplitude * (2.718281828 ** (-0.5 * ((rt - apex) / 0.12) ** 2))
@@ -1058,8 +1448,10 @@ class LCMSMSMVPTests(unittest.TestCase):
             spectra,
         )
 
-        self.assertEqual(len(rows), 1)
-        row = rows[0]
+        self.assertEqual(len(rows), 2)
+        row = next(item for item in rows if item["modification"] == "Oxidation@4")
+        recalled = next(item for item in rows if item["modification"] == "Dioxidation@4")
+        self.assertIn("FG_DIOX", recalled["linked_feature_ids"])
         self.assertEqual(row["modified_form"]["status"], "ms2_confirmed")
         self.assertEqual(row["unmodified_form"]["status"], "ms2_confirmed")
         self.assertEqual(row["modified_form"]["charge_states_by_sample"]["reference"], [2, 3])
@@ -1067,6 +1459,198 @@ class LCMSMSMVPTests(unittest.TestCase):
         self.assertEqual(comparison["modification_direction"], "increased")
         self.assertEqual(comparison["modified_charge_trend"]["status"], "consistent")
         self.assertAlmostEqual(comparison["modified_unmodified_ratio_fold"], 4.0, places=3)
+
+    def test_terminal_lys_family_is_triggered_by_retained_form_difference(self) -> None:
+        candidates = generate_candidates({"HC": "PEPTIDEK"}, max_missed_cleavages=0)
+        retained = next(
+            candidate for candidate in candidates
+            if not candidate.is_decoy and candidate.sequence == "PEPTIDEK" and not candidate.modifications
+        )
+        clipped = next(
+            candidate for candidate in candidates
+            if not candidate.is_decoy and "C-terminal Lys clipping" in candidate.modification_text
+        )
+        sample_ids = ["reference", "test"]
+        payload = {
+            "sample_ids": sample_ids,
+            "reference_sample": "reference",
+            "alignment": {"rt_shift_by_sample": {sample: 0.0 for sample in sample_ids}},
+            "feature_area_normalization": {"factor_by_sample": {sample: 1.0 for sample in sample_ids}},
+            "global_feature_groups": [
+                {"feature_group_id": "FG_RETAINED", "difference_type": "area_changed"},
+                {"feature_group_id": "FG_CLIPPED", "difference_type": "common_feature"},
+            ],
+        }
+        retained_psms = [{
+            "candidate_id": retained.candidate_id,
+            "base_peptide_id": retained.base_peptide_id,
+            "sample_id": sample,
+            "scan_id": f"{sample}-retained",
+            "rt": 10.0,
+            "precursor_charge": 2,
+            "chain": retained.chain,
+            "start": retained.start,
+            "end": retained.end,
+            "sequence": retained.sequence,
+            "neutral_mass": retained.neutral_mass,
+            "modifications": [],
+            "modification_text": "Unmodified",
+            "proteolysis": "fully_tryptic",
+            "score": 90.0,
+            "q_value": 0.0,
+            "matched_ion_count": 12,
+            "fragment_coverage": 0.7,
+            "feature_links": [{
+                "feature_group_id": "FG_RETAINED",
+                "feature_rt": 10.0,
+                "feature_ranking": 2.0,
+                "feature_difference_type": "area_changed",
+            }],
+        } for sample in sample_ids]
+        clipped_psms = [{
+            "candidate_id": "HC:1-7:PEPTIDE:Unmodified",
+            "base_peptide_id": "HC:1-7:PEPTIDE",
+            "sample_id": sample,
+            "scan_id": f"{sample}-clipped",
+            "rt": 12.0,
+            "precursor_charge": 2,
+            "chain": clipped.chain,
+            "start": clipped.start,
+            "end": clipped.end,
+            "sequence": clipped.sequence,
+            "neutral_mass": clipped.neutral_mass,
+            "modifications": [],
+            "modification_text": "Unmodified",
+            "proteolysis": "semi_tryptic",
+            "score": 88.0,
+            "q_value": 0.0,
+            "matched_ion_count": 10,
+            "fragment_coverage": 0.65,
+            "feature_links": [{
+                "feature_group_id": "FG_CLIPPED",
+                "feature_rt": 12.0,
+                "feature_ranking": 0.1,
+                "feature_difference_type": "common_feature",
+            }],
+        } for sample in sample_ids]
+        psms = retained_psms + clipped_psms
+        annotations = differential_annotations(psms)
+
+        def spectra(sample_id: str) -> list[dict[str, object]]:
+            scans: list[dict[str, object]] = []
+            for index in range(121):
+                rt = 8.0 + index * 0.05
+                points: list[tuple[float, float]] = []
+                for candidate, apex, amplitude in (
+                    (retained, 10.0, 8000.0 if sample_id == "test" else 2000.0),
+                    (clipped, 12.0, 8000.0),
+                ):
+                    peak = amplitude * math.exp(-0.5 * ((rt - apex) / 0.12) ** 2)
+                    for charge in (2, 3):
+                        for isotope_offset in range(3):
+                            mz = (candidate.neutral_mass + isotope_offset * ISOTOPE_MASS_DIFF) / charge + PROTON
+                            points.append((mz, peak * (1.0 - isotope_offset * 0.2)))
+                points.sort()
+                scans.append({
+                    "scan_id": f"scan={index}",
+                    "rt": rt,
+                    "aligned_rt": rt,
+                    "mz": [mz for mz, _ in points],
+                    "intensity": [intensity for _, intensity in points],
+                })
+            return scans
+
+        pairs = build_peptide_form_comparisons(payload, psms, annotations, candidates, spectra)
+        terminal_pair = next(row for row in pairs if "C-terminal Lys clipping" in row["modification"])
+        self.assertEqual(terminal_pair["sequence"], "PEPTIDEK")
+        self.assertIn("FG_RETAINED", terminal_pair["linked_feature_ids"])
+        self.assertIn("FG_CLIPPED", terminal_pair["linked_feature_ids"])
+        self.assertIn("FG_RETAINED", terminal_pair["unmodified_linked_feature_ids"])
+        self.assertIn("FG_CLIPPED", terminal_pair["modified_linked_feature_ids"])
+
+        levels = build_modification_level_quantitation(pairs)
+        terminal_level = next(row for row in levels if row["event_type"] == "c_terminal_lys_processing")
+        self.assertEqual(terminal_level["quantitation_status"], "formal_relative_quantitation")
+        retained_form = next(form for form in terminal_level["forms"] if form["label"] == "C端 Lys 保留")
+        clipped_form = next(form for form in terminal_level["forms"] if form["label"] == "C端 Lys 已剪切")
+        self.assertIn("FG_RETAINED", retained_form["linked_feature_ids"])
+        self.assertIn("FG_CLIPPED", clipped_form["linked_feature_ids"])
+        self.assertIsNotNone(retained_form["best_psm"])
+        self.assertIsNotNone(clipped_form["best_psm"])
+        self.assertGreater(float(retained_form["neutral_mass"]), 0.0)
+        self.assertAlmostEqual(retained_form["relative_level_by_sample"]["reference"], 0.2, places=2)
+        self.assertAlmostEqual(retained_form["relative_level_by_sample"]["test"], 0.5, places=2)
+        self.assertTrue(terminal_level["high_value_candidate"])
+
+    def test_nested_peptides_create_site_consensus_and_digestion_warning(self) -> None:
+        def row(
+            quantitation_id: str,
+            sequence: str,
+            end: int,
+            reference_total: float,
+            test_total: float,
+            reference_level: float,
+            test_level: float,
+        ) -> dict[str, object]:
+            form_id = f"modified:{sequence}:PyroGlu-Q@1"
+            delta = test_level - reference_level
+            return {
+                "event_type": "site_modification_distribution",
+                "quantifiable": True,
+                "quantitation_id": quantitation_id,
+                "rank": 1,
+                "chain": "HC",
+                "start": 1,
+                "end": end,
+                "sequence": sequence,
+                "reference_sample": "QL2519",
+                "quantitation_status": "formal_relative_quantitation",
+                "total_area_by_sample": {"QL2519": reference_total, "Reference": test_total},
+                "forms": [{
+                    "form_id": form_id,
+                    "label": "PyroGlu-Q@1",
+                    "modification": "PyroGlu-Q@1",
+                    "is_unmodified": False,
+                    "included_in_denominator": True,
+                    "ms2_confidence": "B_high_confidence_inferred",
+                    "status": "ms2_confirmed",
+                }],
+                "pairwise_comparisons": [{
+                    "reference_sample": "QL2519",
+                    "test_sample": "Reference",
+                    "form_changes": [{
+                        "form_id": form_id,
+                        "reference_level": reference_level,
+                        "test_level": test_level,
+                        "percentage_point_difference": delta,
+                        "direction": "increased" if delta > 0.005 else "stable",
+                    }],
+                }],
+            }
+
+        summaries = build_proteolytic_modification_families([
+            row("MODLEVEL_0002", "QVQLVQSGAEVK", 12, 124.91, 92.65, 0.8498, 0.9815),
+            row("MODLEVEL_0009", "QVQLVQSGAEVKKPGASVK", 19, 6.06, 23.53, 0.7727, 0.9557),
+        ])
+        self.assertEqual(len(summaries), 1)
+        summary = summaries[0]
+        self.assertTrue(summary["high_value_consensus"])
+        site = summary["site_conclusions"][0]
+        self.assertEqual(site["event_label"], "PyroGlu-Q@1")
+        self.assertTrue(site["pairwise_comparisons"][0]["consistent"])
+        digestion = summary["digestion_comparisons"][0]
+        self.assertTrue(digestion["suspected_digestion_redistribution"])
+        self.assertAlmostEqual(
+            digestion["uncorrected_combined_test_over_reference_fold"],
+            (92.65 + 23.53) / (124.91 + 6.06),
+        )
+        glyco_rows = [
+            row("MODLEVEL_0010", "QVQLVQSGAEVK", 12, 10.0, 8.0, 0.4, 0.6),
+            row("MODLEVEL_0011", "QVQLVQSGAEVKKPGASVK", 19, 2.0, 6.0, 0.3, 0.7),
+        ]
+        for glyco_row in glyco_rows:
+            glyco_row["event_type"] = "glycoform_distribution"
+        self.assertEqual(len(build_proteolytic_modification_families(glyco_rows)), 1)
 
 
 if __name__ == "__main__":

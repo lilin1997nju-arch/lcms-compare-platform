@@ -184,6 +184,24 @@ def read_features(db_path: Path) -> list[dict[str, object]]:
     return features
 
 
+def read_agent_annotations(db_path: Path) -> list[dict[str, object]]:
+    """Read review-only MCP annotations when the report is opened outside the portal."""
+
+    try:
+        with closing(sqlite3.connect(db_path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT annotation_id, feature_group_id, suggestion, rationale, agent_name, review_status, created_at
+                FROM agent_feature_annotations
+                ORDER BY created_at DESC, annotation_id DESC
+                """
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    fields = ("annotation_id", "feature_group_id", "suggestion", "rationale", "agent_name", "review_status", "created_at")
+    return [dict(zip(fields, row, strict=True)) for row in rows]
+
+
 def replace_features(db_path: Path, features: list[object]) -> int:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with closing(sqlite3.connect(db_path)) as connection:
@@ -503,6 +521,9 @@ def make_handler(comparisons: dict[str, dict[str, object]], default_id: str) -> 
                     return
                 if path == "/api/features":
                     self.send_json({"features": read_features(db_for(query))})
+                    return
+                if path == "/api/agent-annotations":
+                    self.send_json({"annotations": read_agent_annotations(db_for(query))})
                     return
                 if path == "/api/xic":
                     peak_id = str(query.get("peak_id", [""])[0])

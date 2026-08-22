@@ -43,9 +43,15 @@ MAX_STRUCTURE_BYTES = 40 * 1024 * 1024
 SPECTRUM_SUFFIXES = {".raw", ".mzml"}
 FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa", ".txt"}
 STRUCTURE_SUFFIXES = {".pdb", ".ent", ".cif", ".mmcif"}
-DEFAULT_TOP_N_TIC_PEAKS = 80
-DEFAULT_TOP_N_MZ = 40
+DEFAULT_TOP_N_TIC_PEAKS = 0
+DEFAULT_TOP_N_MZ = 200
 DEFAULT_TOP_N_CHANGED_MZ = 15
+DEFAULT_DYNAMIC_BACKGROUND_CANDIDATES = True
+DEFAULT_CANDIDATE_SPECTRAL_NOISE_MULTIPLIER = 3.0
+DEFAULT_CANDIDATE_MIN_LOCAL_TIC_PPM = 1500.0
+DEFAULT_CANDIDATE_MAX_PER_TIC = 200
+DEFAULT_CANDIDATE_MIN_CONSECUTIVE_SCANS = 3
+DEFAULT_CANDIDATE_MIN_XIC_TIC_AREA_FRACTION = 0.0003
 DEFAULT_MAX_SPECTRUM_POINTS_PER_SCAN = 500
 DEFAULT_MAX_PEAKS_PER_SCAN = 500
 if str(LCMS_FEATURE_DIR) not in sys.path:
@@ -64,9 +70,9 @@ from serve_peak_first_compare import (  # noqa: E402
 from core.lcms_msms import read_fasta  # noqa: E402
 from run_peak_first_compare import PEAK_FIRST_TEMPLATE  # noqa: E402
 try:  # Support both ``python server.py`` and package-level test imports.
-    from .mcp_server import MCPApplication  # type: ignore[import-not-found]  # noqa: E402
+    from .mcp_server import MCPApplication, read_agent_annotations  # type: ignore[import-not-found]  # noqa: E402
 except ImportError:  # pragma: no cover - exercised by direct script execution
-    from mcp_server import MCPApplication  # noqa: E402
+    from mcp_server import MCPApplication, read_agent_annotations  # noqa: E402
 
 
 def now_iso() -> str:
@@ -879,6 +885,22 @@ class TaskWorker(threading.Thread):
                 "--sample-names-json",
                 str(sample_names_path),
             ]
+            if bool(params.get("dynamic_background_candidates", DEFAULT_DYNAMIC_BACKGROUND_CANDIDATES)):
+                command.extend(
+                    [
+                        "--dynamic-background-candidates",
+                        "--candidate-spectral-noise-multiplier",
+                        str(params.get("candidate_spectral_noise_multiplier", DEFAULT_CANDIDATE_SPECTRAL_NOISE_MULTIPLIER)),
+                        "--candidate-min-local-tic-ppm",
+                        str(params.get("candidate_min_local_tic_ppm", DEFAULT_CANDIDATE_MIN_LOCAL_TIC_PPM)),
+                        "--candidate-max-per-tic",
+                        str(params.get("candidate_max_per_tic", DEFAULT_CANDIDATE_MAX_PER_TIC)),
+                        "--candidate-min-consecutive-scans",
+                        str(params.get("candidate_min_consecutive_scans", DEFAULT_CANDIDATE_MIN_CONSECUTIVE_SCANS)),
+                        "--candidate-min-xic-tic-area-fraction",
+                        str(params.get("candidate_min_xic_tic_area_fraction", DEFAULT_CANDIDATE_MIN_XIC_TIC_AREA_FRACTION)),
+                    ]
+                )
             self.run_command(task_id, command, WORKSPACE)
             report = output_dir / "lcms_peak_first_compare.html"
             db = output_dir / "lcms_peak_first_compare.sqlite"
@@ -896,6 +918,12 @@ class TaskWorker(threading.Thread):
                         "top_tic_peaks": int(params.get("top_n_peaks", DEFAULT_TOP_N_TIC_PEAKS)),
                         "top_mz_per_peak": int(params.get("top_n_mz", DEFAULT_TOP_N_MZ)),
                         "top_changed_mz": int(params.get("top_n_changed_mz", DEFAULT_TOP_N_CHANGED_MZ)),
+                        "dynamic_background_candidates": bool(params.get("dynamic_background_candidates", DEFAULT_DYNAMIC_BACKGROUND_CANDIDATES)),
+                        "candidate_spectral_noise_multiplier": float(params.get("candidate_spectral_noise_multiplier", DEFAULT_CANDIDATE_SPECTRAL_NOISE_MULTIPLIER)),
+                        "candidate_min_local_tic_ppm": float(params.get("candidate_min_local_tic_ppm", DEFAULT_CANDIDATE_MIN_LOCAL_TIC_PPM)),
+                        "candidate_max_per_tic": int(params.get("candidate_max_per_tic", DEFAULT_CANDIDATE_MAX_PER_TIC)),
+                        "candidate_min_consecutive_scans": int(params.get("candidate_min_consecutive_scans", DEFAULT_CANDIDATE_MIN_CONSECUTIVE_SCANS)),
+                        "candidate_min_xic_tic_area_fraction": float(params.get("candidate_min_xic_tic_area_fraction", DEFAULT_CANDIDATE_MIN_XIC_TIC_AREA_FRACTION)),
                         "max_spectrum_points_per_scan": int(params.get("max_spectrum_points_per_scan", DEFAULT_MAX_SPECTRUM_POINTS_PER_SCAN)),
                         "max_peaks_per_scan": int(params.get("max_peaks_per_scan", DEFAULT_MAX_PEAKS_PER_SCAN)),
                     },
@@ -1518,6 +1546,7 @@ def standalone_offline_script(task_id: str, db_path: Path) -> str:
         "features": read_features(db_path),
         "spectra": spectra,
         "msms": _read_optional_artifact(db_path, "msms_identifications"),
+        "agent_annotations": read_agent_annotations(db_path),
         "task_reference_structure": _read_optional_artifact(db_path, "task_reference_structure"),
     }
     compressed = gzip.compress(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), compresslevel=6)
@@ -1673,6 +1702,7 @@ window.__LCMS_OFFLINE_REPORT__ = {{
     if(path.endsWith("/api/comparisons")) return jsonResponse({{default_comparison: offline.taskId, comparisons:[{{id: offline.taskId, label: offline.taskId}}]}});
     if(path.endsWith("/api/bootstrap")) return jsonResponse(store.bootstrap);
     if(path.endsWith("/api/msms")) return store.msms ? jsonResponse(store.msms) : jsonResponse({{error:"MS/MS identification has not been run"}}, 404);
+    if(path.endsWith("/api/agent-annotations")) return jsonResponse({{annotations:store.agent_annotations || []}});
     if(path.endsWith("/api/task-reference")) return store.task_reference_structure ? jsonResponse(store.task_reference_structure) : jsonResponse({{available:false,reason:"未提供结构文件或 PDB ID。"}});
     if(path.endsWith("/api/pdb-structure")){{
       const pdbId = String(url.searchParams.get("pdb_id") || "").toUpperCase();
@@ -2039,6 +2069,9 @@ def make_handler(config: PortalConfig, store: TaskStore) -> type[BaseHTTPRequest
                     self.send_json(read_msms_identifications(db_path))
                 except KeyError:
                     self.send_error_json("MS/MS identification has not been run", HTTPStatus.NOT_FOUND)
+                return
+            if rest == "/api/agent-annotations":
+                self.send_json({"annotations": read_agent_annotations(db_path)})
                 return
             if rest == "/api/task-reference":
                 stored_structure = _read_optional_artifact(db_path, "task_reference_structure")
@@ -2477,6 +2510,12 @@ def make_handler(config: PortalConfig, store: TaskStore) -> type[BaseHTTPRequest
                         "top_n_peaks": DEFAULT_TOP_N_TIC_PEAKS,
                         "top_n_mz": DEFAULT_TOP_N_MZ,
                         "top_n_changed_mz": DEFAULT_TOP_N_CHANGED_MZ,
+                        "dynamic_background_candidates": DEFAULT_DYNAMIC_BACKGROUND_CANDIDATES,
+                        "candidate_spectral_noise_multiplier": DEFAULT_CANDIDATE_SPECTRAL_NOISE_MULTIPLIER,
+                        "candidate_min_local_tic_ppm": DEFAULT_CANDIDATE_MIN_LOCAL_TIC_PPM,
+                        "candidate_max_per_tic": DEFAULT_CANDIDATE_MAX_PER_TIC,
+                        "candidate_min_consecutive_scans": DEFAULT_CANDIDATE_MIN_CONSECUTIVE_SCANS,
+                        "candidate_min_xic_tic_area_fraction": DEFAULT_CANDIDATE_MIN_XIC_TIC_AREA_FRACTION,
                         "mz_tolerance_da": 0.16,
                         "mz_tolerance_ppm": 10.0,
                         "mz_tolerance_mode": "da",

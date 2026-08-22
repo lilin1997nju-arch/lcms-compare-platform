@@ -1,18 +1,23 @@
-"""Read-only MCP adapter for the LC-MS department platform.
+"""MCP adapter for curated LC-MS analytical evidence and review annotations.
 
 The adapter deliberately exposes curated analytical evidence instead of the
-task directory or arbitrary SQLite access.  It is transport-agnostic: the
-HTTP portal uses :class:`MCPApplication` for JSON-RPC requests, while a future
-stdio entry point can reuse the same class.
+task directory or arbitrary SQLite access.  Apart from append-only agent
+annotations that are always pending human review, it is read-only.  It is
+transport-agnostic: the HTTP portal uses :class:`MCPApplication` for JSON-RPC
+requests, while a future stdio entry point can reuse the same class.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
+from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 try:
     from serve_peak_first_compare import read_artifact, read_bootstrap, read_msms_identifications
@@ -25,7 +30,17 @@ MCP_SERVER_NAME = "lcms-department-platform"
 MCP_SERVER_VERSION = "0.1.0"
 MAX_TOOL_LIMIT = 500
 MAX_SPECTRUM_PEAKS = 500
+MAX_UNKNOWN_ANALYSIS_LIMIT = 100
+MAX_ANNOTATIONS_PER_FEATURE = 100
+MAX_ANNOTATION_TEXT_LENGTH = 2_000
+MAX_ANNOTATION_RATIONALE_LENGTH = 4_000
+MAX_AGENT_NAME_LENGTH = 120
 TASK_ID_RE = re.compile(r"^[^\\/]+$")
+UNKNOWN_FEATURE_STATUSES = {
+    "selected_precursor_unidentified",
+    "coisolated_ms2_unresolved",
+    "low_evidence_sequence_candidate",
+}
 
 
 def _json(value: object) -> str:
@@ -46,6 +61,112 @@ def _limit(value: object, default: int = 100) -> int:
     except (TypeError, ValueError):
         number = default
     return max(1, min(number, MAX_TOOL_LIMIT))
+
+
+def _unknown_analysis_limit(value: object, default: int = 25) -> int:
+    return min(_limit(value, default), MAX_UNKNOWN_ANALYSIS_LIMIT)
+
+
+def _trim_text(value: object, limit: int, field: str, *, required: bool = False) -> str:
+    text = str(value or "").strip()
+    if required and not text:
+        raise ValueError(f"{field} is required")
+    if len(text) > limit:
+        raise ValueError(f"{field} exceeds the {limit} character limit")
+    return text
+
+
+def _ensure_agent_annotation_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_feature_annotations (
+            annotation_id TEXT PRIMARY KEY,
+            feature_group_id TEXT NOT NULL,
+            suggestion TEXT NOT NULL,
+            rationale TEXT NOT NULL DEFAULT '',
+            agent_name TEXT NOT NULL DEFAULT 'MCP agent',
+            review_status TEXT NOT NULL DEFAULT 'pending_human_review',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_feature_annotations_feature
+        ON agent_feature_annotations (feature_group_id, created_at)
+        """
+    )
+
+
+def read_agent_annotations(db_path: Path, feature_id: str | None = None) -> list[dict[str, Any]]:
+    """Read append-only annotations without creating a table for legacy tasks."""
+
+    try:
+        with closing(sqlite3.connect(db_path)) as connection:
+            if feature_id:
+                rows = connection.execute(
+                    """
+                    SELECT annotation_id, feature_group_id, suggestion, rationale, agent_name, review_status, created_at
+                    FROM agent_feature_annotations
+                    WHERE feature_group_id = ?
+                    ORDER BY created_at DESC, annotation_id DESC
+                    """,
+                    (feature_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT annotation_id, feature_group_id, suggestion, rationale, agent_name, review_status, created_at
+                    FROM agent_feature_annotations
+                    ORDER BY created_at DESC, annotation_id DESC
+                    """
+                ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    fields = ("annotation_id", "feature_group_id", "suggestion", "rationale", "agent_name", "review_status", "created_at")
+    return [dict(zip(fields, row, strict=True)) for row in rows]
+
+
+def save_agent_annotation(
+    db_path: Path,
+    feature_id: str,
+    suggestion: object,
+    rationale: object = "",
+    agent_name: object = "MCP agent",
+) -> dict[str, Any]:
+    """Append one review-only agent annotation; platform identifications stay untouched."""
+
+    suggestion_text = _trim_text(suggestion, MAX_ANNOTATION_TEXT_LENGTH, "suggestion", required=True)
+    rationale_text = _trim_text(rationale, MAX_ANNOTATION_RATIONALE_LENGTH, "rationale")
+    agent_text = _trim_text(agent_name, MAX_AGENT_NAME_LENGTH, "agent_name") or "MCP agent"
+    annotation_id = f"agent_{uuid4().hex}"
+    created_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with closing(sqlite3.connect(db_path)) as connection:
+        _ensure_agent_annotation_table(connection)
+        current_count = connection.execute(
+            "SELECT COUNT(*) FROM agent_feature_annotations WHERE feature_group_id = ?",
+            (feature_id,),
+        ).fetchone()
+        if int(current_count[0] if current_count else 0) >= MAX_ANNOTATIONS_PER_FEATURE:
+            raise ValueError(f"feature already has the maximum of {MAX_ANNOTATIONS_PER_FEATURE} agent annotations")
+        connection.execute(
+            """
+            INSERT INTO agent_feature_annotations
+                (annotation_id, feature_group_id, suggestion, rationale, agent_name, review_status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending_human_review', ?)
+            """,
+            (annotation_id, feature_id, suggestion_text, rationale_text, agent_text, created_at),
+        )
+        connection.commit()
+    return {
+        "annotation_id": annotation_id,
+        "feature_group_id": feature_id,
+        "suggestion": suggestion_text,
+        "rationale": rationale_text,
+        "agent_name": agent_text,
+        "review_status": "pending_human_review",
+        "created_at": created_at,
+    }
 
 
 def _selected_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -240,6 +361,7 @@ class MCPApplication:
                 "sample_ids": bootstrap.get("sample_ids", []),
                 "component_group_count": len(groups),
                 "feature_evidence_count": len(evidence),
+                "pending_agent_annotation_count": len(read_agent_annotations(db_path)),
                 "ms2_status_counts": status_counts,
                 "ms2_metrics": {
                     key: msms.get(key)
@@ -252,6 +374,12 @@ class MCPApplication:
                         "consensus_feature_accepted_psms",
                         "component_consensus_accepted_psms",
                         "component_sequence_tag_accepted_psms",
+                        "feature_glycopeptide_accepted_psms",
+                        "feature_glycopeptide_feature_count",
+                        "feature_glycopeptide_form_count",
+                        "modification_level_quantitation_count",
+                        "formal_modification_level_count",
+                        "high_value_modification_event_count",
                     )
                     if key in msms
                 },
@@ -333,6 +461,7 @@ class MCPApplication:
             "analysis_policy": "no downstream analysis for features without stored MS2" if not ms2_available else "MS2 evidence available",
             "evidence": _selected_evidence(evidence) if evidence else None,
             "component": _selected_component(component) if component else None,
+            "agent_annotations": read_agent_annotations(db_path, feature_id),
         }
         if arguments.get("include_spectrum", True) and ms2_available:
             result["spectrum"] = _spectrum_payload(coverage_scan, arguments.get("max_peaks", MAX_SPECTRUM_PEAKS))
@@ -357,6 +486,113 @@ class MCPApplication:
             "spectrum": result.get("spectrum"),
         }
 
+    @staticmethod
+    def _analysis_scan(evidence: dict[str, Any]) -> dict[str, Any] | None:
+        for key in ("best_psm", "candidate_psm", "coverage_scan"):
+            candidate = evidence.get(key)
+            if isinstance(candidate, dict) and _as_list(candidate.get("spectrum_peaks")):
+                return candidate
+        return None
+
+    @staticmethod
+    def _unknown_triage(evidence: dict[str, Any]) -> dict[str, str]:
+        status = str(evidence.get("ms2_status") or "unknown")
+        has_sequence = bool(str(evidence.get("sequence") or "").strip())
+        if status == "low_evidence_sequence_candidate":
+            return {
+                "priority": "high",
+                "next_step": "Review the competing sequence/modification candidate against the stored fragment spectrum; do not promote it without human confirmation.",
+            }
+        if status == "coisolated_ms2_unresolved":
+            return {
+                "priority": "high",
+                "next_step": "The isolation window contains signal but attribution is unresolved; inspect co-isolation and consider a narrower-isolation reacquisition.",
+            }
+        if status == "selected_precursor_unidentified":
+            return {
+                "priority": "medium",
+                "next_step": "Review the stored MS/MS spectrum, diagnostic ions and mass hypotheses; a new targeted acquisition may be needed if no coherent fragment series is present.",
+            }
+        return {
+            "priority": "low" if has_sequence else "medium",
+            "next_step": "Review the stored evidence before proposing a tentative annotation.",
+        }
+
+    def _analyze_unknown_features(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Return a bounded, evidence-only review queue; it does not rerun search algorithms."""
+
+        task_id = str(arguments.get("task_id") or "")
+        db_path = self._db(task_id)
+        try:
+            msms = _as_dict(read_msms_identifications(db_path))
+        except KeyError:
+            msms = {}
+        requested_status = str(arguments.get("ms2_status") or "").strip().lower()
+        include_no_ms2 = bool(arguments.get("include_no_ms2", False))
+        include_spectrum = bool(arguments.get("include_spectrum", False))
+        max_peaks = min(_limit(arguments.get("max_peaks"), 100), MAX_SPECTRUM_PEAKS)
+        candidates: list[dict[str, Any]] = []
+        for evidence in self._feature_evidence(msms):
+            status = str(evidence.get("ms2_status") or "unknown")
+            if requested_status:
+                if status.lower() != requested_status:
+                    continue
+            elif status not in UNKNOWN_FEATURE_STATUSES:
+                continue
+            if not include_no_ms2 and status.startswith("no_ms2"):
+                continue
+            scan = self._analysis_scan(evidence)
+            item = _selected_evidence(evidence)
+            item["analysis_eligible"] = bool(scan)
+            item["analysis_policy"] = "MS2 evidence available" if scan else "no downstream analysis for features without stored MS2"
+            item["triage"] = self._unknown_triage(evidence)
+            item["pending_agent_annotation_count"] = len(read_agent_annotations(db_path, str(evidence.get("feature_group_id") or "")))
+            if include_spectrum and scan:
+                item["spectrum"] = _spectrum_payload(scan, max_peaks)
+            candidates.append(item)
+        candidates.sort(
+            key=lambda item: (
+                {"high": 0, "medium": 1, "low": 2}.get(str(_as_dict(item.get("triage")).get("priority")), 3),
+                -float(item.get("ranking_score") or 0.0),
+                int(item.get("rank") or 10**9),
+            )
+        )
+        offset = max(0, int(arguments.get("offset") or 0))
+        limit = _unknown_analysis_limit(arguments.get("limit"), 25)
+        return {
+            "task_id": task_id,
+            "analysis_kind": "bounded_unknown_feature_triage",
+            "algorithm_execution": "none; this tool only curates existing MS1/MS2 evidence for agent review",
+            "returned_count": len(candidates[offset : offset + limit]),
+            "total_matching": len(candidates),
+            "offset": offset,
+            "limit": limit,
+            "include_spectrum": include_spectrum,
+            "features": candidates[offset : offset + limit],
+        }
+
+    def _save_agent_annotation(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        task_id = str(arguments.get("task_id") or "")
+        feature_id = str(arguments.get("feature_id") or "").strip()
+        if not feature_id:
+            raise ValueError("feature_id is required")
+        db_path = self._db(task_id)
+        # Validate the feature before any database write.  An annotation can be
+        # attached to a known component or a Feature evidence record only.
+        self._feature_evidence_payload({"task_id": task_id, "feature_id": feature_id, "include_spectrum": False})
+        annotation = save_agent_annotation(
+            db_path,
+            feature_id,
+            arguments.get("suggestion"),
+            arguments.get("rationale"),
+            arguments.get("agent_name"),
+        )
+        return {
+            "task_id": task_id,
+            "annotation": annotation,
+            "write_policy": "append_only_pending_human_review; platform identification fields were not changed",
+        }
+
     def call_tool(self, name: str, arguments: dict[str, Any]) -> object:
         self.audit(f"tool={name} task_id={arguments.get('task_id', '')}")
         if name == "list_tasks":
@@ -372,6 +608,10 @@ class MCPApplication:
             return self._feature_evidence_payload(arguments)
         if name == "get_msms_spectrum":
             return self._spectrum(arguments)
+        if name == "analyze_unknown_features":
+            return self._analyze_unknown_features(arguments)
+        if name == "save_agent_annotation":
+            return self._save_agent_annotation(arguments)
         raise ValueError(f"unknown tool: {name}")
 
     @staticmethod
@@ -452,6 +692,38 @@ class MCPApplication:
                     "required": ["task_id", "feature_id"],
                 },
             },
+            {
+                "name": "analyze_unknown_features",
+                "description": "批量整理已有 MS1/MS2 证据中的未知或低证据 Feature，提供受控的人工复核队列；不会重跑搜索算法，也不会修改平台结果。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": task,
+                        "ms2_status": {"type": "string", "description": "可选：只分析指定 MS2 状态"},
+                        "include_no_ms2": {"type": "boolean", "default": False},
+                        "include_spectrum": {"type": "boolean", "default": False},
+                        "max_peaks": {"type": "integer", "minimum": 1, "maximum": MAX_SPECTRUM_PEAKS, "default": 100},
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": MAX_UNKNOWN_ANALYSIS_LIMIT, "default": 25},
+                    },
+                    "required": ["task_id"],
+                },
+            },
+            {
+                "name": "save_agent_annotation",
+                "description": "向指定 Feature 追加 Agent 建议。每条记录固定为“待人工确认”，不会覆盖序列、修饰、置信等级或其他平台定性字段。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": task,
+                        "feature_id": {"type": "string"},
+                        "suggestion": {"type": "string", "maxLength": MAX_ANNOTATION_TEXT_LENGTH},
+                        "rationale": {"type": "string", "maxLength": MAX_ANNOTATION_RATIONALE_LENGTH},
+                        "agent_name": {"type": "string", "maxLength": MAX_AGENT_NAME_LENGTH, "default": "MCP agent"},
+                    },
+                    "required": ["task_id", "feature_id", "suggestion"],
+                },
+            },
         ]
 
     def _resource_payload(self, uri: str) -> object:
@@ -490,7 +762,7 @@ class MCPApplication:
                         "resources": {"subscribe": False, "listChanged": False},
                     },
                     "serverInfo": {"name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION},
-                    "instructions": "LC-MS read-only analysis server. Features without stored MS2 are excluded from downstream analysis by default.",
+                    "instructions": "LC-MS analysis server. Features without stored MS2 are excluded from downstream analysis by default. The only write operation is append-only Agent annotations, which are always pending human review and never alter platform identifications.",
                 }
             elif method == "ping":
                 result = {}
