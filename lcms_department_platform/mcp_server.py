@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # Support package-level imports in tests and integr
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MCP_SERVER_NAME = "lcms-department-platform"
-MCP_SERVER_VERSION = "0.1.0"
+MCP_SERVER_VERSION = "1.0.0"
 MAX_TOOL_LIMIT = 500
 MAX_SPECTRUM_PEAKS = 500
 MAX_UNKNOWN_ANALYSIS_LIMIT = 100
@@ -282,7 +282,7 @@ def _spectrum_payload(scan: object, max_peaks: int = MAX_SPECTRUM_PEAKS) -> dict
 
 
 class MCPApplication:
-    """Stateless, read-only MCP JSON-RPC application."""
+    """Stateless MCP JSON-RPC application with one append-only review tool."""
 
     def __init__(self, config: Any, store: Any, audit: Callable[[str], None] | None = None) -> None:
         self.config = config
@@ -617,25 +617,31 @@ class MCPApplication:
     @staticmethod
     def tool_definitions() -> list[dict[str, Any]]:
         task = {"type": "string", "description": "平台任务 ID"}
+        read_annotations = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
+        write_annotations = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
         return [
             {
                 "name": "list_tasks",
                 "description": "列出任务及其状态。只返回任务元数据，不暴露本地文件路径。",
+                "annotations": read_annotations,
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
             {
                 "name": "get_task_status",
                 "description": "读取一个任务的运行状态。",
+                "annotations": read_annotations,
                 "inputSchema": {"type": "object", "properties": {"task_id": task}, "required": ["task_id"]},
             },
             {
                 "name": "get_task_summary",
                 "description": "读取任务的样本、feature、MS2状态和鉴定统计摘要。",
+                "annotations": read_annotations,
                 "inputSchema": {"type": "object", "properties": {"task_id": task}, "required": ["task_id"]},
             },
             {
                 "name": "list_features",
                 "description": "检索任务中的 feature 证据；默认排除没有采集到 MS2 的 feature。",
+                "annotations": read_annotations,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -652,6 +658,7 @@ class MCPApplication:
             {
                 "name": "search_features",
                 "description": "按序列、修饰、feature ID 或未定性原因搜索 MS2 feature。",
+                "annotations": read_annotations,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -668,6 +675,7 @@ class MCPApplication:
             {
                 "name": "get_feature_evidence",
                 "description": "读取单个 feature 的序列、修饰、评分、MS2证据和成分信息。",
+                "annotations": read_annotations,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -682,6 +690,7 @@ class MCPApplication:
             {
                 "name": "get_msms_spectrum",
                 "description": "读取单个 feature 保存的 MS/MS 谱图；没有 MS2 时返回空谱图和原因。",
+                "annotations": read_annotations,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -695,6 +704,7 @@ class MCPApplication:
             {
                 "name": "analyze_unknown_features",
                 "description": "批量整理已有 MS1/MS2 证据中的未知或低证据 Feature，提供受控的人工复核队列；不会重跑搜索算法，也不会修改平台结果。",
+                "annotations": read_annotations,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -712,6 +722,7 @@ class MCPApplication:
             {
                 "name": "save_agent_annotation",
                 "description": "向指定 Feature 追加 Agent 建议。每条记录固定为“待人工确认”，不会覆盖序列、修饰、置信等级或其他平台定性字段。",
+                "annotations": write_annotations,
                 "inputSchema": {
                     "type": "object",
                     "properties": {

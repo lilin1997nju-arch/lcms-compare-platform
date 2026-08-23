@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sqlite3
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from core.lcms_msms import (
@@ -56,7 +58,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sequence-inference-max-terminal-trim", type=int, default=20)
     parser.add_argument("--sequence-inference-min-delta-da", type=float, default=-250.0)
     parser.add_argument("--sequence-inference-max-delta-da", type=float, default=2500.0)
+    parser.add_argument(
+        "--ms2-workers",
+        type=int,
+        default=0,
+        help="Parallel sample-level MS2 workers; 0 chooses one worker per sample.",
+    )
     return parser.parse_args()
+
+
+def emit_progress(fraction: float, stage: str) -> None:
+    """Emit a machine-readable progress update for the desktop worker."""
+    print(f"LCMS_PROGRESS\t{max(0.0, min(1.0, fraction)):.4f}\t{stage}", flush=True)
 
 
 def compact_psm(psm: dict[str, object]) -> dict[str, object]:
@@ -95,6 +108,43 @@ def conversion_metadata(mzml_path: Path) -> dict[str, object]:
         "injection_volume": values.get("injection volume setting"),
         "acquisition_method": values.get("device acquisition method"),
         "metadata_file": str(path.resolve()),
+    }
+
+
+def search_ms2_sample(job: tuple[Path, str, list[object], float, float, float, float]) -> dict[str, object]:
+    """Search one sample in a worker process.
+
+    The parser and primary search are CPU-heavy Python work. Running one
+    process per sample avoids the GIL while keeping the large decoded scan
+    arrays on each worker's side of the process boundary. The parent reloads
+    them from the local mzML cache for cross-sample rescue stages.
+    """
+    mzml_path, project_id, candidates, precursor_ppm, fragment_ppm, min_score, fdr = job
+    raw_file, scans = read_mzml(mzml_path, project_id, ms_levels=(2,))
+    searched = assign_q_values(
+        search_scans(
+            scans,
+            candidates,
+            precursor_tolerance_ppm=max(0.1, precursor_ppm),
+            fragment_tolerance_ppm=max(0.1, fragment_ppm),
+            min_score=max(0.0, min_score),
+        )
+    )
+    accepted = [
+        psm for psm in searched
+        if not psm["is_decoy"] and float(psm["q_value"]) <= fdr
+    ]
+    return {
+        "sample_summary": {
+            "sample_id": raw_file.sample_id,
+            "file": raw_file.file_name,
+            "ms2_scans": len(scans),
+            "searched_psms": len(searched),
+            "accepted_psms": len(accepted),
+            "decoy_winners": sum(bool(psm["is_decoy"]) for psm in searched),
+            **conversion_metadata(mzml_path),
+        },
+        "accepted": accepted,
     }
 
 
@@ -307,6 +357,7 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    emit_progress(0.01, "validate_fasta")
     chains = read_fasta(Path(args.fasta))
     candidates = generate_candidates(
         chains,
@@ -331,32 +382,43 @@ def main() -> None:
             args.sequence_inference_max_terminal_trim,
         ),
     )
+    emit_progress(0.08, "target_candidates")
     sample_summaries: list[dict[str, object]] = []
     accepted: list[dict[str, object]] = []
-    all_ms2_scans = []
-    total_ms2_scans = 0
-    for mzml_text in args.mzml:
-        raw_file, scans = read_mzml(Path(mzml_text), args.project_id, ms_levels=(2,))
-        all_ms2_scans.extend(scans)
-        total_ms2_scans += len(scans)
-        searched = assign_q_values(search_scans(
-            scans,
+    sample_jobs = [
+        (
+            Path(mzml_text),
+            args.project_id,
             candidates,
-            precursor_tolerance_ppm=max(0.1, args.precursor_ppm),
-            fragment_tolerance_ppm=max(0.1, args.fragment_ppm),
-            min_score=max(0.0, args.min_score),
-        ))
-        sample_accepted = [psm for psm in searched if not psm["is_decoy"] and float(psm["q_value"]) <= args.fdr]
-        accepted.extend(sample_accepted)
-        sample_summaries.append({
-            "sample_id": raw_file.sample_id,
-            "file": raw_file.file_name,
-            "ms2_scans": len(scans),
-            "searched_psms": len(searched),
-            "accepted_psms": len(sample_accepted),
-            "decoy_winners": sum(bool(psm["is_decoy"]) for psm in searched),
-            **conversion_metadata(Path(mzml_text)),
-        })
+            args.precursor_ppm,
+            args.fragment_ppm,
+            args.min_score,
+            args.fdr,
+        )
+        for mzml_text in args.mzml
+    ]
+    worker_count = max(1, min(
+        len(sample_jobs),
+        args.ms2_workers if args.ms2_workers > 0 else (os.cpu_count() or 1),
+    ))
+    if worker_count > 1:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            sample_results = list(executor.map(search_ms2_sample, sample_jobs))
+    else:
+        sample_results = [search_ms2_sample(job) for job in sample_jobs]
+    for result in sample_results:
+        sample_summaries.append(dict(result["sample_summary"]))
+        accepted.extend(list(result["accepted"]))
+    emit_progress(0.44, "standard_ms2")
+
+    # The worker processes have already populated the per-level mzML cache.
+    # Reload MS2 once in the parent for the cross-sample feature/rescue stages.
+    all_ms2_scans = []
+    for mzml_text in args.mzml:
+        _, scans = read_mzml(Path(mzml_text), args.project_id, ms_levels=(2,))
+        all_ms2_scans.extend(scans)
+    total_ms2_scans = len(all_ms2_scans)
+    emit_progress(0.50, "cross_sample_load")
     feature_sqlite = Path(args.feature_sqlite).resolve() if args.feature_sqlite else None
     feature_payload = read_peak_first_payload(feature_sqlite) if feature_sqlite else None
     targeted: list[dict[str, object]] = []
@@ -379,6 +441,7 @@ def main() -> None:
             initial_annotations,
             spectra_loader=spectra_loader,
         )
+        emit_progress(0.56, "component_grouping")
         # Keep low-evidence (D) single-spectrum links eligible for component
         # consensus rescue. Only Features already supported at B/C confidence
         # should be excluded from the joint charge/isotope search.
@@ -393,6 +456,7 @@ def main() -> None:
             fragment_tolerance_ppm=max(0.1, args.fragment_ppm),
             fdr_threshold=args.fdr,
         )
+        emit_progress(0.63, "component_consensus")
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in component_consensus
@@ -414,6 +478,7 @@ def main() -> None:
             maximum_mass_delta_da=args.sequence_inference_max_delta_da,
             fdr_threshold=args.fdr,
         )
+        emit_progress(0.70, "sequence_tag_search")
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in component_sequence_tags
@@ -429,6 +494,7 @@ def main() -> None:
             fragment_tolerance_ppm=max(0.1, args.fragment_ppm),
             fdr_threshold=args.fdr,
         )
+        emit_progress(0.76, "feature_consensus")
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in consensus
@@ -444,6 +510,7 @@ def main() -> None:
             fragment_tolerance_ppm=max(0.1, args.fragment_ppm),
             fdr_threshold=args.fdr,
         )
+        emit_progress(0.81, "feature_guided")
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in targeted
@@ -459,6 +526,7 @@ def main() -> None:
             fragment_tolerance_ppm=max(0.1, args.fragment_ppm),
             fdr_threshold=args.fdr,
         )
+        emit_progress(0.86, "glycopeptide_search")
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in targeted_glycopeptides
@@ -476,6 +544,9 @@ def main() -> None:
             maximum_mass_delta_da=args.sequence_inference_max_delta_da,
             fdr_threshold=args.fdr,
         )
+        emit_progress(0.90, "open_mass_search")
+    else:
+        emit_progress(0.90, "no_feature_rescue")
     evidence = (
         accepted
         + component_consensus
@@ -498,6 +569,7 @@ def main() -> None:
             candidates=candidates,
             sequence_region_candidates=sequence_region_candidates,
         )
+    emit_progress(0.93, "feature_evidence")
     peptide_form_comparisons: list[dict[str, object]] = []
     if feature_payload is not None and feature_sqlite is not None:
         peptide_form_comparisons = build_peptide_form_comparisons(
@@ -520,6 +592,7 @@ def main() -> None:
         feature_payload,
         peptide_form_comparisons,
     )
+    emit_progress(0.96, "modification_summary")
     ms1_component_groups = (
         build_ms1_component_groups(
             feature_payload,
@@ -583,6 +656,8 @@ def main() -> None:
                 args.sequence_inference_min_delta_da,
                 args.sequence_inference_max_delta_da,
             ],
+            "ms2_workers": worker_count,
+            "mzml_parser_cache": True,
         },
         "samples": sample_summaries,
         "warnings": warnings,
@@ -655,6 +730,7 @@ def main() -> None:
     modification_pairs_csv_path = output_dir / "lcms_modification_pairs.csv"
     modification_level_csv_path = output_dir / "lcms_modification_level_quantitation.csv"
     html_path = output_dir / "lcms_msms_report.html"
+    emit_progress(0.98, "write_report")
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     write_csv(csv_path, evidence)
     write_feature_evidence_csv(feature_csv_path, feature_evidence)
@@ -664,7 +740,9 @@ def main() -> None:
     html_path.write_text(html_report(report), encoding="utf-8")
     if feature_sqlite:
         write_sqlite_artifact(feature_sqlite, report)
+    emit_progress(1.0, "ms2_complete")
     print(f"MS2 scans: {total_ms2_scans}")
+    print(f"MS2 sample workers: {worker_count}")
     print(f"Accepted target PSMs: {len(accepted)}")
     print(f"Feature-guided tentative PSMs: {len(targeted)}")
     print(f"Feature-targeted glycopeptide PSMs: {len(targeted_glycopeptides)}")

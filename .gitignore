@@ -47,3 +47,5 @@ data/structures/pdb_cache/**
 
 # Local packaging/build scratch
 .pptx_build/**
+desktop/node_modules/
+desktop/dist/

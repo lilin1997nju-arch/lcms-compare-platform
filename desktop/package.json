@@ -1,0 +1,90 @@
+{
+  "name": "lcms-department-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LC-MS/MS 单机离线分析平台桌面版",
+  "author": "LC-MS Department Platform",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.js && node --check preload.js",
+    "build:mcp": "..\\release\\LCMS_Department_Platform\\runtime\\python.exe ..\\tools\\build_mcp_exe.py",
+    "dist": "npm run check && npm run build:mcp && electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "cn.lcms.department.desktop",
+    "productName": "LC-MS MS分析平台",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "startup.html",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../lcms_department_platform",
+        "to": "platform/app/lcms_department_platform",
+        "filter": [
+          "server.py",
+          "mcp_server.py",
+          "mcp_stdio.py",
+          "tools/ThermoRawFileParser/**/*"
+        ]
+      },
+      {
+        "from": "../lcms_feature_mvp",
+        "to": "platform/app/lcms_feature_mvp",
+        "filter": [
+          "run_peak_first_compare.py",
+          "run_msms_compare.py",
+          "serve_peak_first_compare.py",
+          "core/**/*",
+          "ui/vendor/3Dmol-min.js"
+        ]
+      },
+      {
+        "from": "../release/LCMS_Department_Platform/runtime",
+        "to": "platform/runtime"
+      }
+    ],
+    "extraFiles": [
+      {
+        "from": "../release/mcp/LCMS-MCP.exe",
+        "to": "LCMS-MCP.exe"
+      }
+    ],
+    "directories": {
+      "output": "../release/electron"
+    },
+    "artifactName": "LCMS-Desktop-${version}-Setup.${ext}",
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "include": "installer.nsh",
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "LC-MS MS分析平台",
+      "perMachine": false
+    }
+  },
+  "allowScripts": {}
+}

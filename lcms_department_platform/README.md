@@ -45,6 +45,8 @@ lcms_department_platform/jobs/<task_id>/
   worker.log
 ```
 
+Electron 安装版默认使用 `<安装目录>/data` 作为平台根目录，因此任务实际位于 `<安装目录>/data/jobs/<task_id>/`。安装目录同级的 `LCMS-MCP.exe` 会自动读取同一数据目录。
+
 ## 注意
 
 这是一个不包含权限管理的单机/部门内网版本，默认单 worker 顺序执行。当前上传上限为 8 GB，文件会流式写入任务目录，避免把整个 RAW 文件一次性读入内存。

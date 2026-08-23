@@ -16,7 +16,9 @@ import html
 import io
 import json
 import os
+import queue
 import re
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -43,6 +45,9 @@ MAX_STRUCTURE_BYTES = 40 * 1024 * 1024
 SPECTRUM_SUFFIXES = {".raw", ".mzml"}
 FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa", ".txt"}
 STRUCTURE_SUFFIXES = {".pdb", ".ent", ".cif", ".mmcif"}
+# TIC peak comparison remains global by default. Passing a positive value is
+# still available as an explicit diagnostic limit, but the platform must not
+# silently discard lower-ranked peaks.
 DEFAULT_TOP_N_TIC_PEAKS = 0
 DEFAULT_TOP_N_MZ = 200
 DEFAULT_TOP_N_CHANGED_MZ = 15
@@ -54,6 +59,31 @@ DEFAULT_CANDIDATE_MIN_CONSECUTIVE_SCANS = 3
 DEFAULT_CANDIDATE_MIN_XIC_TIC_AREA_FRACTION = 0.0003
 DEFAULT_MAX_SPECTRUM_POINTS_PER_SCAN = 500
 DEFAULT_MAX_PEAKS_PER_SCAN = 500
+PROGRESS_STAGE_LABELS = {
+    "read_ms1": "读取 MS1 数据",
+    "loaded_ms1": "完成 MS1 数据读取",
+    "global_tic_compare": "执行全量 TIC 峰全局比较",
+    "global_feature_complete": "完成全局 Feature 分析",
+    "ms1_spectrum_results": "整理 MS1 光谱与组件结果",
+    "ms1_complete": "MS1 全局 TIC/Feature 比较完成",
+    "validate_fasta": "校验 FASTA 与生成候选肽段",
+    "target_candidates": "完成目标肽段候选生成",
+    "standard_ms2": "完成各样本 MS2 初筛与标准检索",
+    "cross_sample_load": "准备跨样本救援检索",
+    "component_grouping": "完成 MS1 组件分组，开始组件共识检索",
+    "component_consensus": "完成组件电荷态/同位素共识检索",
+    "sequence_tag_search": "完成质量偏移与序列标签检索",
+    "feature_consensus": "完成差异 Feature 共识谱检索",
+    "feature_guided": "完成 Feature 引导定向检索",
+    "glycopeptide_search": "完成差异 Feature 糖肽检索",
+    "open_mass_search": "完成开放质量与序列区域检索",
+    "no_feature_rescue": "无 MS1 Feature 数据，跳过跨样本救援检索",
+    "feature_evidence": "汇总 MS1/MS2 Feature 证据",
+    "modification_summary": "完成修饰肽与相对定量结果整理",
+    "write_report": "写入 MS2 报告与 SQLite 结果",
+    "ms2_complete": "MS2 鉴定与结构映射数据准备完成",
+    "middle_stage": "中间阶段",
+}
 if str(LCMS_FEATURE_DIR) not in sys.path:
     sys.path.insert(0, str(LCMS_FEATURE_DIR))
 
@@ -124,6 +154,9 @@ def validate_fasta_file(path: Path) -> dict[str, int]:
     chains = read_fasta(path)
     if not chains:
         raise ValueError("FASTA contains no usable protein sequence")
+    empty_chains = sorted(str(name) for name, sequence in chains.items() if not str(sequence).strip())
+    if empty_chains:
+        raise ValueError(f"FASTA contains empty sequence record(s): {empty_chains}")
     return {str(name): len(sequence) for name, sequence in chains.items()}
 
 
@@ -377,6 +410,7 @@ class PortalConfig:
     parser_path: Path
     python_executable: str
     jobs_dir_override: Path | None = None
+    control_token: str = ""
     max_upload_bytes: int = MAX_UPLOAD_BYTES
 
     @property
@@ -652,6 +686,18 @@ class TaskWorker(threading.Thread):
         super().__init__(name="lcms-task-worker")
         self.store = store
         self.stop_requested = threading.Event()
+        self.process_lock = threading.Lock()
+        self.current_process: subprocess.Popen[str] | None = None
+
+    def request_stop(self, cancel_running: bool = False) -> None:
+        """Stop accepting work and optionally terminate the active process tree."""
+        self.stop_requested.set()
+        process: subprocess.Popen[str] | None = None
+        if cancel_running:
+            with self.process_lock:
+                process = self.current_process
+        if process is not None and process.poll() is None:
+            self.terminate_process_tree(process)
 
     def run(self) -> None:
         while not self.stop_requested.is_set():
@@ -718,8 +764,20 @@ class TaskWorker(threading.Thread):
         except subprocess.TimeoutExpired:
             pass
 
-    def run_command(self, task_id: str, command: list[str], cwd: Path) -> None:
+    def run_command(
+        self,
+        task_id: str,
+        command: list[str],
+        cwd: Path,
+        progress_range: tuple[int, int] | None = None,
+        progress_stage: str = "",
+    ) -> None:
+        if self.stop_requested.is_set():
+            raise TaskCanceled("Platform is stopping.")
         self.check_cancellation(task_id)
+        if progress_range is not None:
+            start, _ = progress_range
+            self.store.update(task_id, stage=progress_stage or "processing", progress=max(0, min(100, int(start))))
         self.log(task_id, "RUN " + " ".join(command))
         creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         process = subprocess.Popen(
@@ -732,20 +790,89 @@ class TaskWorker(threading.Thread):
             errors="replace",
             creationflags=creation_flags,
         )
-        while True:
+        with self.process_lock:
+            self.current_process = process
+
+        output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        output_threads: list[threading.Thread] = []
+
+        def read_output(stream_name: str, stream: Any) -> None:
+            if stream is None:
+                return
             try:
-                stdout, stderr = process.communicate(timeout=0.5)
-                break
-            except subprocess.TimeoutExpired:
-                if self.cancellation_requested(task_id):
-                    self.log(task_id, f"CANCEL requested; terminating process tree PID {process.pid}.")
+                for line in iter(stream.readline, ""):
+                    output_queue.put((stream_name, line.rstrip("\r\n")))
+            finally:
+                stream.close()
+
+        for stream_name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            reader = threading.Thread(
+                target=read_output,
+                args=(stream_name, stream),
+                name=f"lcms-command-{stream_name}",
+                daemon=True,
+            )
+            reader.start()
+            output_threads.append(reader)
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def drain_output() -> None:
+            while True:
+                try:
+                    stream_name, line = output_queue.get_nowait()
+                except queue.Empty:
+                    return
+                if stream_name == "stdout":
+                    stdout_lines.append(line)
+                    if progress_range is not None and line.startswith("LCMS_PROGRESS\t"):
+                        parts = line.split("\t", 2)
+                        if len(parts) == 3:
+                            try:
+                                fraction = max(0.0, min(1.0, float(parts[1])))
+                                start, end = progress_range
+                                progress = round(start + (end - start) * fraction)
+                                self.store.update(
+                                    task_id,
+                                    stage=PROGRESS_STAGE_LABELS.get(
+                                        parts[2].strip(),
+                                        parts[2].strip() or progress_stage or "processing",
+                                    ),
+                                    progress=max(0, min(100, progress)),
+                                )
+                            except ValueError:
+                                pass
+                else:
+                    stderr_lines.append(line)
+
+        try:
+            while process.poll() is None:
+                drain_output()
+                if self.stop_requested.is_set() or self.cancellation_requested(task_id):
+                    reason = "platform shutdown" if self.stop_requested.is_set() else "task cancellation"
+                    self.log(task_id, f"CANCEL requested by {reason}; terminating process tree PID {process.pid}.")
                     self.terminate_process_tree(process)
-                    stdout, stderr = process.communicate()
+                    for reader in output_threads:
+                        reader.join(timeout=3)
+                    drain_output()
+                    stdout = "\n".join(stdout_lines)
+                    stderr = "\n".join(stderr_lines)
                     if stdout.strip():
                         self.log(task_id, stdout.strip())
                     if stderr.strip():
                         self.log(task_id, stderr.strip())
                     raise TaskCanceled("Task canceled while the process was running.")
+                time.sleep(0.1)
+            for reader in output_threads:
+                reader.join(timeout=5)
+            drain_output()
+        finally:
+            with self.process_lock:
+                if self.current_process is process:
+                    self.current_process = None
+        stdout = "\n".join(stdout_lines)
+        stderr = "\n".join(stderr_lines)
         if stdout.strip():
             self.log(task_id, stdout.strip())
         if stderr.strip():
@@ -754,8 +881,17 @@ class TaskWorker(threading.Thread):
             raise TaskCanceled("Task canceled after the process completed.")
         if process.returncode != 0:
             raise RuntimeError(f"Command failed with exit code {process.returncode}: {' '.join(command)}")
+        if progress_range is not None:
+            _, end = progress_range
+            self.store.update(task_id, stage=progress_stage or "processing", progress=max(0, min(100, int(end))))
 
-    def convert_raw(self, task_id: str, raw_path: Path, mzml_dir: Path) -> Path:
+    def convert_raw(
+        self,
+        task_id: str,
+        raw_path: Path,
+        mzml_dir: Path,
+        progress_range: tuple[int, int] | None = None,
+    ) -> Path:
         parser = self.store.config.parser_path
         if not parser.exists():
             raise FileNotFoundError(f"ThermoRawFileParser not found: {parser}")
@@ -763,7 +899,13 @@ class TaskWorker(threading.Thread):
         if target.exists():
             return target
         command = [str(parser), "-i", str(raw_path), "-o", str(mzml_dir), "-f", "2", "-m", "0", "-l", "3"]
-        self.run_command(task_id, command, WORKSPACE)
+        self.run_command(
+            task_id,
+            command,
+            WORKSPACE,
+            progress_range=progress_range,
+            progress_stage=f"正在转换：{raw_path.name}",
+        )
         if target.exists():
             return target
         matches = sorted(mzml_dir.glob(f"{raw_path.stem}*.mzML"), key=lambda item: item.stat().st_mtime, reverse=True)
@@ -814,6 +956,23 @@ class TaskWorker(threading.Thread):
         references_dir = task_dir / "references"
         try:
             self.log(task_id, "Task started.")
+            reference_meta = dict(task.get("references") or {})
+            sequence_meta = dict(reference_meta.get("sequence") or {})
+            if sequence_meta.get("provided"):
+                fasta_reference = str(sequence_meta.get("path") or "").strip()
+                if not fasta_reference:
+                    raise ValueError("FASTA reference path is missing")
+                fasta_path = Path(fasta_reference)
+                if not fasta_path.is_absolute():
+                    fasta_path = task_dir / fasta_path
+                if not fasta_path.exists():
+                    raise FileNotFoundError(f"FASTA reference was not found: {fasta_path}")
+                chain_lengths = validate_fasta_file(fasta_path)
+                sequence_meta["chain_lengths"] = chain_lengths
+                reference_meta["sequence"] = sequence_meta
+                task["references"] = reference_meta
+                self.store.update(task_id, references=reference_meta)
+                self.log(task_id, f"Validated FASTA chains before LC-MS processing: {chain_lengths}")
             mzml_dir.mkdir(parents=True, exist_ok=True)
             converted: list[str] = []
             input_files = task.get("files", [])
@@ -821,26 +980,38 @@ class TaskWorker(threading.Thread):
             for index, file_info in enumerate(input_files):
                 source = raw_dir / str(file_info["stored_name"])
                 suffix = source.suffix.lower()
-                file_progress = 10 + int(35 * index / total_inputs)
-                self.store.update(task_id, stage=f"processing {source.name}", progress=file_progress)
+                conversion_start = 5 + int(15 * index / total_inputs)
+                conversion_end = 5 + int(15 * (index + 1) / total_inputs)
+                self.store.update(task_id, stage=f"准备输入：{source.name}", progress=conversion_start)
                 if suffix == ".mzml":
                     target = mzml_dir / source.name
                     if not target.exists():
                         shutil.copy2(source, target)
                     converted.append(str(target))
+                    self.store.update(task_id, stage=f"已准备输入：{source.name}", progress=conversion_end)
                 elif suffix == ".raw":
                     cached_mzml = mzml_dir / f"{source.stem}.mzML"
                     if not source.exists() and cached_mzml.exists():
                         self.log(task_id, f"Reusing existing converted mzML for removed RAW copy: {cached_mzml.name}")
                         converted.append(str(cached_mzml))
+                        self.store.update(task_id, stage=f"已复用转换结果：{source.name}", progress=conversion_end)
                     else:
-                        converted.append(str(self.convert_raw(task_id, source, mzml_dir)))
+                        converted.append(
+                            str(
+                                self.convert_raw(
+                                    task_id,
+                                    source,
+                                    mzml_dir,
+                                    progress_range=(conversion_start, conversion_end),
+                                )
+                            )
+                        )
                 else:
                     raise ValueError(f"Unsupported file type: {source.name}")
             if len(converted) < 2:
                 raise ValueError("At least two RAW/mzML files are required for comparison.")
             self.cleanup_task_raw_copies(task_id, task_dir, raw_dir, input_files)
-            self.store.update(task_id, stage="building peak-first comparison", progress=55)
+            self.store.update(task_id, stage="准备 MS1 全局 TIC/Feature 比较", progress=20)
             output_dir.mkdir(parents=True, exist_ok=True)
             params = task.get("params") or {}
             sample_names_path = task_dir / "sample_names.json"
@@ -901,7 +1072,13 @@ class TaskWorker(threading.Thread):
                         str(params.get("candidate_min_xic_tic_area_fraction", DEFAULT_CANDIDATE_MIN_XIC_TIC_AREA_FRACTION)),
                     ]
                 )
-            self.run_command(task_id, command, WORKSPACE)
+            self.run_command(
+                task_id,
+                command,
+                WORKSPACE,
+                progress_range=(20, 57),
+                progress_stage="MS1 全局 TIC/Feature 比较",
+            )
             report = output_dir / "lcms_peak_first_compare.html"
             db = output_dir / "lcms_peak_first_compare.sqlite"
             if not report.exists() or not db.exists():
@@ -937,7 +1114,7 @@ class TaskWorker(threading.Thread):
             if fasta_path and not fasta_path.is_absolute():
                 fasta_path = task_dir / fasta_path
             if fasta_path and fasta_path.exists():
-                self.store.update(task_id, stage="building MS/MS identification", progress=78)
+                self.store.update(task_id, stage="准备 MS2 与结构映射", progress=57)
                 msms_command = [
                     self.store.config.python_executable,
                     str(WORKSPACE / "lcms_feature_mvp" / "run_msms_compare.py"),
@@ -952,7 +1129,13 @@ class TaskWorker(threading.Thread):
                 ]
                 for mzml_path in converted:
                     msms_command.extend(["--mzml", mzml_path])
-                self.run_command(task_id, msms_command, WORKSPACE)
+                self.run_command(
+                    task_id,
+                    msms_command,
+                    WORKSPACE,
+                    progress_range=(57, 94),
+                    progress_stage="MS2 鉴定与跨样本 Feature 映射",
+                )
                 msms_report = output_dir / "lcms_msms_report.html"
                 if not msms_report.exists():
                     raise FileNotFoundError("FASTA was provided but the MS/MS report was not created.")
@@ -962,6 +1145,7 @@ class TaskWorker(threading.Thread):
                     "fasta": sequence_meta.get("name", fasta_path.name),
                 }
                 if structure_meta.get("provided"):
+                    self.store.update(task_id, stage="准备蛋白结构映射", progress=95)
                     structure_ready = bool(structure_meta.get("path"))
                     if structure_meta.get("source") == "pdb_id" and not structure_meta.get("path"):
                         try:
@@ -988,11 +1172,15 @@ class TaskWorker(threading.Thread):
                         "status": "skipped_no_structure",
                         "reason": "已执行 MS2，但未提供结构文件或 PDB ID，未执行结构映射。",
                     }
+                self.store.update(task_id, stage="MS2 与结构映射完成，正在整理报告", progress=98)
             elif structure_meta.get("provided"):
+                self.store.update(task_id, stage="无有效 FASTA，跳过结构映射", progress=96)
                 analysis_metadata["structure_mapping"] = {
                     "status": "skipped_no_fasta",
                     "reason": "已提供结构，但缺少 FASTA 序列；按规则不执行结构映射。",
                 }
+            else:
+                self.store.update(task_id, stage="MS1 完成，正在整理报告", progress=98)
             update_bootstrap_metadata(db, analysis_metadata)
             if structure_meta.get("provided") and structure_meta.get("path"):
                 structure_path = (task_dir / str(structure_meta["path"])).resolve()
@@ -1208,6 +1396,38 @@ def page_shell(title: str, body: str) -> bytes:
     #platformStatus .metric:first-child b::before {{ content:""; display:inline-block; width:7px; height:7px; margin:0 7px 1px 0; border-radius:50%; background:#47d6a2; box-shadow:0 0 0 4px rgba(71,214,162,.12); }}
     #logPanel {{ padding-bottom:20px; }}
     #taskLog {{ min-height:92px; margin:12px 0 0; white-space:pre-wrap; color:#c8ddfa; font:11px/1.65 "SFMono-Regular",Consolas,"Liberation Mono",monospace; border:1px solid #182f54; border-radius:12px; background:#08172e; box-shadow:inset 0 1px 0 rgba(255,255,255,.04); }}
+    [hidden] {{ display:none !important; }}
+    .workspace-shell {{ display:grid; grid-template-columns:210px minmax(0,1fr); gap:20px; align-items:start; }}
+    .workspace-nav {{ position:sticky; top:102px; display:grid; gap:7px; padding:12px; border:1px solid #d9e5f1; border-radius:16px; background:rgba(255,255,255,.94); box-shadow:var(--shadow); }}
+    .workspace-nav-title {{ padding:8px 10px 10px; color:#8a9bb0; font-size:10px; font-weight:850; letter-spacing:.14em; text-transform:uppercase; }}
+    .workspace-nav button {{ display:grid; grid-template-columns:32px 1fr; gap:9px; align-items:center; width:100%; padding:10px; color:#536a86; border-color:transparent; background:transparent; text-align:left; }}
+    .workspace-nav button:hover {{ color:#175cd3; border-color:#d4e4f6; background:#f2f7ff; transform:none; }}
+    .workspace-nav button.active {{ color:#fff; border-color:#2563eb; background:linear-gradient(135deg,#2563eb,#147bb5); box-shadow:0 8px 18px rgba(37,99,235,.18); }}
+    .workspace-nav-index {{ display:grid; width:30px; height:30px; place-items:center; border-radius:9px; color:inherit; background:rgba(37,99,235,.08); font-size:11px; font-weight:850; }}
+    .workspace-nav button.active .workspace-nav-index {{ background:rgba(255,255,255,.18); }}
+    .workspace-nav-label {{ font-size:12px; font-weight:760; }}
+    .workspace-main {{ min-width:0; }}
+    .desktop-view {{ display:grid; gap:20px; }}
+    .view-heading {{ display:flex; gap:18px; align-items:flex-end; justify-content:space-between; padding:4px 3px 0; }}
+    .view-heading h2 {{ margin:0; font-size:25px; letter-spacing:-.035em; }}
+    .view-heading p {{ margin:5px 0 0; color:#71839c; font-size:12px; }}
+    .view-actions {{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }}
+    .view-actions button {{ padding:8px 11px; color:#42607f; font-size:11px; background:#fff; }}
+    .auto-method-note {{ display:flex; gap:10px; align-items:flex-start; margin:0 0 14px; padding:11px 13px; color:#42607f; border:1px solid #cfe1f5; border-radius:11px; background:#f1f7ff; font-size:11px; line-height:1.55; }}
+    .auto-method-note b {{ color:#175cd3; white-space:nowrap; }}
+    .optional-reference {{ margin-top:12px; padding:0 14px; border:1px solid #e0e9f3; border-radius:12px; background:#fbfdff; }}
+    .optional-reference summary {{ padding:12px 0; color:#344965; font-size:12px; font-weight:780; cursor:pointer; }}
+    .optional-reference summary span {{ color:#8a9bb0; font-size:10px; font-weight:600; }}
+    .optional-reference[open] {{ padding-bottom:14px; }}
+    .task-inspector-grid {{ display:grid; grid-template-columns:minmax(0,.85fr) minmax(420px,1.15fr); gap:20px; align-items:start; }}
+    .desktop-data-path {{ max-width:100%; overflow-wrap:anywhere; }}
+    .desktop-only {{ display:none; }}
+    body.desktop-app .desktop-only {{ display:inline-flex; }}
+    body.desktop-app .browser-only {{ display:none; }}
+    .diagnostic-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }}
+    .diagnostic-actions button {{ color:#d9eaff; border-color:rgba(170,202,239,.28); background:rgba(255,255,255,.08); }}
+    .diagnostic-actions button:hover {{ color:#fff; background:rgba(255,255,255,.14); }}
+    @media (max-width:1200px) {{ .workspace-shell {{ grid-template-columns:1fr; }} .workspace-nav {{ position:sticky; top:72px; z-index:16; display:flex; overflow:auto; padding:8px; border-radius:13px; }} .workspace-nav-title {{ display:none; }} .workspace-nav button {{ min-width:150px; width:auto; }} .task-inspector-grid {{ grid-template-columns:1fr; }} }}
     @media (max-width:1100px) {{ .grid {{ grid-template-columns:1fr; }} }}
     @media (max-width:760px) {{ header {{ padding:13px 16px; }} .header-note, .nav-divider {{ display:none; }} .top-nav a {{ padding:7px 9px; }} main {{ padding:24px 12px 40px; gap:15px; }} section {{ padding:18px 15px; border-radius:14px; }} .workflow-strip {{ grid-template-columns:1fr 1fr; gap:14px 0; padding:14px; }} .workflow-step {{ padding:0 7px; }} .workflow-step:first-child {{ padding-left:0; }} .workflow-step:not(:last-child)::after {{ display:none; }} .field-grid {{ grid-template-columns:1fr; }} .field-span {{ grid-column:auto; }} .controls {{ align-items:flex-start; flex-direction:column; gap:5px; }} .controls input {{ width:100%; }} .section-head {{ display:block; }} .section-meta {{ display:block; margin-top:5px; }} .task-list-toolbar {{ align-items:stretch; }} .task-list-toolbar label {{ align-self:center; }} .task-search {{ min-width:0; flex-basis:100%; }} #platformStatus .metric {{ min-width:calc(50% - 5px); }} #taskTable th, #taskTable td {{ padding:10px 7px; }} .task-title {{ font-size:12px; }} }}
     @media (max-width:440px) {{ header h1 {{ font-size:15px; }} .brand-kicker {{ display:none; }} .brand-mark {{ width:34px; height:34px; }} .workflow-strip {{ grid-template-columns:1fr; }} .workflow-step {{ padding:0; }} .workflow-step:not(:last-child)::after {{ display:block; right:auto; left:14px; top:30px; width:1px; height:14px; }} .step-caption {{ white-space:normal; }} }}
@@ -1225,7 +1445,7 @@ def page_shell(title: str, body: str) -> bytes:
     <nav class="top-nav" aria-label="主导航">
       <a href="/">任务首页</a>
       <span class="nav-divider"></span>
-      <span class="header-note">数据上传&nbsp; → &nbsp;排队运行&nbsp; → &nbsp;结果查看 / 导出</span>
+      <span class="header-note">本地数据&nbsp; · &nbsp;自动判定&nbsp; · &nbsp;离线分析</span>
     </nav>
   </header>
   <main>{body}</main>
@@ -1234,105 +1454,95 @@ def page_shell(title: str, body: str) -> bytes:
 
 
 INDEX_BODY = r"""
-<div class="workflow-strip" aria-label="分析流程">
-  <div class="workflow-step"><span class="step-dot">01</span><span class="step-copy"><span class="step-title">上传数据</span><span class="step-caption">RAW / mzML / 参考资料</span></span></div>
-  <div class="workflow-step"><span class="step-dot">02</span><span class="step-copy"><span class="step-title">进入队列</span><span class="step-caption">按创建时间顺序处理</span></span></div>
-  <div class="workflow-step"><span class="step-dot">03</span><span class="step-copy"><span class="step-title">自动分析</span><span class="step-caption">MS1 · MS2 · Feature</span></span></div>
-  <div class="workflow-step"><span class="step-dot">04</span><span class="step-copy"><span class="step-title">查看结果</span><span class="step-caption">在线报告与离线导出</span></span></div>
+<div class="workspace-shell">
+  <aside class="workspace-nav" aria-label="工作区导航">
+    <div class="workspace-nav-title">Workspace</div>
+    <button type="button" class="active" data-view-target="taskCenterView"><span class="workspace-nav-index">01</span><span class="workspace-nav-label">任务中心</span></button>
+    <button type="button" data-view-target="newTaskView"><span class="workspace-nav-index">02</span><span class="workspace-nav-label">新建分析</span></button>
+    <button type="button" data-view-target="diagnosticsView"><span class="workspace-nav-index">03</span><span class="workspace-nav-label">设置与诊断</span></button>
+  </aside>
+  <div class="workspace-main">
+    <div id="taskCenterView" class="desktop-view">
+      <div class="view-heading">
+        <div><p class="section-kicker">Task center</p><h2>任务中心</h2><p>集中查看排队、运行状态、分析结果与任务日志。</p></div>
+        <div class="view-actions"><button type="button" data-open-view="newTaskView">＋ 新建分析任务</button></div>
+      </div>
+      <section>
+        <div class="section-head">
+          <div><p class="section-kicker">Queue monitor</p><h2>运行序列</h2></div>
+          <p class="section-meta">每 3 秒自动刷新</p>
+        </div>
+        <div id="queueSummary" class="upload-summary"></div>
+        <div class="task-list-toolbar">
+          <label for="taskSearch">搜索任务</label>
+          <input id="taskSearch" class="task-search" type="search" placeholder="任务名称、任务 ID、样品名称或文件名">
+          <label for="taskStatusFilter">状态</label>
+          <select id="taskStatusFilter">
+            <option value="">全部状态</option><option value="waiting">排队中</option><option value="running">运行中</option><option value="finished">已完成</option><option value="failed">失败</option><option value="canceled">已取消</option>
+          </select>
+          <button id="clearTaskFilters" type="button">清除</button>
+        </div>
+        <div id="taskPagination" class="task-pagination" aria-live="polite"></div>
+        <div class="table-wrap"><table id="taskTable"></table></div>
+      </section>
+      <div class="task-inspector-grid">
+        <section id="taskDetail">
+          <div class="section-head"><div><p class="section-kicker">Selected task</p><h2>任务详情与结果</h2></div><p class="section-meta">点击任务行查看</p></div>
+          <div id="detailSummary" class="note">请选择一个任务。</div>
+          <div id="detailActions"></div>
+        </section>
+        <section id="logPanel">
+          <div class="section-head"><div><p class="section-kicker">Execution log</p><h2>任务日志</h2></div><p class="section-meta">转换与分析诊断</p></div>
+          <div class="note" id="logTitle">点击任务行查看日志。</div>
+          <pre id="taskLog"></pre>
+        </section>
+      </div>
+    </div>
+
+    <div id="newTaskView" class="desktop-view" hidden>
+      <div class="view-heading"><div><p class="section-kicker">New analysis</p><h2>新建分析任务</h2><p>添加样品和可选参考资料，提交后由平台自动完成候选判定与分析。</p></div></div>
+      <section>
+        <div class="auto-method-note"><b>自动判定</b><span>TIC 峰和候选组分数量由信号阈值、局部噪声与连续扫描证据自动确定，无需设置固定数量。</span></div>
+        <form id="taskForm">
+          <div class="field-grid"><div class="field-span"><label>任务名称</label><input name="task_name" required placeholder="例如：202407 PTM 两样品比对"></div></div>
+          <label>样品数据 <span class="note">至少 2 个 RAW 或 mzML 文件</span></label>
+          <div class="upload-box">
+            <div class="upload-icon">＋</div><div class="upload-title">添加本地样品文件</div>
+            <div class="upload-caption">支持多选 · 单次总量上限 8 GB</div>
+            <input id="files" name="files" type="file" accept=".raw,.RAW,.mzML,.mzml" multiple required>
+            <div id="fileSummary" class="sample-name-list" hidden></div>
+            <div class="drop-hint">RAW 将由内置 ThermoRawFileParser 转换；mzML 可直接进入分析。</div>
+          </div>
+          <details class="optional-reference">
+            <summary>蛋白质 FASTA 序列 <span>可选 · 用于 MS/MS 鉴定</span></summary>
+            <input id="sequence_file" name="sequence_file" type="file" accept=".fa,.fasta,.fas,.faa,.txt">
+            <textarea id="sequence_text" name="sequence_text" rows="4" placeholder=">HC\nEVQL...\n>LC\nDIQ..."></textarea>
+            <div class="note">文件和粘贴序列二选一；未提供时仍会完成 MS1 / Feature 分析。</div>
+          </details>
+          <details class="optional-reference">
+            <summary>蛋白质结构 <span>可选 · 本地文件优先</span></summary>
+            <input id="structure_file" name="structure_file" type="file" accept=".pdb,.ent,.cif,.mmcif">
+            <div class="controls"><span>联网时也可输入 PDB ID</span><input id="pdb_id" name="pdb_id" maxlength="12" placeholder="例如 3V4P"></div>
+            <div class="note">离线使用请添加本地 PDB/mmCIF；只有同时具备 FASTA 与结构时才进行结构映射。</div>
+          </details>
+          <div class="form-actions"><button id="submitTask" type="submit">加入分析队列</button><span class="note browser-only">大文件传输期间请保持页面打开</span><span class="note desktop-only">可最小化到后台继续运行</span></div>
+          <div id="uploadStatus" class="note progress"></div>
+        </form>
+      </section>
+    </div>
+
+    <div id="diagnosticsView" class="desktop-view" hidden>
+      <div class="view-heading"><div><p class="section-kicker">Settings & diagnostics</p><h2>设置与诊断</h2><p>检查本地运行环境、数据目录和 RAW 转换器状态。</p></div></div>
+      <section id="platformPanel">
+        <div class="section-head"><div><p class="section-kicker">Service health</p><h2>本地服务状态</h2></div><p class="section-meta">仅监听本机</p></div>
+        <div id="platformStatus" class="upload-summary"><span class="metric"><b>读取中…</b>平台状态</span></div>
+        <div id="desktopDataInfo" class="note desktop-data-path"></div>
+        <div class="diagnostic-actions desktop-only"><button id="openDataDirectory" type="button">打开数据目录</button><button id="chooseDataDirectory" type="button">更改数据目录</button></div>
+        <div class="note">大型 RAW、mzML 和结果应保存在容量充足并定期备份的数据盘。</div>
+      </section>
+    </div>
+  </div>
 </div>
-<div class="grid">
-  <section>
-    <div class="section-head">
-      <div><p class="section-kicker">01 / Analysis setup</p><h2>数据上传与分析参数</h2></div>
-    </div>
-    <form id="taskForm">
-      <div class="field-grid">
-        <div class="field-span"><label>任务名称</label><input name="task_name" required placeholder="例如：202407 PTM 两样品比对"></div>
-      </div>
-      <label>样品数据 <span class="note">至少 2 个 RAW 或 mzML 文件</span></label>
-      <div class="upload-box">
-        <div class="upload-icon">↑</div>
-        <div class="upload-title">选择要比较的原始数据</div>
-        <div class="upload-caption">支持多选上传 · 单次上传上限 8 GB</div>
-        <input id="files" name="files" type="file" accept=".raw,.RAW,.mzML,.mzml" multiple required>
-        <div id="fileSummary" class="sample-name-list" hidden></div>
-        <div class="drop-hint">迁移包已自带 ThermoRawFileParser，可直接处理 RAW；mzML 可直接分析。</div>
-      </div>
-      <div class="field-grid">
-        <div class="field-span">
-          <label>蛋白质 FASTA 序列 <span class="note">可选 · 文件或文本二选一</span></label>
-          <input id="sequence_file" name="sequence_file" type="file" accept=".fa,.fasta,.fas,.faa,.txt">
-        </div>
-        <div class="field-span">
-          <textarea id="sequence_text" name="sequence_text" rows="4" placeholder=">HC\nEVQL...\n>LC\nDIQ..."></textarea>
-          <div class="note">未提供序列时仍可完成 MS1 / Feature 分析，但会跳过 MS2 计算。</div>
-        </div>
-        <div class="field-span">
-          <label>蛋白质结构 <span class="note">可选 · 文件或 PDB ID 二选一</span></label>
-          <input id="structure_file" name="structure_file" type="file" accept=".pdb,.ent,.cif,.mmcif">
-          <div class="controls"><span>或输入 PDB ID</span><input id="pdb_id" name="pdb_id" maxlength="12" placeholder="例如 3V4P"></div>
-          <div class="note">只有同时具备 FASTA 与结构时才进行蛋白质结构映射。</div>
-        </div>
-      </div>
-      <div class="form-actions"><button id="submitTask" type="submit">上传并加入队列</button><span class="note">提交后可在右侧队列查看实时进度</span></div>
-      <div id="uploadStatus" class="note progress"></div>
-      <ul class="help-list">
-        <li>上传上限为 8 GB；大文件上传期间请保持页面打开。</li>
-        <li>任务按创建时间依次运行，同一台服务器默认一次运行一个任务。</li>
-        <li>未提供 FASTA：完成 MS1/Feature 分析，但跳过 MS2 和蛋白质结构映射。</li>
-        <li>完成后请通过“查看报告”进入在线报告；MS2 证据保留在主报告内。</li>
-      </ul>
-    </form>
-  </section>
-  <section>
-    <div class="section-head">
-      <div><p class="section-kicker">02 / Queue monitor</p><h2>运行序列与队列</h2></div>
-      <p class="section-meta">每 3 秒自动刷新</p>
-    </div>
-    <div id="queueSummary" class="upload-summary"></div>
-    <div class="note">选择任务行查看详情、运行阶段和日志；完成后可直接打开在线报告。</div>
-    <div class="task-list-toolbar">
-      <label for="taskSearch">搜索任务</label>
-       <input id="taskSearch" class="task-search" type="search" placeholder="任务名称、任务 ID、样品名称或文件名">
-      <label for="taskStatusFilter">状态</label>
-      <select id="taskStatusFilter">
-        <option value="">全部状态</option>
-        <option value="waiting">排队中</option>
-        <option value="running">运行中</option>
-        <option value="finished">已完成</option>
-        <option value="failed">失败</option>
-        <option value="canceled">已取消</option>
-      </select>
-      <button id="clearTaskFilters" type="button">清除</button>
-    </div>
-    <div id="taskPagination" class="task-pagination" aria-live="polite"></div>
-    <div class="table-wrap"><table id="taskTable"></table></div>
-  </section>
-</div>
-<section id="taskDetail">
-  <div class="section-head">
-    <div><p class="section-kicker">03 / Selected task</p><h2>选中任务详情与结果</h2></div>
-    <p class="section-meta">点击队列中的任意任务</p>
-  </div>
-  <div id="detailSummary" class="note">请选择一个任务。</div>
-  <div id="detailActions"></div>
-</section>
-<section id="platformPanel">
-  <div class="section-head">
-    <div><p class="section-kicker">04 / Service health</p><h2>平台状态与运行说明</h2></div>
-    <p class="section-meta">Local department service</p>
-  </div>
-  <div id="platformStatus" class="upload-summary"><span class="metric"><b>读取中…</b>平台状态</span></div>
-  <div class="note">本版本不含权限管理；建议把任务目录放在容量充足、定期备份的磁盘上。</div>
-</section>
-<section id="logPanel">
-  <div class="section-head">
-    <div><p class="section-kicker">05 / Execution log</p><h2>任务日志</h2></div>
-    <p class="section-meta">用于排查转换与分析状态</p>
-  </div>
-  <div class="note" id="logTitle">点击任务行查看日志。</div>
-  <pre id="taskLog"></pre>
-</section>
 <script>
 const $ = id => document.getElementById(id);
 let selectedTaskId = "";
@@ -1340,9 +1550,18 @@ let latestTasks = [];
 const TASK_PAGE_SIZE = 10;
 let taskPage = 1;
 const statusText = {waiting:"排队中", running:"运行中", canceling:"正在取消", finished:"已完成", failed:"失败", canceled:"已取消"};
+const stageText = {waiting:"等待运行", preparing:"准备分析", canceling:"正在取消", canceled:"已取消", finished:"分析完成", failed:"分析失败", "requeued after restart":"重启后重新排队", "building peak-first comparison":"正在构建 Peak-first 比较", "building MS/MS identification":"正在进行 MS/MS 鉴定"};
 function escapeHtml(text){ return String(text ?? "").replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
 function formatBytes(value){ const n=Number(value||0); if(!n) return "0 B"; const units=["B","KB","MB","GB","TB"]; let i=0, v=n; while(v>=1024&&i<units.length-1){v/=1024;i++;} return `${v.toFixed(i?1:0)} ${units[i]}`; }
  function formatDuration(value){ const n=Math.max(0,Math.round(Number(value||0))); if(!n) return "—"; const h=Math.floor(n/3600), m=Math.floor((n%3600)/60), s=n%60; return h?`${h}h ${m}m ${s}s`:m?`${m}m ${s}s`:`${s}s`; }
+ function formatDate(value){ if(!value) return "—"; const date=new Date(value); return Number.isNaN(date.getTime())?String(value):date.toLocaleString("zh-CN",{hour12:false}); }
+ function formatStage(value){ const stage=String(value||""); if(stageText[stage]) return stageText[stage]; if(stage.startsWith("processing ")) return `正在处理：${stage.slice(11)}`; return stage||"—"; }
+ function formatError(value){ const message=String(value||""); const known={"Canceled by user.":"用户已取消任务。","Canceled by user; Peak-first process terminated.":"用户已取消，分析进程已终止。","Task canceled while the previous server process was stopping.":"平台上次关闭时任务被取消。"}; return known[message]||message; }
+ function showView(viewId){
+   document.querySelectorAll(".desktop-view").forEach(view=>view.hidden=view.id!==viewId);
+   document.querySelectorAll("[data-view-target]").forEach(button=>button.classList.toggle("active",button.dataset.viewTarget===viewId));
+   try{ localStorage.setItem("lcms-active-view",viewId); }catch(_error){}
+ }
  function referenceSummary(task){
    const refs=task.references||{}, seq=refs.sequence||{}, structure=refs.structure||{};
    const sequence=seq.provided?`FASTA：${seq.source||"已提供"}`:"FASTA：未提供";
@@ -1369,9 +1588,10 @@ function renderTaskDetail(){
   if(!task){ $("detailSummary").textContent="请选择一个任务。"; $("detailActions").innerHTML=""; return; }
   const files=(task.files||[]).map(file=>`${escapeHtml(file.sample_name||file.original_name)} ← ${escapeHtml(file.original_name)}（${formatBytes(file.size_bytes)}）`).join("；");
   const queue=task.status==="waiting"&&task.queue_position?`队列第 ${task.queue_position} 位`:(statusText[task.status]||task.status);
-  const error=task.error?`<div class="error-text">错误：${escapeHtml(task.error)}</div>`:"";
-  $("detailSummary").innerHTML=`<div class="upload-summary"><span class="metric"><b>${escapeHtml(statusText[task.status]||task.status)}</b>状态</span><span class="metric"><b>${Number(task.progress||0)}%</b>进度</span><span class="metric"><b>${escapeHtml(queue)}</b>队列</span><span class="metric"><b>${escapeHtml(formatDuration(task.duration_seconds))}</b>耗时</span><span class="metric"><b>${formatBytes(task.total_size_bytes)}</b>上传数据</span></div><div>任务 ID：${escapeHtml(task.task_id)}<br>样品文件：${files||"—"}<br>参考资料：${escapeHtml(referenceSummary(task))}<br>阶段：${escapeHtml(task.stage||"—")}<br>创建时间：${escapeHtml(task.created_at||"—")}</div>${error}`;
-  $("detailActions").innerHTML=`<p>${taskResultLinks(task)} ${taskActionButton(task)}</p>`;
+  const error=task.error?`<div class="error-text">错误：${escapeHtml(formatError(task.error))}</div>`:"";
+  $("detailSummary").innerHTML=`<div class="upload-summary"><span class="metric"><b>${escapeHtml(statusText[task.status]||task.status)}</b>状态</span><span class="metric"><b>${Number(task.progress||0)}%</b>进度</span><span class="metric"><b>${escapeHtml(queue)}</b>队列</span><span class="metric"><b>${escapeHtml(formatDuration(task.duration_seconds))}</b>耗时</span><span class="metric"><b>${formatBytes(task.total_size_bytes)}</b>样品数据</span></div><div>任务 ID：${escapeHtml(task.task_id)}<br>样品文件：${files||"—"}<br>参考资料：${escapeHtml(referenceSummary(task))}<br>阶段：${escapeHtml(formatStage(task.stage))}<br>创建时间：${escapeHtml(formatDate(task.created_at))}</div>${error}`;
+  $("detailActions").innerHTML=`<p>${taskResultLinks(task)} ${taskActionButton(task)} <button class="action-button desktop-only" data-open-task-dir="${escapeHtml(task.task_id)}">打开任务目录</button></p>`;
+  document.querySelectorAll("[data-open-task-dir]").forEach(button=>button.onclick=()=>window.lcmsDesktop?.openTaskDirectory(button.dataset.openTaskDir));
   bindTaskActions();
 }
 function bindTaskActions(){
@@ -1381,7 +1601,7 @@ async function loadPlatformStatus(){
   try {
     const payload=await fetchJson("/api/status");
     const parser=payload.parser_available?"可用":"未配置（mzML 仍可用）";
-    $("platformStatus").innerHTML=`<span class="metric"><b>${escapeHtml(payload.service||"在线")}</b>平台状态</span><span class="metric"><b>${escapeHtml(payload.python_version||"—")}</b>Python</span><span class="metric"><b>${escapeHtml(parser)}</b>RAW 转换器</span><span class="metric"><b>${formatBytes(payload.max_upload_bytes)}</b>上传上限</span><span class="metric"><b>${escapeHtml(payload.jobs_dir||"—")}</b>任务目录</span>`;
+    $("platformStatus").innerHTML=`<span class="metric"><b>${payload.service==="online"?"在线":escapeHtml(payload.service||"在线")}</b>平台状态</span><span class="metric"><b>${escapeHtml(payload.python_version||"—")}</b>Python</span><span class="metric"><b>${escapeHtml(parser)}</b>RAW 转换器</span><span class="metric"><b>${formatBytes(payload.max_upload_bytes)}</b>文件上限</span>`;
   } catch(err){ $("platformStatus").innerHTML=`<span class="metric"><b>读取失败</b>${escapeHtml(err.message||err)}</span>`; }
 }
 async function taskAction(action, taskId){
@@ -1426,8 +1646,8 @@ function renderTaskRows(){
     const progress=Math.max(0,Math.min(100,Number(task.progress||0)));
     const queue=task.status==="waiting"&&task.queue_position?`第 ${task.queue_position} 位`:"—";
      const files=(task.files||[]).map(file=>`<span class="sample-file" title="${escapeHtml(file.sample_name||file.original_name)}"><b>${escapeHtml(file.sample_name||file.original_name)}</b> <span class="note">← ${escapeHtml(file.original_name)} · ${formatBytes(file.size_bytes)}</span></span>`).join("");
-    const error=task.error?`<div class="error-text">${escapeHtml(task.error)}</div>`:"";
-    return `<tr data-task="${escapeHtml(task.task_id)}" class="${task.task_id===selectedTaskId?"task-row-selected":""}"><td><div class="task-title">${escapeHtml(task.task_name)}</div><div class="task-status status-${escapeHtml(task.status)}">${escapeHtml(statusText[task.status]||task.status)}${queue!=="—"?`<span class="task-queue">· ${escapeHtml(queue)}</span>`:""}</div></td><td>${escapeHtml(task.stage||"—")}<div class="progress-track"><div class="progress-bar" style="width:${progress}%"></div></div><span class="note">${progress}% · ${escapeHtml(formatDuration(task.duration_seconds))}</span>${error}</td><td class="sample-files-cell">${files||"—"}</td><td>${escapeHtml(task.created_at||"—")}</td><td class="task-actions">${taskResultLinks(task)} ${taskActionButton(task)}</td></tr>`;
+    const error=task.error?`<div class="error-text">${escapeHtml(formatError(task.error))}</div>`:"";
+    return `<tr data-task="${escapeHtml(task.task_id)}" class="${task.task_id===selectedTaskId?"task-row-selected":""}"><td><div class="task-title">${escapeHtml(task.task_name)}</div><div class="task-status status-${escapeHtml(task.status)}">${escapeHtml(statusText[task.status]||task.status)}${queue!=="—"?`<span class="task-queue">· ${escapeHtml(queue)}</span>`:""}</div></td><td>${escapeHtml(formatStage(task.stage))}<div class="progress-track"><div class="progress-bar" style="width:${progress}%"></div></div><span class="note">${progress}% · ${escapeHtml(formatDuration(task.duration_seconds))}</span>${error}</td><td class="sample-files-cell">${files||"—"}</td><td>${escapeHtml(formatDate(task.created_at))}</td><td class="task-actions">${taskResultLinks(task)} ${taskActionButton(task)}</td></tr>`;
   }).join("");
    $("taskTable").innerHTML=`<tr><th>任务</th><th>阶段 / 进度</th><th>样品名称 / 文件</th><th>创建时间</th><th>结果 / 操作</th></tr>${rows||'<tr><td colspan="5" class="note">暂无匹配任务。</td></tr>'}`;
   document.querySelectorAll("tr[data-task]").forEach(row=>row.onclick=()=>{ selectedTaskId=row.dataset.task; renderTaskDetail(); loadLog(); renderTaskRows(); });
@@ -1437,6 +1657,7 @@ function renderTaskRows(){
 async function loadTasks(){
   const payload = await fetchJson("/api/tasks");
   latestTasks = payload.tasks || [];
+  if(!selectedTaskId && latestTasks.length) selectedTaskId=latestTasks[0].task_id;
   const waiting=latestTasks.filter(task=>task.status==="waiting").length;
   const running=latestTasks.filter(task=>task.status==="running").length;
   const finished=latestTasks.filter(task=>task.status==="finished").length;
@@ -1481,7 +1702,7 @@ $("taskForm").onsubmit = async event => {
     $("uploadStatus").textContent = `已加入队列：${payload.task.task_id}`;
      event.target.reset(); $("fileSummary").innerHTML=""; $("fileSummary").hidden=true;
     selectedTaskId = payload.task.task_id;
-    await loadTasks(); await loadLog();
+    await loadTasks(); await loadLog(); showView("taskCenterView");
  } catch (err) { $("uploadStatus").textContent = `上传失败：${err.message || err}`; }
  finally { $("submitTask").disabled=false; }
  };
@@ -1492,6 +1713,16 @@ $("taskForm").onsubmit = async event => {
 $("taskSearch").oninput=()=>{ taskPage=1; renderTaskRows(); };
 $("taskStatusFilter").onchange=()=>{ taskPage=1; renderTaskRows(); };
 $("clearTaskFilters").onclick=()=>{ $("taskSearch").value=""; $("taskStatusFilter").value=""; taskPage=1; renderTaskRows(); };
+document.querySelectorAll("[data-view-target]").forEach(button=>button.onclick=()=>showView(button.dataset.viewTarget));
+document.querySelectorAll("[data-open-view]").forEach(button=>button.onclick=()=>showView(button.dataset.openView));
+const initialView=(()=>{ try{ const saved=localStorage.getItem("lcms-active-view"); return document.getElementById(saved)?saved:"taskCenterView"; }catch(_error){ return "taskCenterView"; } })();
+showView(initialView);
+if(window.lcmsDesktop){
+  document.body.classList.add("desktop-app");
+  window.lcmsDesktop.getAppInfo().then(info=>{ $("desktopDataInfo").textContent=`桌面版 ${info.version} · 数据目录：${info.dataRoot}`; }).catch(()=>{});
+  $("openDataDirectory").onclick=()=>window.lcmsDesktop.openDataDirectory();
+  $("chooseDataDirectory").onclick=async()=>{ const result=await window.lcmsDesktop.chooseDataDirectory(); if(result&&!result.ok&&!result.canceled) $("desktopDataInfo").textContent=result.error||"无法更改数据目录。"; };
+}
 loadTasks().catch(err => $("taskTable").innerHTML = `<tr><td>${escapeHtml(err.message || err)}</td></tr>`);
 loadPlatformStatus();
 setInterval(() => { loadTasks().catch(()=>{}); if(selectedTaskId) loadLog(); }, 3000);
@@ -1970,7 +2201,8 @@ def make_handler(config: PortalConfig, store: TaskStore) -> type[BaseHTTPRequest
                             "max_upload_bytes": config.max_upload_bytes,
                             "jobs_dir": str(config.jobs_dir),
                             "mcp_endpoint": "/mcp",
-                            "mcp_read_only": True,
+                            "mcp_read_only": False,
+                            "mcp_write_scope": "append_only_pending_agent_annotations",
                         }
                     )
                     return
@@ -2139,6 +2371,14 @@ def make_handler(config: PortalConfig, store: TaskStore) -> type[BaseHTTPRequest
             parsed = urlparse(self.path)
             path = parsed.path
             try:
+                if path == "/api/control/shutdown":
+                    supplied_token = self.headers.get("X-LCMS-Control-Token", "")
+                    if not config.control_token or supplied_token != config.control_token:
+                        self.send_error_json("invalid control token", HTTPStatus.FORBIDDEN)
+                        return
+                    self.send_json({"status": "shutting_down"})
+                    threading.Thread(target=self.server.shutdown, name="lcms-http-shutdown", daemon=True).start()
+                    return
                 if path == "/mcp":
                     self.handle_mcp_post()
                     return
@@ -2591,6 +2831,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--parser-path", default=str(default_parser_path()))
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--control-token", default="", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -2603,6 +2844,7 @@ def main() -> None:
         parser_path=Path(args.parser_path).resolve(),
         python_executable=str(args.python),
         jobs_dir_override=Path(args.jobs_dir).resolve() if args.jobs_dir else None,
+        control_token=str(args.control_token),
     )
     config.state_dir.mkdir(parents=True, exist_ok=True)
     config.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -2613,14 +2855,29 @@ def main() -> None:
     worker = TaskWorker(store)
     worker.start()
     server = ThreadingHTTPServer((config.host, config.port), make_handler(config, store))
-    print(f"Serving LC-MS department platform at http://{config.host}:{config.port}/")
-    print(f"Task root: {config.root}")
-    print(f"ThermoRawFileParser: {config.parser_path}")
+    server.daemon_threads = True
+
+    def stop_server(_signum: int, _frame: object) -> None:
+        threading.Thread(target=server.shutdown, name="lcms-signal-shutdown", daemon=True).start()
+
+    for signal_name in ("SIGINT", "SIGTERM"):
+        shutdown_signal = getattr(signal, signal_name, None)
+        if shutdown_signal is not None:
+            signal.signal(shutdown_signal, stop_server)
+
+    actual_port = int(server.server_address[1])
+    print(f"LCMS_PORT={actual_port}", flush=True)
+    print(f"Serving LC-MS department platform at http://{config.host}:{actual_port}/", flush=True)
+    print(f"Task root: {config.root}", flush=True)
+    print(f"ThermoRawFileParser: {config.parser_path}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping server.")
-        worker.stop_requested.set()
+    finally:
+        worker.request_stop(cancel_running=True)
+        worker.join(timeout=15)
+        server.server_close()
 
 
 if __name__ == "__main__":

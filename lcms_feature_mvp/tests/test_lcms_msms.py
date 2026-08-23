@@ -30,6 +30,7 @@ from core.lcms_msms import (  # noqa: E402
     format_modification_alternatives,
     generate_candidates,
     generate_sequence_inference_candidates,
+    read_fasta,
     search_component_consensus_scans,
     search_component_sequence_tag_scans,
     search_feature_glycopeptide_scans,
@@ -438,6 +439,10 @@ class LCMSMSMVPTests(unittest.TestCase):
             path = Path(tmp) / "sample.mzML"
             path.write_text(xml, encoding="utf-8")
             raw_file, scans = read_mzml(path, ms_levels=(2,))
+            cached_raw_file, ms1_scans = read_mzml(path, ms_levels=(1,))
+            self.assertEqual(cached_raw_file.parser_status, "mzML-cache")
+            self.assertEqual(cached_raw_file.scan_count, 1)
+            self.assertEqual(ms1_scans[0].ms_level, 1)
 
         self.assertEqual(raw_file.scan_count, 1)
         self.assertEqual(scans[0].precursor_scan_id, "scan=1")
@@ -445,6 +450,13 @@ class LCMSMSMVPTests(unittest.TestCase):
         self.assertAlmostEqual(scans[0].precursor_mz or 0.0, 500.25)
         self.assertEqual(scans[0].activation_method, "HCD")
         self.assertEqual(scans[0].collision_energy, 25.0)
+
+    def test_fasta_rejects_empty_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "invalid.fasta"
+            path.write_text(">heavy\n>light\nPEPTIDEK\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "no amino acid sequence"):
+                read_fasta(path)
 
     def test_sequence_search_matches_target_fragments(self) -> None:
         candidates = generate_candidates({"HC": "PEPTIDEK"}, max_missed_cleavages=0)

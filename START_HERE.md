@@ -25,6 +25,20 @@
 
 迁移包的完整说明见包内 `MIGRATION_README.md`；当前版本按要求不包含权限管理。
 
+## Electron 单机离线版
+
+Windows 桌面安装包位于：
+
+```text
+release/electron/LCMS-Desktop-1.0.0-Setup.exe
+```
+
+桌面版内置 Electron、便携 Python 和 ThermoRawFileParser，不要求同事单独安装运行环境。任务数据默认保存在安装目录下的 `data`，可在“设置与诊断”中更换到容量更充足的数据盘。升级或卸载会保留该数据目录。
+
+安装目录中同时提供独立的 `LCMS-MCP.exe`，可直接配置为 Codex 的 STDIO MCP 服务。它与桌面版共用数据目录，不需要设置 TIC 或候选位数参数。
+
+开发和重新构建说明见 `desktop/README.md`。TIC 峰与候选组分数量由质量阈值自动判定，桌面界面不提供固定数量参数。
+
 ## 在新工作目录中初始化
 
 解压后，在本目录运行：

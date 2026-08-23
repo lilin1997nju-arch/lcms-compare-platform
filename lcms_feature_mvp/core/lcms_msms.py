@@ -339,21 +339,31 @@ def read_fasta(path: Path) -> dict[str, str]:
     chains: dict[str, str] = {}
     name = ""
     parts: list[str] = []
+
+    def commit_record() -> None:
+        if not name:
+            return
+        sequence = "".join(parts)
+        if not sequence:
+            raise ValueError(f"FASTA record has no amino acid sequence: {name}")
+        chains[name] = sequence
+
     for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line:
             continue
         if line.startswith(">"):
-            if name:
-                chains[name] = "".join(parts)
+            commit_record()
             name = line[1:].split()[0] or f"chain_{len(chains) + 1}"
             parts = []
         else:
             parts.append(line.upper().replace(" ", ""))
-    if name:
-        chains[name] = "".join(parts)
+    commit_record()
     if not chains:
         raise ValueError(f"No FASTA sequences found: {path}")
+    empty = sorted(name for name, sequence in chains.items() if not sequence)
+    if empty:
+        raise ValueError(f"FASTA contains empty sequence record(s): {empty}")
     invalid = sorted({aa for sequence in chains.values() for aa in sequence if aa not in AA_MASS})
     if invalid:
         raise ValueError(f"Unsupported amino acids in FASTA: {invalid}")

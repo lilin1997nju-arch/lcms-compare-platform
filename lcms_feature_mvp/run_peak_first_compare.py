@@ -64,7 +64,7 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .analysis-context-actions { display:flex; flex:0 0 auto; gap:5px; }
     .analysis-context-action { padding:5px 8px; color:#175cd3; font-size:10px; border-color:#c9dcf5; background:#eff6ff; }
     .report-layout { position:relative; display:block; grid-column:1 / -1; min-width:0; }
-    .module-nav-column { position:absolute; z-index:18; width:0; left:-68px; top:0; bottom:0; }
+    .module-nav-column { position:fixed; z-index:18; width:0; left:8px; top:70px; bottom:0; }
     .module-nav-rail { position:sticky; top:50vh; z-index:18; width:54px; overflow:hidden; padding:7px; border:1px solid #cdddf0; border-radius:15px; background:rgba(255,255,255,.97); box-shadow:0 12px 30px rgba(31,58,92,.13); transform:translateY(-50%); transition:width .28s cubic-bezier(.22,.8,.3,1),box-shadow .28s ease; backdrop-filter:blur(14px); }
     .module-nav-rail:hover,.module-nav-rail.drag-active { width:245px; box-shadow:0 16px 36px rgba(31,58,92,.2); }
     .module-nav-list { display:grid; gap:5px; }
@@ -2846,6 +2846,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def emit_progress(fraction: float, stage: str) -> None:
+    """Emit a machine-readable progress update for the desktop worker."""
+    print(f"LCMS_PROGRESS\t{max(0.0, min(1.0, fraction)):.4f}\t{stage}", flush=True)
+
+
 def apply_sample_names(
     raw_files: list[object],
     scans_by_sample: dict[str, list[object]],
@@ -2882,7 +2887,18 @@ def main() -> None:
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw_files, scans_by_sample = load_lcms_directory(input_dir, args.project_id)
+    emit_progress(0.02, "read_ms1")
+
+    def report_ms1_file_progress(index: int, total: int, _path: Path) -> None:
+        fraction = 0.04 + 0.24 * index / max(1, total)
+        emit_progress(fraction, "read_ms1")
+
+    raw_files, scans_by_sample = load_lcms_directory(
+        input_dir,
+        args.project_id,
+        progress_callback=report_ms1_file_progress,
+    )
+    emit_progress(0.30, "loaded_ms1")
     raw_files, scans_by_sample = apply_sample_names(raw_files, scans_by_sample, args.sample_names_json)
     if args.include_sample or args.sample_contains:
         exact = set(args.include_sample or [])
@@ -2898,6 +2914,7 @@ def main() -> None:
             "Peak-first Compare needs at least two selected samples. "
             f"Selected: {list(scans_by_sample)}"
         )
+    emit_progress(0.36, "global_tic_compare")
     sample_ids = list(scans_by_sample)
     reference = args.reference_sample if args.reference_sample in scans_by_sample else sample_ids[0]
     params = PeakFirstParams(
@@ -2923,6 +2940,7 @@ def main() -> None:
         feature_partial_detection_rank_weight=args.feature_partial_detection_rank_weight,
     )
     payload = prepare_peak_first_payload(raw_files, scans_by_sample, args.project_id, reference, params)
+    emit_progress(0.78, "global_feature_complete")
     spectra = spectrum_payload(
         scans_by_sample,
         shifts=dict(payload["alignment"]["rt_shift_by_sample"]),
@@ -2936,10 +2954,12 @@ def main() -> None:
         [],
         spectra_loader=lambda sample_id: list(spectra.get(sample_id, [])),
     )
+    emit_progress(0.90, "ms1_spectrum_results")
     html_path = output_dir / "lcms_peak_first_compare.html"
     sqlite_path = output_dir / args.sqlite_name
     write_peak_first_sqlite(sqlite_path, payload, spectra)
     html_path.write_text(PEAK_FIRST_TEMPLATE, encoding="utf-8")
+    emit_progress(1.0, "ms1_complete")
     print(f"Samples: {len(sample_ids)}")
     print(f"Reference: {reference}")
     print(f"Confirmed TIC peaks: {len(payload['peak_results'])}")
