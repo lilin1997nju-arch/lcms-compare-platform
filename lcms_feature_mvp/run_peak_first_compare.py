@@ -53,6 +53,56 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .wide { grid-column:1 / -1; }
     .left { grid-column:1; }
     .right { grid-column:2; }
+    .analysis-navigator { grid-column:1 / -1; overflow:hidden; border:1px solid #cdddf0; border-radius:16px; background:rgba(255,255,255,.96); box-shadow:0 12px 30px rgba(31,58,92,.09); }
+    .analysis-context { display:flex; gap:12px; align-items:center; padding:10px 13px; }
+    .analysis-context-title { flex:0 0 auto; color:#294866; font-size:11px; font-weight:800; }
+    .analysis-context-items { display:flex; min-width:0; flex:1; gap:7px; flex-wrap:wrap; }
+    .analysis-context-item { display:inline-flex; min-width:0; gap:5px; align-items:center; padding:4px 8px; border:1px solid #dce6f2; border-radius:999px; color:#475467; background:#f8fafd; font-size:10px; }
+    .analysis-context-item b { color:#7b8da5; font-size:9px; text-transform:uppercase; }
+    .analysis-context-item span { max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .analysis-context-item.active { color:#174ea6; border-color:#b9d4fb; background:#eef6ff; }
+    .analysis-context-actions { display:flex; flex:0 0 auto; gap:5px; }
+    .analysis-context-action { padding:5px 8px; color:#175cd3; font-size:10px; border-color:#c9dcf5; background:#eff6ff; }
+    .report-layout { position:relative; display:block; grid-column:1 / -1; min-width:0; }
+    .module-nav-column { position:absolute; z-index:18; width:0; left:-68px; top:0; bottom:0; }
+    .module-nav-rail { position:sticky; top:50vh; z-index:18; width:54px; overflow:hidden; padding:7px; border:1px solid #cdddf0; border-radius:15px; background:rgba(255,255,255,.97); box-shadow:0 12px 30px rgba(31,58,92,.13); transform:translateY(-50%); transition:width .28s cubic-bezier(.22,.8,.3,1),box-shadow .28s ease; backdrop-filter:blur(14px); }
+    .module-nav-rail:hover,.module-nav-rail.drag-active { width:245px; box-shadow:0 16px 36px rgba(31,58,92,.2); }
+    .module-nav-list { display:grid; gap:5px; }
+    .module-nav-item { position:relative; display:grid; grid-template-columns:38px 178px; width:228px; height:40px; padding:0; overflow:visible; align-items:center; border-color:transparent; border-radius:10px; color:#607893; background:transparent; cursor:grab; text-align:left; touch-action:none; user-select:none; transition:color .18s ease,background .18s ease,transform .2s cubic-bezier(.22,.8,.3,1),opacity .18s ease,box-shadow .18s ease; }
+    .module-nav-item:hover { transform:none; color:#175cd3; border-color:#c9dcf5; background:#eff6ff; }
+    .module-nav-item.active { color:#fff; border-color:#2563eb; background:#2563eb; box-shadow:0 5px 12px rgba(37,99,235,.2); }
+    button.module-nav-item:hover:not(:disabled) { transform:none; color:#175cd3; border-color:#c9dcf5; background:#eff6ff; }
+    button.module-nav-item.active:hover:not(:disabled) { color:#fff; border-color:#2563eb; background:#2563eb; }
+    .module-nav-item.dragging { opacity:.24; transform:scale(.93); cursor:grabbing; }
+    .module-nav-item.drop-before { transform:translateY(5px); }
+    .module-nav-item.drop-after { transform:translateY(-5px); }
+    .module-nav-item.drop-before::before,.module-nav-item.drop-after::after { content:""; position:absolute; z-index:3; left:5px; right:5px; height:4px; border-radius:999px; background:#0ea5b7; box-shadow:0 0 0 4px rgba(14,165,183,.13),0 0 14px rgba(14,165,183,.4); animation:module-drop-pulse .72s ease-in-out infinite alternate; }
+    .module-nav-item.drop-before::before { top:-5px; }
+    .module-nav-item.drop-after::after { bottom:-5px; }
+    .module-nav-drag-ghost { position:fixed; z-index:80; display:flex; width:220px; height:42px; gap:10px; align-items:center; padding:0 12px; color:#fff; border:1px solid #8ec5ff; border-radius:11px; background:linear-gradient(135deg,#2563eb,#0ea5b7); box-shadow:0 18px 40px rgba(23,78,166,.34); font-size:11px; font-weight:800; pointer-events:none; transform:translate(14px,-50%) scale(1.03); animation:module-ghost-in .18s ease-out; }
+    .module-nav-drag-ghost b { display:flex; width:24px; height:24px; align-items:center; justify-content:center; border-radius:7px; color:#175cd3; background:#fff; }
+    @keyframes module-ghost-in { from { opacity:0; transform:translate(5px,-50%) scale(.92); } to { opacity:1; transform:translate(14px,-50%) scale(1.03); } }
+    @keyframes module-drop-pulse { from { opacity:.55; transform:scaleX(.88); } to { opacity:1; transform:scaleX(1); } }
+    .module-nav-number { display:flex; width:38px; align-items:center; justify-content:center; font-size:12px; font-weight:850; }
+    .module-nav-label { overflow:hidden; opacity:0; transform:translateX(-6px); font-size:11px; font-weight:750; text-overflow:ellipsis; white-space:nowrap; transition:opacity .2s ease .03s,transform .24s ease; }
+    .module-nav-rail:hover .module-nav-label,.module-nav-rail.drag-active .module-nav-label { opacity:1; transform:translateX(0); }
+    .module-nav-hint { width:228px; margin-top:6px; padding:5px 7px; color:#8a9bb0; font-size:9px; white-space:nowrap; opacity:0; transition:opacity .2s ease; }
+    .module-nav-rail:hover .module-nav-hint,.module-nav-rail.drag-active .module-nav-hint { opacity:1; }
+    .report-modules { display:grid; min-width:0; gap:20px; }
+    .report-module { width:100%; scroll-margin-top:90px; transition:border-color .2s ease,box-shadow .2s ease,opacity .2s ease; }
+    .report-module.module-nav-hover { border-color:#78aaf0; box-shadow:0 0 0 3px rgba(37,99,235,.12),var(--shadow); }
+    .report-module.module-drop-target { border-color:#0ea5b7; box-shadow:0 0 0 4px rgba(14,165,183,.14),0 20px 48px rgba(14,165,183,.13); animation:module-target-pulse .72s ease-in-out infinite alternate; }
+    @keyframes module-target-pulse { from { transform:translateY(0); } to { transform:translateY(2px); } }
+    .module-heading { display:flex; gap:9px; align-items:center; min-height:30px; margin:0 0 14px; cursor:pointer; user-select:none; }
+    .module-heading h2 { flex:1; margin:0; }
+    .module-heading-index { display:inline-flex; width:26px; height:26px; flex:0 0 auto; align-items:center; justify-content:center; border-radius:8px; color:#175cd3; background:#eaf2ff; font-size:11px; font-weight:850; }
+    .module-collapse-indicator { display:inline-flex; width:28px; height:28px; flex:0 0 auto; align-items:center; justify-content:center; border:1px solid #d7e3f0; border-radius:8px; color:#607893; background:#f8fafd; transition:transform .22s ease,background .2s ease; }
+    .report-module.collapsed .module-collapse-indicator { transform:rotate(180deg); }
+    .report-module.collapsed > :not(.module-heading) { display:none !important; }
+    .report-module.collapsed .module-heading { margin-bottom:0; }
+    .peak-inspection-grid { display:grid; grid-template-columns:minmax(0,1.9fr) minmax(380px,.72fr); gap:18px; align-items:start; }
+    .peak-inspection-pane { min-width:0; }
+    .peak-inspection-pane h3,.xic-grid h3 { margin:0 0 10px; color:#294866; font-size:13px; }
     .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:11px; padding:9px 11px; border:1px solid #e3ebf4; border-radius:12px; background:#f8fafd; }
     .chrom-legend { display:flex; gap:14px; flex-wrap:wrap; align-items:center; margin:0 0 10px; padding:8px 11px; color:#536a86; font-size:11px; border:1px solid #e3ebf4; border-radius:10px; background:#fbfdff; }
     .chrom-legend-item { display:inline-flex; gap:6px; align-items:center; white-space:nowrap; }
@@ -134,7 +184,7 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .mod-quant-table { min-width:1050px; table-layout:fixed; }
     .mod-quant-table td { vertical-align:top; }
     .mod-quant-table td.wrap { white-space:normal; text-align:left; }
-    .mod-quant-table th:nth-child(1), .mod-quant-table td:nth-child(1) { width:38px; }
+    .mod-quant-table th:nth-child(1), .mod-quant-table td:nth-child(1) { width:54px; }
     .mod-quant-table th:nth-child(2), .mod-quant-table td:nth-child(2) { width:48px; }
     .mod-quant-table th:nth-child(3), .mod-quant-table td:nth-child(3) { width:190px; }
     .mod-quant-table th:nth-child(4), .mod-quant-table td:nth-child(4) { width:230px; }
@@ -146,10 +196,21 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .mod-quant-conclusion { white-space:normal; color:#344054; text-align:left; }
     .mod-quant-conclusion.high-value { color:#9a3412; font-weight:750; }
     .mod-quant-detail-row > td { padding:0 !important; background:#f8fbff; }
-    .mod-proteolytic-group-row > td { background:#eef5ff; border-top:2px solid #b8d1f5; }
-    .mod-proteolytic-group-row.high-value > td { background:#fff8e8; border-top-color:#efb65b; }
-    .mod-proteolytic-member-row > td { background:#fbfdff; }
-    .mod-proteolytic-member-row td:nth-child(3) { padding-left:20px; }
+    .mod-quant-table > thead th { z-index:3; }
+    .mod-proteolytic-family { --mod-family-accent:#2563eb; --mod-family-tint:#eff6ff; }
+    .mod-proteolytic-family > .mod-proteolytic-group-row > td { background:var(--mod-family-tint); border-top:3px solid var(--mod-family-accent); border-bottom-color:color-mix(in srgb,var(--mod-family-accent) 22%,#fff); }
+    .mod-proteolytic-family > .mod-proteolytic-group-row > td:first-child { box-shadow:inset 4px 0 0 var(--mod-family-accent); }
+    .mod-proteolytic-family > .mod-proteolytic-member-row > td { background:color-mix(in srgb,var(--mod-family-tint) 62%,#fff); }
+    .mod-proteolytic-family > .mod-proteolytic-member-row > td:first-child { position:relative; padding-left:22px; }
+    .mod-proteolytic-family > .mod-proteolytic-member-row > td:first-child::before { content:""; position:absolute; z-index:1; left:11px; top:0; bottom:0; width:2px; background:var(--mod-family-accent); opacity:.82; }
+    .mod-proteolytic-family > .mod-proteolytic-member-row > td:first-child::after { content:""; position:absolute; z-index:1; left:11px; top:22px; width:11px; height:2px; background:var(--mod-family-accent); }
+    .mod-proteolytic-family > .mod-proteolytic-member-row.family-last-member > td:first-child::before { bottom:auto; height:22px; }
+    .mod-proteolytic-family > .mod-proteolytic-member-row .mod-quant-toggle { position:relative; z-index:2; border-color:color-mix(in srgb,var(--mod-family-accent) 35%,#fff); background:#fff; }
+    .mod-proteolytic-family > .mod-quant-detail-row > td { background:color-mix(in srgb,var(--mod-family-tint) 44%,#fff) !important; border-left:0; }
+    .mod-proteolytic-family > .mod-proteolytic-member-detail:not(.family-last-detail) > td { position:relative; }
+    .mod-proteolytic-family > .mod-proteolytic-member-detail:not(.family-last-detail) > td::before { content:""; position:absolute; z-index:1; left:11px; top:0; bottom:0; width:2px; background:var(--mod-family-accent); opacity:.82; }
+    .mod-proteolytic-family > .mod-quant-detail-row .mod-quant-detail { border-top-color:color-mix(in srgb,var(--mod-family-accent) 28%,#fff); }
+    .mod-quant-standalone > tr > td { background:#fff; }
     .mod-group-sequences { margin-top:4px; color:#667085; font-size:10px; line-height:1.45; }
     .mod-quant-detail { padding:14px 16px 16px 54px; border-top:1px solid #dbeafe; }
     .mod-quant-detail-grid { display:grid; grid-template-columns:minmax(300px,.8fr) minmax(520px,1.5fr); gap:16px; align-items:start; }
@@ -197,7 +258,7 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     th.sortable { cursor:pointer; user-select:none; color:#607893; }
     th.sortable:hover { color:#205ab6; background:#eef5ff; }
     .section-title-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-    .section-title-row h2 { margin-bottom:14px; }
+    .section-title-row h2 { margin:0; }
     .export-button { padding:8px 12px; color:#205ab6; border-color:#c9dcf5; background:#eff6ff; }
     .export-button::before { content:"↓"; margin-right:6px; }
     .feature-map-pane { display:flex; min-width:0; flex-direction:column; padding-top:48px; }
@@ -306,7 +367,9 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     #structureViewer { position:relative; width:100%; height:500px; overflow:hidden; border:1px solid #dbe6f2; border-radius:10px; background:#fff; }
     .structure-source-link { color:#175cd3; font-size:12px; }
     @media (max-width:1100px) { .structure-grid { grid-template-columns:1fr; } #structureViewer { height:430px; } }
-    @media (max-width:650px) { header { display:flex; flex-wrap:wrap; gap:10px; padding:13px 16px; } header h1 { flex:1 1 180px; font-size:15px; } main { display:grid; gap:15px; padding:22px 11px 42px; } section { padding:17px 14px; border-radius:14px; } .controls { align-items:flex-start; flex-direction:column; } .controls label { width:100%; justify-content:space-between; } .controls select,.controls input:not([type="checkbox"]) { max-width:100%; } .pan { width:100%; } .xic-grid { grid-template-columns:1fr; } .settings-layout { grid-template-columns:1fr; } .settings-layout .settings-group:last-child { grid-column:auto; } .settings-column-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .report-settings summary { align-items:flex-start; flex-direction:column; gap:4px; } .settings-footer { align-items:stretch; flex-direction:column; } .settings-footer .note { margin-right:0; } .structure-toolbar label { width:100%; } .structure-toolbar input[type="file"] { max-width:none; width:100%; } #structureViewer { height:360px; } }
+    @media (max-width:1100px) { .peak-inspection-grid { grid-template-columns:1fr; } }
+    @media (max-width:850px) { .analysis-context { align-items:flex-start; flex-direction:column; } .analysis-context-title { display:none; } .analysis-context-actions { width:100%; overflow:auto; } .module-nav-column { position:fixed; left:6px; top:0; bottom:0; } .module-nav-rail { width:48px; padding:5px; } .module-nav-item { grid-template-columns:36px 178px; width:222px; } .module-nav-number { width:36px; } }
+    @media (max-width:650px) { header { display:flex; flex-wrap:wrap; gap:10px; padding:13px 16px; } header h1 { flex:1 1 180px; font-size:15px; } main { display:grid; gap:15px; padding:22px 7px 42px; } section { padding:17px 12px; border-radius:14px; } .analysis-navigator { border-radius:13px; } .analysis-context { padding:8px; } .analysis-context-item span { max-width:155px; } .module-nav-column { left:4px; } .module-nav-rail { width:43px; padding:3px; border-radius:11px; } .module-nav-rail:hover,.module-nav-rail.drag-active { width:220px; } .module-nav-item { grid-template-columns:35px 168px; width:207px; height:37px; } .module-nav-number { width:35px; } .controls { align-items:flex-start; flex-direction:column; } .controls label { width:100%; justify-content:space-between; } .controls select,.controls input:not([type="checkbox"]) { max-width:100%; } .pan { width:100%; } .xic-grid { grid-template-columns:1fr; } .settings-layout { grid-template-columns:1fr; } .settings-layout .settings-group:last-child { grid-column:auto; } .settings-column-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .report-settings summary { align-items:flex-start; flex-direction:column; gap:4px; } .settings-footer { align-items:stretch; flex-direction:column; } .settings-footer .note { margin-right:0; } .structure-toolbar label { width:100%; } .structure-toolbar input[type="file"] { max-width:none; width:100%; } #structureViewer { height:360px; } }
   </style>
   <script src="/assets/3Dmol-min.js"></script>
 </head>
@@ -339,51 +402,74 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     </details>
   </section>
 
-  <section class="wide" id="chromModule">
-    <h2>1. Aligned TIC/BPC overlay with detected TIC peaks</h2>
+  <div class="analysis-navigator" id="analysisNavigator">
+    <div class="analysis-context">
+      <div class="analysis-context-title">当前分析对象</div>
+      <div class="analysis-context-items" id="analysisContextItems"></div>
+      <div class="analysis-context-actions" id="analysisContextActions"></div>
+    </div>
+  </div>
+
+  <div class="report-layout" id="reportLayout">
+    <aside class="module-nav-column" aria-label="模块编号导航">
+      <nav class="module-nav-rail" id="moduleNavRail">
+        <div class="module-nav-list" id="moduleNavList"></div>
+        <div class="module-nav-hint">拖动编号可调整模块顺序</div>
+      </nav>
+    </aside>
+    <div class="report-modules" id="reportModules">
+
+  <section class="report-module" id="chromModule" data-module-title="TIC/BPC 总览与峰检测">
+    <div class="module-heading"><span class="module-heading-index"></span><h2>TIC/BPC 总览与峰检测</h2><span class="module-collapse-indicator">⌃</span></div>
     <div class="controls">
-      <label>Signal <select id="chromMode"><option value="tic">TIC</option><option value="bpc">BPC</option></select></label>
-      <label><input type="checkbox" id="showAligned" checked> aligned RT</label>
-      <label><input type="checkbox" id="showLocalPeakAligned" checked> local peak RT correction</label>
-      <label>Vertical offset <input id="offset" type="range" min="0" max="1.2" step="0.05" value="0"></label>
-      <button id="resetChrom">Reset zoom</button>
-      <label>Pan <input id="chromPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
+      <label>信号 <select id="chromMode"><option value="tic">TIC</option><option value="bpc">BPC</option></select></label>
+      <label><input type="checkbox" id="showAligned" checked> 使用对齐 RT</label>
+      <label><input type="checkbox" id="showLocalPeakAligned" checked> 使用局部峰 RT 校正</label>
+      <label>纵向错位 <input id="offset" type="range" min="0" max="1.2" step="0.05" value="0"></label>
+      <button id="resetChrom">重置视图</button>
+      <label>平移 <input id="chromPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
     </div>
     <div id="chromLegend" class="chrom-legend" aria-label="TIC 图例"></div>
     <canvas id="chromCanvas" width="1500" height="360"></canvas>
     <div id="chromInfo" class="note"></div>
   </section>
 
-  <section class="left" id="spectrumModule">
-    <h2>2. Selected TIC peak summed spectrum</h2>
+  <section class="report-module" id="peakInspectionModule" data-module-title="选中 TIC 峰分析">
+    <div class="module-heading"><span class="module-heading-index"></span><h2>选中 TIC 峰分析</h2><span class="module-collapse-indicator">⌃</span></div>
+    <div class="peak-inspection-grid">
+    <div class="peak-inspection-pane" id="spectrumModule">
+    <h3>汇总质谱</h3>
     <div class="controls">
-      <button id="resetDetail">Reset spectrum zoom</button>
-      <label>Pan <input id="detailPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
+      <button id="resetDetail">重置质谱视图</button>
+      <label>平移 <input id="detailPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
       <span id="featureInfo" class="note"></span>
     </div>
     <div id="spectrumLegend" class="chrom-legend" aria-label="MS/MS 图例"></div>
     <canvas id="detailCanvas" width="1050" height="340"></canvas>
     <div id="detailInfo" class="note"></div>
     <div id="detailTooltip" class="tooltip"></div>
-  </section>
+    </div>
 
-  <section class="right" id="peakTableModule">
-    <h2>3. TIC Peak consistency table</h2>
+    <div class="peak-inspection-pane" id="peakTableModule">
+    <h3>TIC 峰一致性表</h3>
     <div class="scroll tall-scroll"><table id="peakTable"></table></div>
+    </div>
+    </div>
   </section>
 
-  <section class="wide" id="mzXicSection">
+  <section class="report-module" id="mzXicSection" data-module-title="差异 m/z 与 XIC 确认">
+    <div class="module-heading"><span class="module-heading-index"></span><h2>差异 m/z 与 XIC 确认</h2><span class="module-collapse-indicator">⌃</span></div>
     <div class="xic-grid">
       <div id="mzModule" class="report-submodule">
-        <h2>5. Top changed m/z in selected TIC peak</h2>
+        <h3>选中 TIC 峰的差异 m/z</h3>
         <div class="scroll"><table id="mzTable"></table></div>
       </div>
       <div id="xicModule" class="report-submodule">
-        <h2>6. XIC confirmation</h2>
+        <h3>XIC 定量确认</h3>
         <div class="controls">
-          <button id="resetXic">Reset XIC view</button>
-          <button id="toggleXicFull">Show full XIC</button>
-          <label>Pan <input id="xicPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
+          <button id="resetXic">重置 XIC 视图</button>
+          <button id="toggleXicFull">显示整体 XIC</button>
+          <label>平移 <input id="xicPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
       </div>
       <div id="xicLegend" class="chrom-legend" aria-label="XIC 图例"></div>
       <canvas id="xicCanvas" width="1200" height="380"></canvas>
@@ -392,24 +478,25 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     </div>
   </section>
 
-  <section class="wide" id="globalFeatureModule">
-    <div class="section-title-row">
-      <h2>7. Overall low-similarity feature groups</h2>
+  <section class="report-module" id="globalFeatureModule" data-module-title="差异 Feature 列表">
+    <div class="module-heading section-title-row">
+      <span class="module-heading-index"></span><h2>差异 Feature 列表</h2>
       <button id="exportGlobalFeature" type="button" class="export-button">导出 Excel</button>
+      <span class="module-collapse-indicator">⌃</span>
     </div>
-    <div class="note">MS2 identified peptide forms and strict MS1-inferred unknown components are each ranked once. MS1 inference requires neutral-mass agreement, coelution, XIC shape correlation and consistent sample trend; it is not a peptide identification. Click ▸ to inspect member Features.</div>
+    <div class="note">MS2 已定性肽段形式和严格 MS1 推断的未知成分分别只排序一次。MS1 推断要求中性质量一致、共同洗脱、XIC 形状相关且样本变化方向一致，但不等同于肽段定性。点击 ▸ 可查看成分内的各个 Feature。</div>
     <div class="scroll"><table id="globalFeatureTable"></table></div>
   </section>
 
-  <section class="wide" id="featureMapModule">
-    <h2>8. Feature-level RT-m/z heatmap</h2>
+  <section class="report-module" id="featureMapModule" data-module-title="Feature RT–m/z 图与 MS/MS 证据">
+    <div class="module-heading"><span class="module-heading-index"></span><h2>Feature RT–m/z 图与 MS/MS 证据</h2><span class="module-collapse-indicator">⌃</span></div>
     <div class="controls">
-      <label>Reference <select id="featureMapReference"></select></label>
-      <label>Test <select id="featureMapTest"></select></label>
-      <button id="swapFeatureMapSamples">Swap</button>
-      <label>Color mode <select id="featureMapMode"><option value="direction">Pair direction</option><option value="magnitude">Fold magnitude</option></select></label>
-      <button id="resetFeatureMap">Reset heatmap zoom</button>
-      <label>Pan <input id="featureMapPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
+      <label>参比样本 <select id="featureMapReference"></select></label>
+      <label>比较样本 <select id="featureMapTest"></select></label>
+      <button id="swapFeatureMapSamples">交换</button>
+      <label>颜色模式 <select id="featureMapMode"><option value="direction">差异方向</option><option value="magnitude">倍数大小</option></select></label>
+      <button id="resetFeatureMap">重置图形视图</button>
+      <label>平移 <input id="featureMapPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
       <span id="featureMapPairLegend" class="pair-legend note"></span>
       <span id="featureMapInfo" class="note"></span>
     </div>
@@ -420,9 +507,9 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
       </div>
       <div class="feature-analysis-pane">
         <div class="feature-ms2-heading">
-          <h3>Selected component MS/MS spectrum</h3>
+          <h3>当前成分的 MS/MS 谱图</h3>
         </div>
-        <div id="featureMs2Detail" class="feature-ms2-detail">Select a Feature from the heatmap or Feature list.</div>
+        <div id="featureMs2Detail" class="feature-ms2-detail">请从 Feature 图或差异 Feature 列表中选择一个成分。</div>
         <canvas id="featureMs2Canvas" width="900" height="430"></canvas>
         <div id="featureMs2Info" class="note"></div>
         <div id="featureMs2Annotations" class="note" hidden></div>
@@ -430,8 +517,8 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     </div>
   </section>
 
-  <section class="wide" id="modificationQuantitationModule">
-    <h2>9. 修饰水平与蛋白形式差异定量</h2>
+  <section class="report-module" id="modificationQuantitationModule" data-module-title="修饰水平与蛋白形式差异定量">
+    <div class="module-heading"><span class="module-heading-index"></span><h2>修饰水平与蛋白形式差异定量</h2><span class="module-collapse-indicator">⌃</span></div>
     <div class="note">将同一肽段骨架的未修饰、已知修饰及末端加工形式归并，合并电荷态和同位素包络后计算各样本的相对 MS 响应构成。B 级进入正式相对定量，C 级仅作暂定结果；仅质量预测不进入分母。</div>
     <div class="controls">
       <label>筛选 <input id="modQuantFilter" type="text" placeholder="序列、修饰、事件或 Feature"></label>
@@ -443,8 +530,8 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     <div class="note" style="margin-top:8px">“构成变化”表示该形式占同肽段合格形式总响应的比例变化；“形式响应倍数”表示该形式自身归一化面积的组间倍数，两者含义不同。包含关系的长短肽会先形成“酶切形态族”：最终结论采用各肽段内部修饰比例的一致性，不直接相加不同序列面积；族内合计响应只用于判断酶切分配。比例未经标准品或相对响应因子校正，不等同于申报级绝对占有率。</div>
   </section>
 
-  <section class="wide" id="structureMappingModule">
-    <h2>10. 差异组分的序列与三级结构定位</h2>
+  <section class="report-module" id="structureMappingModule" data-module-title="一级序列覆盖与三级结构定位">
+    <div class="module-heading"><span class="module-heading-index"></span><h2>一级序列覆盖与三级结构定位</h2><span class="module-collapse-indicator">⌃</span></div>
     <div class="note">全局视图把所有已获得肽段候选的差异组分定位到轻链（LC）或重链（HC）。红色和蓝色分别表示当前所选两个样本中哪一个丰度更高，具体样本名称见下方动态图例；点击有颜色的残基可反选对应Feature。三级结构可从RCSB PDB自动获取或上传PDB/mmCIF。结构定位只显示证据覆盖，不会提高原MS2鉴定置信等级。</div>
     <div class="structure-grid">
       <div class="sequence-overview-pane">
@@ -478,22 +565,22 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
       </div>
     </div>
   </section>
+    </div>
+  </div>
 </main>
 <script>
 let DATA = null;
 let COMPARISONS = [];
-let state = { comparison:null, selectedPeakId:null, selectedMz:null, selectedFeatureRt:null, selectedFeatureGroupId:null, selectedModificationFormKey:null, selectedModificationFormContext:null, scrollGlobalSelectionIntoView:false, chromZoom:null, detailZoom:null, xicZoom:null, xicFull:true, xic:null, xicLoading:false, xicRequestId:0, featureMapZoom:null, pairReference:null, pairTest:null, featureMapMode:"direction", globalSort:{key:"ranking_score",dir:"desc"}, mzSort:{key:"ranking_score",dir:"desc"}, expandedComponents:new Set(), expandedModificationFamilies:new Set(), expandedProteolyticFamilies:new Set(), modQuantViewMode:"composition", features:[], agentAnnotations:[], msms:null, msmsLoading:false, msmsLoaded:false, msmsError:null, msmsPromise:null, sequenceOverlapSelection:null, structureViewer:null, structureModel:null, structureText:null, structureFormat:null, structureLabel:null, structureSourceMeta:null, structureChains:[], structureSourceChainMap:{}, structureSelectedChain:"", structureRenderSignature:"", structureRequestId:0, structureLoading:false, structureAutoAttemptedComparison:null };
+let state = { comparison:null, activeModuleId:"chromModule", selectedPeakId:null, selectedMz:null, selectedFeatureRt:null, selectedFeatureGroupId:null, selectedModificationFormKey:null, selectedModificationFormContext:null, scrollGlobalSelectionIntoView:false, chromZoom:null, detailZoom:null, xicZoom:null, xicFull:true, xic:null, xicLoading:false, xicRequestId:0, featureMapZoom:null, pairReference:null, pairTest:null, featureMapMode:"direction", globalSort:{key:"ranking_score",dir:"desc"}, mzSort:{key:"ranking_score",dir:"desc"}, expandedComponents:new Set(), expandedModificationFamilies:new Set(), expandedProteolyticFamilies:new Set(), modQuantViewMode:"composition", features:[], agentAnnotations:[], msms:null, msmsLoading:false, msmsLoaded:false, msmsError:null, msmsPromise:null, sequenceOverlapSelection:null, structureViewer:null, structureModel:null, structureText:null, structureFormat:null, structureLabel:null, structureSourceMeta:null, structureChains:[], structureSourceChainMap:{}, structureSelectedChain:"", structureRenderSignature:"", structureRequestId:0, structureLoading:false, structureAutoAttemptedComparison:null };
 const colors = ["#1f77b4","#e74c3c","#2ecc71","#9b59b6","#f39c12","#00bcd4","#795548","#e91e63"];
 const REPORT_MODULES = [
-  {key:"chromModule", label:"TIC / BPC 图"},
-  {key:"spectrumModule", label:"选中峰二级质谱图"},
-  {key:"peakTableModule", label:"TIC 峰一致性表"},
-  {key:"mzModule", label:"变化 m/z 表"},
-  {key:"xicModule", label:"XIC 图"},
-  {key:"globalFeatureModule", label:"低相似度 Feature 组"},
-  {key:"featureMapModule", label:"Feature 热图与 MS/MS"},
-  {key:"modificationQuantitationModule", label:"修饰水平与蛋白形式定量"},
-  {key:"structureMappingModule", label:"序列与三级结构"}
+  {key:"chromModule", label:"TIC/BPC 总览与峰检测"},
+  {key:"peakInspectionModule", label:"选中 TIC 峰分析"},
+  {key:"mzXicSection", label:"差异 m/z 与 XIC 确认"},
+  {key:"globalFeatureModule", label:"差异 Feature 列表"},
+  {key:"featureMapModule", label:"Feature RT–m/z 图与 MS/MS 证据"},
+  {key:"modificationQuantitationModule", label:"修饰水平与蛋白形式差异定量"},
+  {key:"structureMappingModule", label:"一级序列覆盖与三级结构定位"}
 ];
 const TABLE_COLUMN_CONFIG = {
   peakTable:[
@@ -509,6 +596,8 @@ const TABLE_COLUMN_CONFIG = {
 function defaultReportSettings(){
   return {
     modules:Object.fromEntries(REPORT_MODULES.map(item=>[item.key,true])),
+    moduleOrder:REPORT_MODULES.map(item=>item.key),
+    collapsedModules:[],
     legends:{chrom:true,spectrum:true,xic:true},
     xicFull:true,
     xicIntegrationBand:true,
@@ -538,6 +627,10 @@ function loadReportSettings(){
     const saved=JSON.parse(localStorage.getItem(reportSettingsKey())||"null");
     if(!saved||typeof saved!=="object")return defaults;
     Object.keys(defaults.modules).forEach(key=>{ if(typeof saved.modules?.[key]==="boolean")defaults.modules[key]=saved.modules[key]; });
+    const validModuleKeys=new Set(REPORT_MODULES.map(item=>item.key));
+    const savedOrder=Array.isArray(saved.moduleOrder)?saved.moduleOrder.filter(key=>validModuleKeys.has(key)):[];
+    defaults.moduleOrder=[...savedOrder,...defaults.moduleOrder.filter(key=>!savedOrder.includes(key))];
+    defaults.collapsedModules=Array.isArray(saved.collapsedModules)?saved.collapsedModules.filter(key=>validModuleKeys.has(key)):[];
     Object.keys(defaults.legends).forEach(key=>{ if(typeof saved.legends?.[key]==="boolean")defaults.legends[key]=saved.legends[key]; });
     if(typeof saved.xicFull==="boolean")defaults.xicFull=saved.xicFull;
     if(typeof saved.xicIntegrationBand==="boolean")defaults.xicIntegrationBand=saved.xicIntegrationBand;
@@ -549,9 +642,12 @@ function loadReportSettings(){
   }catch(_error){}
   return defaults;
 }
-function saveReportSettings(message="已自动保存"){
+function persistReportSettings(message="已自动保存"){
   try{ localStorage.setItem(reportSettingsKey(),JSON.stringify(reportSettings)); }catch(_error){}
   const status=$("settingsStatus"); if(status)status.textContent=message;
+}
+function saveReportSettings(message="已自动保存"){
+  persistReportSettings(message);
   applyReportSettings();
 }
 function chartColor(sample,index=0){ return reportSettings.chartColors?.[sample]||colors[index%colors.length]; }
@@ -569,7 +665,7 @@ function applyTableColumnVisibility(scope,tableId){
 function renderReportSettings(){
   const moduleContainer=$("moduleSettings"), chartContainer=$("chartSettings"), colorContainer=$("sampleColorSettings"), tableContainer=$("tableSettings");
   if(!moduleContainer||!chartContainer||!colorContainer||!tableContainer)return;
-  moduleContainer.innerHTML=REPORT_MODULES.map(item=>`<label class="settings-check"><input type="checkbox" data-setting-module="${item.key}" ${reportSettings.modules[item.key]?"checked":""}><span>${item.label}</span></label>`).join("");
+  moduleContainer.innerHTML=orderedReportModules().map(item=>`<label class="settings-check"><input type="checkbox" data-setting-module="${item.key}" ${reportSettings.modules[item.key]?"checked":""}><span>${item.label}</span></label>`).join("");
   chartContainer.innerHTML=`<label class="settings-check"><input type="checkbox" data-setting-legend="chrom" ${reportSettings.legends.chrom?"checked":""}><span>TIC / BPC 图例</span></label><label class="settings-check"><input type="checkbox" data-setting-legend="spectrum" ${reportSettings.legends.spectrum?"checked":""}><span>二级质谱图例</span></label><label class="settings-check"><input type="checkbox" data-setting-legend="xic" ${reportSettings.legends.xic?"checked":""}><span>XIC 图例</span></label><label class="settings-select"><span>默认 XIC</span><select id="settingXicMode"><option value="full">整体 XIC</option><option value="local">局部 XIC</option></select></label><label class="settings-check"><input id="settingXicBand" type="checkbox" ${reportSettings.xicIntegrationBand?"checked":""}><span>显示 XIC 积分区间</span></label>`;
   $("settingXicMode").value=reportSettings.xicFull?"full":"local";
   const samples=DATA?.sample_ids||[];
@@ -596,11 +692,113 @@ function bindReportSettings(){
   $("settingXicBand").onchange=()=>{ reportSettings.xicIntegrationBand=$("settingXicBand").checked; saveReportSettings(); drawAll(); };
   $("resetReportSettings").onclick=()=>{ reportSettings=defaultReportSettings(); state.xicFull=true; saveReportSettings("已恢复默认设置"); renderReportSettings(); bindReportSettings(); drawAll(); };
 }
-function setupReportSettings(){ renderReportSettings(); bindReportSettings(); applyReportSettings(); }
+function orderedReportModules(){
+  const definitions=new Map(REPORT_MODULES.map(item=>[item.key,item]));
+  const order=(reportSettings.moduleOrder||[]).filter(key=>definitions.has(key));
+  REPORT_MODULES.forEach(item=>{if(!order.includes(item.key))order.push(item.key);});
+  reportSettings.moduleOrder=order;
+  return order.map(key=>definitions.get(key));
+}
+function updateModuleNavActive(){
+  document.querySelectorAll("[data-module-nav]").forEach(button=>button.classList.toggle("active",button.dataset.moduleNav===state.activeModuleId));
+}
+function setActiveModule(moduleId){
+  if(!REPORT_MODULES.some(item=>item.key===moduleId))return;
+  state.activeModuleId=moduleId; updateModuleNavActive();
+}
+function scrollToModule(moduleId){
+  const module=$(moduleId); if(!module||module.hidden)return;
+  setActiveModule(moduleId); module.scrollIntoView({behavior:"smooth",block:"start"});
+}
+function moveReportModule(sourceId,targetId,placeAfter=false){
+  const order=orderedReportModules().map(item=>item.key).filter(key=>key!==sourceId);
+  let targetIndex=order.indexOf(targetId); if(targetIndex<0)return;
+  if(placeAfter)targetIndex+=1;
+  order.splice(targetIndex,0,sourceId); reportSettings.moduleOrder=order;
+  saveReportSettings("模块顺序已保存"); renderReportSettings(); bindReportSettings();
+}
+function renderModuleNavigation(){
+  const list=$("moduleNavList"); if(!list)return;
+  list.innerHTML=orderedReportModules().filter(item=>reportSettings.modules[item.key]!==false).map((item,index)=>`<button type="button" class="module-nav-item ${state.activeModuleId===item.key?"active":""}" data-module-nav="${item.key}" title="${escapeHtml(item.label)}"><span class="module-nav-number">${index+1}</span><span class="module-nav-label">${escapeHtml(item.label)}</span></button>`).join("");
+  list.querySelectorAll("[data-module-nav]").forEach(button=>{
+    let mouseDrag=null;
+    const clearDragFeedback=()=>{list.querySelectorAll(".drop-before,.drop-after").forEach(item=>item.classList.remove("drop-before","drop-after"));document.querySelectorAll(".module-drop-target").forEach(item=>item.classList.remove("module-drop-target"));$("moduleNavRail")?.classList.remove("drag-active");document.querySelectorAll(".module-nav-drag-ghost").forEach(item=>item.remove());};
+    button.onclick=event=>{button.blur();if(button.dataset.suppressClick==="1"){event.preventDefault();return;}scrollToModule(button.dataset.moduleNav);};
+    button.onmouseenter=()=>$(button.dataset.moduleNav)?.classList.add("module-nav-hover");
+    button.onmouseleave=()=>$(button.dataset.moduleNav)?.classList.remove("module-nav-hover");
+    button.onmousedown=event=>{
+      if(event.button!==0)return;
+      const onMove=moveEvent=>{
+        if(!mouseDrag)return;
+        if(!mouseDrag.dragging&&Math.abs(moveEvent.clientY-mouseDrag.startY)<6)return;
+        moveEvent.preventDefault();
+        if(!mouseDrag.dragging){
+          mouseDrag.dragging=true;button.classList.add("dragging");$("moduleNavRail")?.classList.add("drag-active");
+          const ghost=document.createElement("div");ghost.className="module-nav-drag-ghost";ghost.innerHTML=`<b>${escapeHtml(button.querySelector(".module-nav-number")?.textContent||"")}</b><span>${escapeHtml(button.querySelector(".module-nav-label")?.textContent||"")}</span>`;document.body.appendChild(ghost);mouseDrag.ghost=ghost;
+        }
+        if(mouseDrag.ghost){mouseDrag.ghost.style.left=`${moveEvent.clientX}px`;mouseDrag.ghost.style.top=`${moveEvent.clientY}px`;}
+        list.querySelectorAll(".drop-before,.drop-after").forEach(item=>item.classList.remove("drop-before","drop-after"));document.querySelectorAll(".module-drop-target").forEach(item=>item.classList.remove("module-drop-target"));
+        const target=document.elementFromPoint(moveEvent.clientX,moveEvent.clientY)?.closest?.("[data-module-nav]");
+        if(!target||target===button)return;
+        const rect=target.getBoundingClientRect();mouseDrag.targetId=target.dataset.moduleNav;mouseDrag.placeAfter=moveEvent.clientY>rect.top+rect.height/2;target.classList.add(mouseDrag.placeAfter?"drop-after":"drop-before");$(target.dataset.moduleNav)?.classList.add("module-drop-target");
+      };
+      const onUp=()=>{
+        document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);
+        if(!mouseDrag)return;
+        const completed=mouseDrag.dragging,targetId=mouseDrag.targetId,placeAfter=mouseDrag.placeAfter;mouseDrag=null;button.classList.remove("dragging");clearDragFeedback();
+        if(completed){button.dataset.suppressClick="1";setTimeout(()=>delete button.dataset.suppressClick,0);if(targetId)moveReportModule(button.dataset.moduleNav,targetId,placeAfter);}
+      };
+      mouseDrag={startY:event.clientY,dragging:false,targetId:null,placeAfter:false};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp,{once:true});
+    };
+  });
+}
+function toggleModuleCollapse(moduleId){
+  const module=$(moduleId),heading=module?.querySelector(":scope > .module-heading"); if(!module||!heading)return;
+  const headingTop=heading.getBoundingClientRect().top;
+  const collapsed=new Set(reportSettings.collapsedModules||[]);
+  if(collapsed.has(moduleId))collapsed.delete(moduleId);else collapsed.add(moduleId);
+  const isCollapsed=collapsed.has(moduleId); reportSettings.collapsedModules=[...collapsed]; persistReportSettings(isCollapsed?"模块已折叠":"模块已展开");
+  module.classList.toggle("collapsed",isCollapsed); heading.setAttribute("aria-expanded",String(!isCollapsed));
+  requestAnimationFrame(()=>{const offset=heading.getBoundingClientRect().top-headingTop;if(Math.abs(offset)>0.5)window.scrollBy(0,offset);});
+  if(!isCollapsed)requestAnimationFrame(drawAll);
+}
+function bindModuleHeaders(){
+  REPORT_MODULES.forEach(item=>{
+    const module=$(item.key),heading=module?.querySelector(":scope > .module-heading"); if(!heading||heading.dataset.bound)return;
+    heading.dataset.bound="1"; heading.tabIndex=0; heading.setAttribute("role","button");
+    heading.onclick=event=>{if(event.target.closest("button,a,input,select,label"))return;toggleModuleCollapse(item.key);};
+    heading.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();toggleModuleCollapse(item.key);}};
+  });
+}
+function applyModuleOrderAndNumbering(){
+  const container=$("reportModules"),collapsed=new Set(reportSettings.collapsedModules||[]); if(!container)return;
+  let visibleIndex=0;
+  orderedReportModules().forEach(item=>{
+    const module=$(item.key); if(!module)return;
+    container.appendChild(module); if(reportSettings.modules[item.key]!==false)visibleIndex+=1;
+    module.querySelector(":scope > .module-heading .module-heading-index").textContent=reportSettings.modules[item.key]===false?"":String(visibleIndex);
+    module.classList.toggle("collapsed",collapsed.has(item.key));
+    const heading=module.querySelector(":scope > .module-heading"); if(heading)heading.setAttribute("aria-expanded",String(!collapsed.has(item.key)));
+  });
+}
+let moduleScrollFrame=0;
+function updateActiveModuleFromScroll(){
+  moduleScrollFrame=0; const visible=orderedReportModules().map(item=>$(item.key)).filter(module=>module&&!module.hidden);
+  if(!visible.length)return;
+  const anchor=110; let active=visible[0],best=Infinity;
+  visible.forEach(module=>{const rect=module.getBoundingClientRect(),distance=rect.top<=anchor?Math.abs(rect.top-anchor)*0.45:Math.abs(rect.top-anchor);if(distance<best){best=distance;active=module;}});
+  setActiveModule(active.id);
+}
+function setupModuleNavigation(){
+  bindModuleHeaders(); applyModuleOrderAndNumbering(); renderModuleNavigation();
+  if(!window.__moduleNavScrollBound){window.__moduleNavScrollBound=true;window.addEventListener("scroll",()=>{if(!moduleScrollFrame)moduleScrollFrame=requestAnimationFrame(updateActiveModuleFromScroll);},{passive:true});}
+}
+function setupReportSettings(){ renderReportSettings(); bindReportSettings(); setupModuleNavigation(); applyReportSettings(); }
 function applyReportSettings(){
   REPORT_MODULES.forEach(item=>{ const element=$(item.key); if(element)element.hidden=reportSettings.modules[item.key]===false; });
-  const parent=$("mzXicSection"), mzVisible=reportSettings.modules.mzModule!==false, xicVisible=reportSettings.modules.xicModule!==false;
-  if(parent){ parent.hidden=!mzVisible&&!xicVisible; parent.classList.toggle("single-module",mzVisible!==xicVisible); }
+  const visibleKeys=orderedReportModules().filter(item=>reportSettings.modules[item.key]!==false).map(item=>item.key);
+  if(!visibleKeys.includes(state.activeModuleId))state.activeModuleId=visibleKeys[0]||"";
+  applyModuleOrderAndNumbering(); renderModuleNavigation();
   const chromLegend=$("chromLegend"), spectrumLegend=$("spectrumLegend"), xicLegend=$("xicLegend");
   if(chromLegend)chromLegend.hidden=!reportSettings.legends.chrom;
   if(spectrumLegend)spectrumLegend.hidden=!reportSettings.legends.spectrum;
@@ -1483,7 +1681,7 @@ function modItemDetailRow(item,pair,formPalette){
   const featureButtons=(item.linked_feature_ids||[]).map(id=>`<button type="button" class="mod-quant-feature" data-mod-quant-feature="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join("");
   return `<tr class="mod-quant-detail-row"><td colspan="7"><div class="mod-quant-detail"><div class="mod-quant-detail-grid"><div class="mod-composition-panel"><div class="mod-detail-title">${panelTitle}</div>${barForSample(pair.reference)}${barForSample(pair.test)}<div class="note">${panelNote}</div></div><div class="mod-form-panel"><div class="mod-detail-title">${tableTitle}</div><table class="mod-form-matrix">${tableHead}${matrixRows}</table></div></div><details class="mod-feature-details"><summary>关联 Feature（${(item.linked_feature_ids||[]).length}）</summary><div>${featureButtons||'<span class="note">无</span>'}</div></details></div></td></tr>`;
 }
-function modItemRows(item,pair,formPalette,nestedMember=false){
+function modItemRows(item,pair,formPalette,nestedMember=false,familyVisual=null){
   const changes=item.currentChanges||[],strongest=item.currentStrongest;
   let conclusion='<span class="note">暂不能形成组间比例结论</span>';
   if(strongest){
@@ -1495,9 +1693,23 @@ function modItemRows(item,pair,formPalette,nestedMember=false){
   const familyKey=String(item.quantitation_id||item.family_id||item.rank||""),expanded=state.expandedModificationFamilies.has(familyKey),standaloneHigh=item.high_value_candidate&&!nestedMember;
   const confidenceGrade=changes.some(change=>String(change.form.ms2_confidence||"").startsWith("C_"))?"含C级定位":"B级形式";
   const badges=`${standaloneHigh?'<span class="mod-quant-badge high-value">独立高价值候选</span>':""}${nestedMember?'<span class="mod-quant-badge">分组内序列</span>':""}${item.familyResponseImbalance?'<span class="mod-quant-badge high-value">该肽段总响应不平衡</span>':""}`;
-  const rowClass=`${nestedMember?"mod-proteolytic-member-row ":""}${standaloneHigh?"high-value":""}`;
-  const summaryRow=`<tr class="${rowClass}"><td><button type="button" class="mod-quant-toggle" data-mod-quant-toggle="${escapeHtml(familyKey)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${item.rank||""}</td><td class="wrap"><div class="mod-quant-event">${escapeHtml(item.event_name||"")} ${badges}</div><div class="mod-quant-site">${escapeHtml(item.chain||"")} ${item.start||""}-${item.end||""}</div></td><td class="wrap"><b>${escapeHtml(item.sequence||"")}</b></td><td class="mod-quant-conclusion ${standaloneHigh?"high-value":""}">${conclusion}${item.familyResponseImbalance?'<br><span class="note">该肽段自身总响应不单独解释为修饰或蛋白丰度变化。</span>':""}</td><td class="wrap"><b>${escapeHtml(modificationQuantitationStatusLabel(item.quantitation_status))}</b><br><span class="note">${escapeHtml(confidenceGrade)}</span></td><td>${changes.length}</td></tr>`;
-  return summaryRow+(expanded?modItemDetailRow(item,pair,formPalette):"");
+  const rowClass=`${nestedMember?`mod-proteolytic-member-row ${familyVisual?.first?"family-first-member ":""}${familyVisual?.last?"family-last-member ":""}`:""}${standaloneHigh?"high-value":""}`;
+  const visualStyle=nestedMember&&familyVisual?` style="--mod-family-accent:${familyVisual.accent};--mod-family-tint:${familyVisual.tint}"`:"";
+  const summaryRow=`<tr class="${rowClass}"${visualStyle}><td><button type="button" class="mod-quant-toggle" data-mod-quant-toggle="${escapeHtml(familyKey)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${item.rank||""}</td><td class="wrap"><div class="mod-quant-event">${escapeHtml(item.event_name||"")} ${badges}</div><div class="mod-quant-site">${escapeHtml(item.chain||"")} ${item.start||""}-${item.end||""}</div></td><td class="wrap"><b>${escapeHtml(item.sequence||"")}</b></td><td class="mod-quant-conclusion ${standaloneHigh?"high-value":""}">${conclusion}${item.familyResponseImbalance?'<br><span class="note">该肽段自身总响应不单独解释为修饰或蛋白丰度变化。</span>':""}</td><td class="wrap"><b>${escapeHtml(modificationQuantitationStatusLabel(item.quantitation_status))}</b><br><span class="note">${escapeHtml(confidenceGrade)}</span></td><td>${changes.length}</td></tr>`;
+  let detailRow=expanded?modItemDetailRow(item,pair,formPalette):"";
+  if(detailRow&&nestedMember)detailRow=detailRow.replace('class="mod-quant-detail-row"',`class="mod-quant-detail-row mod-proteolytic-member-detail ${familyVisual?.last?"family-last-detail":""}"`);
+  return summaryRow+detailRow;
+}
+function modFamilyVisual(key,high=false){
+  if(high)return {accent:"#d97706",tint:"#fff7e6"};
+  const palette=[
+    {accent:"#2563eb",tint:"#eff6ff"},
+    {accent:"#0f766e",tint:"#ecfdf5"},
+    {accent:"#7c3aed",tint:"#f5f3ff"},
+    {accent:"#be123c",tint:"#fff1f2"},
+    {accent:"#0369a1",tint:"#ecfeff"}
+  ],hash=[...String(key||"")].reduce((total,char)=>total+char.charCodeAt(0),0);
+  return palette[hash%palette.length];
 }
 function modProteolyticGroupRows(family,members,pair,formPalette){
   const key=String(family.family_id||family.rank||""),expanded=state.expandedProteolyticFamilies.has(key);
@@ -1509,10 +1721,9 @@ function modProteolyticGroupRows(family,members,pair,formPalette){
     const delta=Number(comparison.median_percentage_point_difference||0),higher=delta>=0?pair.test:pair.reference,magnitudes=[Math.abs(Number(comparison.min_percentage_point_difference||0)),Math.abs(Number(comparison.max_percentage_point_difference||0))].sort((a,b)=>a-b);
     conclusion=`<b>${escapeHtml(site.event_label)}</b>：${escapeHtml(sampleShort(higher))} 较高；${comparison.support_count}/${comparison.support_count} 条重叠肽段方向一致，变化范围 <b>${(magnitudes[0]*100).toFixed(2)}–${(magnitudes[1]*100).toFixed(2)} 个百分点</b>。`;
   }else if(comparison)conclusion=`<b>${escapeHtml(site.event_label)}</b>：重叠肽段间方向不一致，暂不形成位点级结论。`;
-  const high=Boolean(site?.high_value_consensus&&comparison?.consistent&&comparison?.all_b_grade),rank=Math.min(...members.map(member=>Number(member.rank||9999))),sequences=members.map(member=>member.sequence).join(" / ");
+  const high=Boolean(site?.high_value_consensus&&comparison?.consistent&&comparison?.all_b_grade),rank=Math.min(...members.map(member=>Number(member.rank||9999))),sequences=members.map(member=>member.sequence).join(" / "),visual=modFamilyVisual(key,high),familyStyle=`--mod-family-accent:${visual.accent};--mod-family-tint:${visual.tint}`;
   const groupRow=`<tr class="mod-proteolytic-group-row ${high?"high-value":""}"><td><button type="button" class="mod-quant-toggle" data-proteolytic-toggle="${escapeHtml(key)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${rank}</td><td class="wrap"><div class="mod-quant-event">重叠肽段修饰组 ${high?'<span class="mod-quant-badge high-value">跨序列高价值</span>':""}${redistribution?'<span class="mod-quant-badge high-value">疑似酶切分配差异</span>':""}</div><div class="mod-quant-site">${escapeHtml(family.chain||"")} ${family.start||""}-${family.end||""}</div></td><td class="wrap"><b>${members.length} 条互相包含序列</b><div class="mod-group-sequences">${escapeHtml(sequences)}</div></td><td class="mod-quant-conclusion ${high?"high-value":""}">${conclusion}${redistribution?'<br><span class="note">长短肽总响应呈相反方向，展开后分别复核；不同序列面积不直接合并为绝对修饰率。</span>':""}</td><td class="wrap"><b>位点一致性判断</b><br><span class="note">各序列独立定量</span></td><td>${members.length} 序列</td></tr>`;
-  if(!expanded)return groupRow;
-  return groupRow+members.map(member=>modItemRows(member,pair,formPalette,true)).join("");
+  return `<tbody class="mod-proteolytic-family ${high?"high-value":""}" style="${familyStyle}">${groupRow}${expanded?members.map((member,index)=>modItemRows(member,pair,formPalette,true,{...visual,first:index===0,last:index===members.length-1})).join(""):""}</tbody>`;
 }
 function modBestLinkedFeatureId(featureIds){
   return (featureIds||[]).map(id=>({id:String(id),item:featureItemById(id)})).filter(entry=>entry.item).sort((first,second)=>{
@@ -1568,7 +1779,7 @@ function renderModificationQuantitation(){
   summary.innerHTML=`<span class="mod-quant-badge">${entries.length} 个表格分组（${all.length} 个序列形式族）</span><span class="mod-quant-badge formal">${formal} 个正式相对定量</span><span class="mod-quant-badge high-value">${siteHigh} 个跨序列高价值结论</span>${standaloneHigh?`<span class="mod-quant-badge high-value">${standaloneHigh} 个独立高价值候选</span>`:""}<span class="note">当前图表：${state.modQuantViewMode==="xic"?"归一化 XIC 面积":"组成比例"}；${escapeHtml(sampleShort(pair.test))} 对 ${escapeHtml(sampleShort(pair.reference))}</span>`;
   if(!entries.length){table.innerHTML='<tr><td class="note">当前筛选条件下没有可显示的修饰形式族。</td></tr>';return;}
   const formPalette=["#2563eb","#f59e0b","#10b981","#8b5cf6","#ef4444","#06b6d4","#84cc16","#f97316","#64748b"];
-  table.innerHTML='<tr><th></th><th>rank</th><th>事件 / 位置</th><th>肽段 / 分组</th><th>主要变化</th><th>定量等级</th><th>形式数</th></tr>'+entries.map(entry=>entry.kind==="group"?modProteolyticGroupRows(entry.family,entry.members,pair,formPalette):modItemRows(entry.item,pair,formPalette,false)).join("");
+  table.innerHTML='<thead><tr><th></th><th>rank</th><th>事件 / 位置</th><th>肽段 / 分组</th><th>主要变化</th><th>定量等级</th><th>形式数</th></tr></thead>'+entries.map(entry=>entry.kind==="group"?modProteolyticGroupRows(entry.family,entry.members,pair,formPalette):`<tbody class="mod-quant-standalone">${modItemRows(entry.item,pair,formPalette,false)}</tbody>`).join("");
   table.querySelectorAll("[data-proteolytic-toggle]").forEach(button=>button.onclick=()=>{const key=String(button.dataset.proteolyticToggle||"");if(state.expandedProteolyticFamilies.has(key))state.expandedProteolyticFamilies.delete(key);else state.expandedProteolyticFamilies.add(key);renderModificationQuantitation();});
   table.querySelectorAll("[data-mod-quant-toggle]").forEach(button=>button.onclick=()=>{const key=String(button.dataset.modQuantToggle||"");if(state.expandedModificationFamilies.has(key))state.expandedModificationFamilies.delete(key);else state.expandedModificationFamilies.add(key);renderModificationQuantitation();});
   table.querySelectorAll("[data-mod-form-key]").forEach(button=>button.onclick=async event=>{event.stopPropagation();const formKey=String(button.dataset.modFormKey||""),context=modFormContextByKey(formKey),ids=String(button.dataset.modFormLinks||"").split("|").filter(Boolean),featureId=modBestLinkedFeatureId(ids);state.selectedModificationFormKey=formKey;state.selectedModificationFormContext=context;renderModificationQuantitation();if(featureId)await selectMappedFeature(featureId,true);else await selectTargetedModificationForm(context);});
@@ -1622,7 +1833,7 @@ function drawFeatureMs2(){
   const featureId=String(state.selectedFeatureGroupId||"");
   const formContext=state.selectedModificationFormContext;
   if(!featureId&&!formContext){
-    detail.textContent="Select a Feature from the heatmap or Feature list.";
+    detail.textContent="请从 Feature 图或差异 Feature 列表中选择一个成分。";
     info.textContent="The corresponding best identified spectrum, or the best covering unresolved MS2 scan, will appear here.";
     return;
   }
@@ -1659,7 +1870,7 @@ function drawFeatureMs2(){
   const statusClass=identified?"identified":((candidate||evidenceP)?"unresolved":"missing");
   const sequence=f.sequence||evidenceP?.sequence||"", modification=f.modification||evidenceP?.modification_text||"";
   const displayId=featureId||(formContext?.form_label||"目标 XIC 形式"),relation=!featureId||String(f.feature_group_id||"")===featureId?"":` | evidence Feature ${f.feature_group_id} (${matched.relation})`;
-  detail.innerHTML=`<span class="feature-ms2-status ${statusClass}">${escapeHtml(status)}</span><b>${escapeHtml(displayId)}</b>${escapeHtml(relation)}<br>${sequence?`sequence <b>${escapeHtml(sequence)}</b>${modification?` | ${escapeHtml(modification)}`:""}`:"No peptide sequence assigned"}`;
+  detail.innerHTML=`<span class="feature-ms2-status ${statusClass}">${escapeHtml(status)}</span><b>${escapeHtml(displayId)}</b>${escapeHtml(relation)}<br>${sequence?`序列 <b>${escapeHtml(sequence)}</b>${modification?` | ${escapeHtml(modification)}`:""}`:"尚未分配肽段序列"}`;
   const reason=f.unidentified_reason||f.hypothesis||"";
   const scanText=spectrumP?`${spectrumP.sample_id||""} | scan ${spectrumP.scan_id||""} | RT ${nice(spectrumP.rt,3)} min | precursor ${nice(spectrumP.precursor_mz,5)} z${spectrumP.precursor_charge||"?"}`:"No covering MS2 scan";
   const glycanText=evidenceP?.glycan_name?` | glycan diagnostic ions ${evidenceP.glycan_diagnostic_ion_count||0} | core Y ions ${evidenceP.glycan_core_y_ion_count||0} | HexNAc-retaining fragments ${evidenceP.glycan_hexnac_fragment_count||0}`:"";
@@ -1777,7 +1988,7 @@ function bindSortableHeaders(scope,render){
 }
 function updatePairLegend(){
   const pair=selectedPair(), legend=$("featureMapPairLegend"); if(!legend)return;
-  legend.innerHTML=`<span><span class="sample-dot" style="background:${sampleColor(pair.reference)}"></span>Reference: ${escapeHtml(pair.reference||"")}</span><span><span class="sample-dot" style="background:${sampleColor(pair.test)}"></span>Test: ${escapeHtml(pair.test||"")}</span>`;
+  legend.innerHTML=`<span><span class="sample-dot" style="background:${sampleColor(pair.reference)}"></span>参比：${escapeHtml(pair.reference||"")}</span><span><span class="sample-dot" style="background:${sampleColor(pair.test)}"></span>比较：${escapeHtml(pair.test||"")}</span>`;
 }
 function redrawPairViews(){
   hideDetailTooltip(); updatePairLegend(); renderMzTable(); renderGlobalFeatureTable(); drawFeatureMap(); renderModificationQuantitation(); drawStructureModule();
@@ -2121,7 +2332,7 @@ async function selectSpectrumMz(mz, representativeRt=null, featureGroupId=null, 
 function drawDetail(){
   const canvas=$("detailCanvas"),ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
   updateSpectrumLegend();
-  const pk=selectedPeak(); if(!pk){ $("detailInfo").textContent="Select one TIC peak from the table or TIC plot to compare its summed spectrum."; canvas._plot=null; $("detailPan").disabled=true; return; }
+  const pk=selectedPeak(); if(!pk){ $("detailInfo").textContent="请从 TIC 图或峰一致性表中选择一个 TIC 峰。"; canvas._plot=null; $("detailPan").disabled=true; return; }
   state.selectedPeakId=pk.tic_peak_id;
   const bins=pk.spectrum_mz_bins||[], matrix=pk.spectrum_raw_matrix||{}, full=detailFullDomain(pk);
   const p=plot(canvas,state.detailZoom||full); axes(ctx,p,"m/z","summed spectrum");
@@ -2162,8 +2373,8 @@ function xicFullDomain(){
 function drawXic(){
   const canvas=$("xicCanvas"),ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
   updateXicLegend();
-  if(state.xicLoading){ $("xicInfo").textContent=`Loading XIC for m/z ${nice(state.selectedMz,5)}...`; canvas._plot=null; $("xicPan").disabled=true; return; }
-  if(!state.xic){ $("xicInfo").textContent="Select a Top changed m/z to extract XIC."; canvas._plot=null; $("xicPan").disabled=true; return; }
+  if(state.xicLoading){ $("xicInfo").textContent=`正在提取 m/z ${nice(state.selectedMz,5)} 的 XIC…`; canvas._plot=null; $("xicPan").disabled=true; return; }
+  if(!state.xic){ $("xicInfo").textContent="请选择一个差异 m/z 或 Feature 以提取 XIC。"; canvas._plot=null; $("xicPan").disabled=true; return; }
   const series=state.xic.xic_by_sample||{}, full=xicFullDomain();
   const z=state.xicZoom||{xmin:Number(state.xic.rt_start),xmax:Number(state.xic.rt_end),ymin:0,ymax:null};
   const visibleYs=Object.values(series).flatMap(s=>s.rt.map((rt,j)=>rt>=z.xmin&&rt<=z.xmax?s.intensity[j]:null).filter(v=>v!==null));
@@ -2174,7 +2385,7 @@ function drawXic(){
   DATA.sample_ids.forEach((sample,i)=>{ const s=series[sample]; if(!s)return; ctx.strokeStyle=color(i); ctx.beginPath(); let started=false; s.rt.forEach((x,j)=>{ if(x<domain.xmin||x>domain.xmax){started=false; return;} const px=p.toX(x),py=p.toY(s.intensity[j]); if(!started){ctx.moveTo(px,py); started=true;} else ctx.lineTo(px,py); }); ctx.stroke(); });
   canvas._plot=p;
   setPan("xicPan",state.xicZoom,full,(xmin,width)=>{state.xicZoom={...state.xicZoom,xmin,xmax:xmin+width,ymax:null};drawAll();});
-  $("xicInfo").textContent=`Single-centroid XIC m/z ${nice(state.xic.target_mz,5)} +/- ${nice(state.xic.mz_tolerance,5)} Da; parent peak ${state.xic.peak_id}; ${state.xic.full_run?"full XIC":"local XIC"}; green band is feature/TIC integration RT ${nice(state.xic.integration_rt_start)}-${nice(state.xic.integration_rt_end)}`;
+  $("xicInfo").textContent=`单质心 XIC：m/z ${nice(state.xic.target_mz,5)} ± ${nice(state.xic.mz_tolerance,5)} Da；所属 TIC 峰 ${state.xic.peak_id}；${state.xic.full_run?"整体 XIC":"局部 XIC"}；绿色区域为 Feature/TIC 积分区间 RT ${nice(state.xic.integration_rt_start)}–${nice(state.xic.integration_rt_end)}`;
 }
 function xicHitAt(canvas,clientX,clientY){
   if(!canvas._plot||!state.xic)return null;
@@ -2284,9 +2495,9 @@ function updateFeatureMapLegend(){
   const maxFold=directionMode?Math.exp(pairMaxAbsLn(rows)):heatmapMaxFold(rows);
   const pair=selectedPair();
   const labels=directionMode
-    ? [`${escapeHtml(sampleShort(pair.test))} lower`,"equal",`${escapeHtml(sampleShort(pair.test))} higher`]
+    ? [`${escapeHtml(sampleShort(pair.test))} 较低`,"接近",`${escapeHtml(sampleShort(pair.test))} 较高`]
     : ["1x","10x",`${nice(maxFold,maxFold>=10?0:1)}x`];
-  container.innerHTML=`<span class="legend-gradient ${directionMode?"direction":"magnitude"}"></span><span class="legend-label">${labels[0]}</span><span class="legend-label">${labels[1]}</span><span class="legend-label">${labels[2]}</span><span class="legend-caption">${directionMode?"red = test higher · blue = test lower":"color = ln(fold)"}</span>`;
+  container.innerHTML=`<span class="legend-gradient ${directionMode?"direction":"magnitude"}"></span><span class="legend-label">${labels[0]}</span><span class="legend-label">${labels[1]}</span><span class="legend-label">${labels[2]}</span><span class="legend-caption">${directionMode?"红色＝比较样本较高 · 蓝色＝比较样本较低":"颜色＝ln(倍数)"}</span>`;
 }
 function featureMapHitAt(canvas, clientX, clientY){
   if(!canvas._plot)return null;
@@ -2323,7 +2534,7 @@ async function selectGlobalFeature(item,preserveModificationContext=false){
 function drawFeatureMap(){
   const canvas=$("featureMapCanvas"),ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
   const rows=featureMapRows(), full=featureMapFullDomain();
-  if(!rows.length){ $("featureMapInfo").textContent="No global feature groups."; canvas._plot=null; $("featureMapPan").disabled=true; updateFeatureMapLegend(); return; }
+  if(!rows.length){ $("featureMapInfo").textContent="当前没有可显示的差异 Feature。"; canvas._plot=null; $("featureMapPan").disabled=true; updateFeatureMapLegend(); return; }
   const domain=state.featureMapZoom||full; const p=plot(canvas,domain); axes(ctx,p,"RT (min)","m/z");
   const maxRanking=Math.max(...rows.map(item=>Number(item.ranking_score)||0),1e-9);
   const directionMode=state.featureMapMode==="direction", maxFold=heatmapMaxFold(rows), maxAbsLn=pairMaxAbsLn(rows), maxScale=directionMode?maxAbsLn:maxFold;
@@ -2345,7 +2556,7 @@ function drawFeatureMap(){
   updateFeatureMapLegend();
   setPan("featureMapPan",state.featureMapZoom,full,(xmin,width)=>{state.featureMapZoom={...state.featureMapZoom,xmin,xmax:xmin+width};drawAll();});
   const pair=selectedPair();
-  $("featureMapInfo").textContent=directionMode?`${rows.length} features; ${sampleShort(pair.test)} versus ${sampleShort(pair.reference)}; red = test higher, blue = test lower; color uses capped |ln(test/reference)| (maximum ${MAX_FEATURE_FOLD}x); square area uses the higher normalized abundance in the selected pair on a robust ln scale.`:`${rows.length} features; color uses ln(fold), scaled from 1x to ${nice(maxFold,1)}x and capped at ${MAX_FEATURE_FOLD}x; square area uses the higher normalized abundance in the selected pair on a robust ln scale.`;
+  $("featureMapInfo").textContent=directionMode?`${rows.length} 个 Feature；${sampleShort(pair.test)} 对 ${sampleShort(pair.reference)}；红色表示比较样本较高，蓝色表示比较样本较低；颜色按截断后的 |ln(比较/参比)| 显示，最大按 ${MAX_FEATURE_FOLD}x 计；方块面积表示两样本中较高的归一化丰度。`:`${rows.length} 个 Feature；颜色按 ln(倍数) 显示，范围为 1x 至 ${nice(maxFold,1)}x，最大按 ${MAX_FEATURE_FOLD}x 计；方块面积表示两样本中较高的归一化丰度。`;
 }
 function renderGlobalFeatureTable(){
   const componentRows=currentComponentRows();
@@ -2436,6 +2647,32 @@ function renderFeatures(){
   $("featureTable").innerHTML=`<tr><th>#</th><th>parent peak</th><th>RT</th><th>true peak m/z</th><th>envelope m/z</th><th>source</th></tr>${rows.join("")}`;
   document.querySelectorAll("tr[data-saved-feature]").forEach(row=>row.onclick=async()=>{await selectGlobalFeature({parent_tic_peak_id:row.dataset.peak,representative_rt:row.dataset.rt,representative_mz:Number(row.dataset.mz)});});
 }
+function renderAnalysisContext(){
+  const container=$("analysisContextItems"),actions=$("analysisContextActions"); if(!container||!actions)return;
+  const pair=selectedPair(),matched=selectedMs2Evidence(),evidence=matched?.feature||{},form=state.selectedModificationFormContext||{};
+  const sequence=cleanPeptideSequence(form.sequence||evidence.sequence||""),modification=String(form.form_label||evidence.modification||""),confidence=String(form.ms2_confidence||evidence.confidence||""),status=String(form.status||evidence.ms2_status||"");
+  const grade=confidence?confidence.replace(/_.*/,""):(status?ms2StatusText[status]||status:"");
+  const hasMz=state.selectedMz!==null&&state.selectedMz!==undefined&&Number.isFinite(Number(state.selectedMz));
+  const featureLabel=state.selectedFeatureGroupId||((hasMz&&form.form_label)?"目标 XIC":"");
+  const values=[
+    {label:"样本",value:`${sampleShort(pair.reference)} ↔ ${sampleShort(pair.test)}`,active:true},
+    {label:"TIC峰",value:state.selectedPeakId||"未选择",active:Boolean(state.selectedPeakId)},
+    {label:"Feature",value:featureLabel||"未选择",active:Boolean(featureLabel)},
+    {label:"m/z",value:hasMz?nice(state.selectedMz,5):"未选择",active:hasMz},
+    {label:"序列",value:sequence||"未定性",active:Boolean(sequence)},
+    {label:"修饰",value:modification?(modification==="Unmodified"?"未修饰":modification):"未确定",active:Boolean(modification)},
+    {label:"证据",value:grade||"暂无",active:Boolean(grade)}
+  ];
+  container.innerHTML=values.map(item=>`<span class="analysis-context-item ${item.active?"active":""}" title="${escapeHtml(item.value)}"><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.value)}</span></span>`).join("");
+  const links=[];
+  if(state.selectedPeakId)links.push({module:"peakInspectionModule",label:"查看峰分析"});
+  if(state.selectedMz)links.push({module:"mzXicSection",label:"查看 XIC"});
+  if(featureLabel)links.push({module:"featureMapModule",label:"查看 Feature / MS2"});
+  if(modification||sequence)links.push({module:"modificationQuantitationModule",label:"查看修饰定量"});
+  if(sequence)links.push({module:"structureMappingModule",label:"查看序列 / 结构"});
+  actions.innerHTML=links.filter(item=>item.module!==state.activeModuleId&&reportSettings.modules[item.module]!==false).map(item=>`<button type="button" class="analysis-context-action" data-context-module="${item.module}">${item.label}</button>`).join("");
+  actions.querySelectorAll("[data-context-module]").forEach(button=>button.onclick=()=>scrollToModule(button.dataset.contextModule));
+}
 async function saveFeature(){
   const pk=selectedPeak(); if(!pk||!state.selectedMz||!state.xic)return;
   const featureRt=selectedFeatureRt()??Number(pk.rt_apex);
@@ -2443,7 +2680,7 @@ async function saveFeature(){
   const feature={feature_id:`PF_${Date.now()}`, parent_tic_peak_id:pk.tic_peak_id, project_id:DATA.project_id, sample_ids:DATA.sample_ids, representative_rt:featureRt, representative_mz:state.selectedMz, true_peak_mz:state.selectedMz, envelope_representative_mz:envelopeRepresentativeMz(group)||state.selectedMz, quantitation_mz:group?.quantitation_mz??state.selectedMz, mz_tolerance:state.xic.mz_tolerance, rt_start:pk.rt_start, rt_apex:featureRt, rt_end:pk.rt_end, raw_area_by_sample:Object.fromEntries(Object.entries(state.xic.integration_by_sample).map(([s,v])=>[s,v.area])), difference_score:1-pk.peak_consistency_score, peak_consistency_score:pk.peak_consistency_score, spectrum_score:pk.spectrum_score, source:"peak_first_local_analysis", annotation_status:"unannotated", created_at:new Date().toISOString()};
   const p=await fetchJson(apiUrl("/api/features"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({features:[...state.features,feature]})}); state.features=p.features||[]; $("featureInfo").textContent=`Saved ${p.saved_count} features`; renderFeatures();
 }
-function drawAll(){ drawChrom(); renderPeakTable(); drawDetail(); renderMzTable(); drawXic(); renderGlobalFeatureTable(); drawFeatureMap(); drawFeatureMs2(); renderModificationQuantitation(); drawStructureModule(); }
+function drawAll(){ drawChrom(); renderPeakTable(); drawDetail(); renderMzTable(); drawXic(); renderGlobalFeatureTable(); drawFeatureMap(); drawFeatureMs2(); renderModificationQuantitation(); drawStructureModule(); renderAnalysisContext(); }
 function attachHover(canvas, kind){
   if(!canvas)return;
   canvas.onmousemove=e=>{
