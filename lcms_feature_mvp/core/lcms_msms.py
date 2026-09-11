@@ -4310,7 +4310,9 @@ def _n_glycan_sequon_sites(sequence: str) -> list[int]:
 
 def _targeted_n_glycan_candidates(
     backbone_candidates: list[PeptideCandidate],
+    enzyme: str = DEFAULT_ENZYME,
 ) -> list[PeptideCandidate]:
+    enzyme = validate_enzyme(enzyme)
     candidates: list[PeptideCandidate] = []
     seen: set[tuple[str, int, str]] = set()
     for backbone in backbone_candidates:
@@ -4333,7 +4335,7 @@ def _targeted_n_glycan_candidates(
                     proteolysis=backbone.proteolysis,
                     base_peptide_id=backbone.base_peptide_id,
                 )
-                candidates.extend((target, _decoy(target)))
+                candidates.extend((target, _decoy(target, enzyme)))
     return sorted(candidates, key=lambda candidate: candidate.neutral_mass)
 
 
@@ -4553,6 +4555,7 @@ def search_feature_glycopeptide_scans(
     fragment_tolerance_ppm: float = 20.0,
     max_scans_per_sample: int = 2,
     fdr_threshold: float = 0.01,
+    enzyme: str = DEFAULT_ENZYME,
 ) -> list[dict[str, object]]:
     """Identify N-glycopeptides only for differential Features with linked MS2."""
     excluded = {str(value) for value in (exclude_feature_ids or set())}
@@ -4562,7 +4565,7 @@ def search_feature_glycopeptide_scans(
         if row.get("difference_type") in significant_types
         and str(row.get("feature_group_id") or "") not in excluded
     ]
-    glycopeptides = _targeted_n_glycan_candidates(backbone_candidates)
+    glycopeptides = _targeted_n_glycan_candidates(backbone_candidates, enzyme=enzyme)
     if not features or not glycopeptides:
         return []
     glycopeptide_masses = [candidate.neutral_mass for candidate in glycopeptides]

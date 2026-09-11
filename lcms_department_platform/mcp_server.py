@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # Support package-level imports in tests and integr
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MCP_SERVER_NAME = "lcms-department-platform"
-MCP_SERVER_VERSION = "1.1.0"
+MCP_SERVER_VERSION = "1.1.1"
 MAX_TOOL_LIMIT = 500
 MAX_SPECTRUM_PEAKS = 500
 MAX_UNKNOWN_ANALYSIS_LIMIT = 100

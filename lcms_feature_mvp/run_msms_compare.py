@@ -582,6 +582,7 @@ def main() -> None:
             precursor_tolerance_ppm=max(0.1, args.precursor_ppm * 2.0),
             fragment_tolerance_ppm=max(0.1, args.fragment_ppm),
             fdr_threshold=args.fdr,
+            enzyme=args.enzyme,
         )
         emit_progress(0.86, "glycopeptide_search")
         emit_timing("glycopeptide_search", stage_started)
