@@ -622,6 +622,87 @@ class LCMSMSMVPTests(unittest.TestCase):
         self.assertEqual(rows[0]["unidentified_reason"], "no_ms2_scan")
         self.assertEqual(summary["no_ms2_acquired"], 1)
 
+    def test_feature_ms2_evidence_keeps_best_spectrum_for_each_sample(self) -> None:
+        payload = {
+            "alignment": {"rt_shift_by_sample": {"reference": 0.0, "test": 0.0}},
+            "global_feature_groups": [
+                {
+                    "feature_group_id": "FG_SWITCH",
+                    "representative_mz": 500.0,
+                    "representative_rt": 10.0,
+                    "difference_type": "area_changed",
+                    "ranking_score": 2.0,
+                }
+            ],
+        }
+        scans = [
+            LCMSSpectrumScan(
+                scan_id=f"scan={index}",
+                raw_file_id=sample_id,
+                sample_id=sample_id,
+                rt=10.0,
+                ms_level=2,
+                mz_array=[100.0, 200.0],
+                intensity_array=[10.0, 20.0],
+                tic=30.0,
+                base_peak_mz=200.0,
+                base_peak_intensity=20.0,
+                precursor_mz=500.0,
+                precursor_charge=2,
+                isolation_window_lower_offset=0.8,
+                isolation_window_upper_offset=0.8,
+            )
+            for index, sample_id in enumerate(("reference", "test"), start=1)
+        ]
+        psms = [
+            {
+                "sample_id": sample_id,
+                "scan_id": scan.scan_id,
+                "rt": scan.rt,
+                "precursor_mz": scan.precursor_mz,
+                "precursor_charge": scan.precursor_charge,
+                "sequence": "PEPTIDEK",
+                "modification_text": "Unmodified",
+                "score": score,
+                "q_value": 0.005,
+                "matched_ion_count": 8,
+                "fragment_coverage": 0.3,
+                "spectrum_peaks": [{"mz": 100.0, "intensity": 10.0, "label": "b1"}],
+                "feature_links": [{"feature_group_id": "FG_SWITCH"}],
+            }
+            for sample_id, scan, score in zip(
+                ("reference", "test"), scans, (45.0, 65.0)
+            )
+        ]
+        annotation = {
+            "feature_or_candidate_id": "FG_SWITCH",
+            "sequence": "PEPTIDEK",
+            "modification": "Unmodified",
+            "confidence": "B_tentative",
+            "feature_link_type": "direct_precursor",
+            "sample_evidence": {
+                "reference": {"score": 45.0},
+                "test": {"score": 65.0},
+            },
+        }
+
+        rows, _ = build_feature_ms2_evidence(payload, scans, psms, [annotation])
+        evidence = rows[0]
+
+        self.assertEqual(evidence["best_psm"]["sample_id"], "test")
+        self.assertEqual(
+            set(evidence["best_psm_by_sample"]), {"reference", "test"}
+        )
+        self.assertEqual(
+            evidence["best_psm_by_sample"]["reference"]["scan_id"], "scan=1"
+        )
+        self.assertEqual(
+            evidence["best_psm_by_sample"]["test"]["scan_id"], "scan=2"
+        )
+        self.assertEqual(
+            set(evidence["coverage_scan_by_sample"]), {"reference", "test"}
+        )
+
     def test_feature_open_mass_search_recovers_known_backbone_with_unknown_delta(self) -> None:
         candidates = generate_sequence_inference_candidates(
             {"HC": "PEPTIDEK"},

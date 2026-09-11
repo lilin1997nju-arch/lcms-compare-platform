@@ -10,8 +10,9 @@ signals for XIC confirmation.
 from __future__ import annotations
 
 import math
+import heapq
 import statistics
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -93,6 +94,60 @@ class PeakFirstParams:
     feature_partial_detection_rank_weight: float = 0.35
     global_feature_rt_merge_tolerance_min: float = 0.8
     global_feature_mz_merge_tolerance_factor: float = 2.0
+
+
+@dataclass
+class PeakFirstScanIndex:
+    """RT and centroid lookup index for one sample's MS1 scans.
+
+    ThermoRawFileParser currently emits centroid arrays sorted by m/z.  The
+    fallback sort below keeps synthetic/legacy inputs correct without copying
+    the common sorted arrays, so the index remains small compared with the
+    decoded spectra themselves.
+    """
+
+    scans: list[LCMSSpectrumScan]
+    rt_values: list[float]
+    mz_arrays: list[list[float]]
+    intensity_arrays: list[list[float]]
+
+
+def build_peak_first_scan_index(
+    scans: list[LCMSSpectrumScan],
+) -> PeakFirstScanIndex:
+    ordered_scans = sorted(scans, key=lambda scan: float(scan.rt))
+    mz_arrays: list[list[float]] = []
+    intensity_arrays: list[list[float]] = []
+    for scan in ordered_scans:
+        mz_values = scan.mz_array
+        intensity_values = scan.intensity_array
+        if any(
+            float(mz_values[index]) > float(mz_values[index + 1])
+            for index in range(max(0, len(mz_values) - 1))
+        ):
+            pairs = sorted(
+                zip(mz_values, intensity_values),
+                key=lambda pair: float(pair[0]),
+            )
+            mz_values = [float(pair[0]) for pair in pairs]
+            intensity_values = [float(pair[1]) for pair in pairs]
+        mz_arrays.append(mz_values)
+        intensity_arrays.append(intensity_values)
+    return PeakFirstScanIndex(
+        scans=ordered_scans,
+        rt_values=[float(scan.rt) for scan in ordered_scans],
+        mz_arrays=mz_arrays,
+        intensity_arrays=intensity_arrays,
+    )
+
+
+def build_peak_first_scan_indices(
+    scans_by_sample: dict[str, list[LCMSSpectrumScan]],
+) -> dict[str, PeakFirstScanIndex]:
+    return {
+        str(sample_id): build_peak_first_scan_index(scans)
+        for sample_id, scans in scans_by_sample.items()
+    }
 
 
 def moving_average(values: list[float], window: int) -> list[float]:
@@ -518,11 +573,17 @@ def extract_peak_window(
     aligned: bool = True,
     margin: float = 0.05,
     signal: str = "tic",
+    scan_index: PeakFirstScanIndex | None = None,
 ) -> list[tuple[float, float]]:
     start = float(tic_peak["rt_start"]) - margin
     end = float(tic_peak["rt_end"]) + margin
+    index = scan_index or build_peak_first_scan_index(scans)
+    raw_start = start - rt_shift if aligned else start
+    raw_end = end - rt_shift if aligned else end
+    left = bisect_left(index.rt_values, raw_start)
+    right = bisect_right(index.rt_values, raw_end)
     values = []
-    for scan in scans:
+    for scan in index.scans[left:right]:
         rt = scan.rt + rt_shift if aligned else scan.rt
         if start <= rt <= end:
             values.append((rt, scan.base_peak_intensity if signal == "bpc" else scan.tic))
@@ -657,6 +718,7 @@ def local_align_peak_by_apex(
     params: PeakFirstParams,
     signal: str = "tic",
     reference_sample: str | None = None,
+    scan_indices_by_sample: dict[str, PeakFirstScanIndex] | None = None,
 ) -> dict[str, object]:
     """Align one selected TIC peak to a fixed reference using its full profile.
 
@@ -678,6 +740,11 @@ def local_align_peak_by_apex(
     core_start = float(tic_peak["rt_start"])
     core_end = float(tic_peak["rt_end"])
     for sample_id, scans in scans_by_sample.items():
+        scan_index = (
+            scan_indices_by_sample.get(sample_id)
+            if scan_indices_by_sample is not None
+            else None
+        )
         window = extract_peak_window(
             scans,
             tic_peak,
@@ -685,6 +752,7 @@ def local_align_peak_by_apex(
             True,
             params.peak_margin_min + max_shift,
             signal,
+            scan_index=scan_index,
         )
         windows[sample_id] = window
         corrected_curves[sample_id] = _corrected_peak_curve(window)
@@ -932,21 +1000,34 @@ def get_summed_spectrum_for_peak(
     rt_shift: float,
     local_shift: float,
     params: PeakFirstParams,
+    scan_index: PeakFirstScanIndex | None = None,
 ) -> list[tuple[float, float]]:
     start = float(tic_peak["rt_start"]) - params.peak_margin_min
     end = float(tic_peak["rt_end"]) + params.peak_margin_min
+    index = scan_index or build_peak_first_scan_index(scans)
+    left = bisect_left(index.rt_values, start - rt_shift - local_shift)
+    right = bisect_right(index.rt_values, end - rt_shift - local_shift)
     values: list[tuple[float, float]] = []
-    for scan in scans:
+    for scan_index_position in range(left, right):
+        scan = index.scans[scan_index_position]
         rt = scan.rt + rt_shift + local_shift
         if start <= rt <= end:
             pairs = [
                 (float(mz), float(intensity))
-                for mz, intensity in zip(scan.mz_array, scan.intensity_array)
+                for mz, intensity in zip(
+                    index.mz_arrays[scan_index_position],
+                    index.intensity_arrays[scan_index_position],
+                )
                 if intensity > 0
             ]
-            pairs.sort(key=lambda item: item[1], reverse=True)
             if params.max_spectrum_points_per_scan > 0:
-                pairs = pairs[: params.max_spectrum_points_per_scan]
+                pairs = heapq.nlargest(
+                    params.max_spectrum_points_per_scan,
+                    pairs,
+                    key=lambda item: item[1],
+                )
+            else:
+                pairs.sort(key=lambda item: item[1], reverse=True)
             values.extend(pairs)
     return values
 
@@ -957,19 +1038,42 @@ def get_apex_spectrum_for_peak(
     rt_shift: float,
     local_shift: float,
     params: PeakFirstParams,
+    scan_index: PeakFirstScanIndex | None = None,
 ) -> list[tuple[float, float]]:
     apex = float(tic_peak["rt_apex"])
-    if not scans:
+    index = scan_index or build_peak_first_scan_index(scans)
+    if not index.scans:
         return []
-    scan = min(scans, key=lambda item: abs((item.rt + rt_shift + local_shift) - apex))
+    target_rt = apex - rt_shift - local_shift
+    position = bisect_left(index.rt_values, target_rt)
+    nearby_positions = [
+        candidate
+        for candidate in (position - 1, position)
+        if 0 <= candidate < len(index.scans)
+    ]
+    scan_index_position = min(
+        nearby_positions,
+        key=lambda candidate: abs(
+            (index.scans[candidate].rt + rt_shift + local_shift) - apex
+        ),
+    )
+    scan = index.scans[scan_index_position]
     pairs = [
         (float(mz), float(intensity))
-        for mz, intensity in zip(scan.mz_array, scan.intensity_array)
+        for mz, intensity in zip(
+            index.mz_arrays[scan_index_position],
+            index.intensity_arrays[scan_index_position],
+        )
         if intensity > 0
     ]
-    pairs.sort(key=lambda item: item[1], reverse=True)
     if params.max_spectrum_points_per_scan > 0:
-        pairs = pairs[: params.max_spectrum_points_per_scan]
+        pairs = heapq.nlargest(
+            params.max_spectrum_points_per_scan,
+            pairs,
+            key=lambda item: item[1],
+        )
+    else:
+        pairs.sort(key=lambda item: item[1], reverse=True)
     return pairs
 
 
@@ -1371,20 +1475,38 @@ def extract_xic_points_for_peak(
     rt_shift: float,
     local_shift: float,
     params: PeakFirstParams,
+    scan_index: PeakFirstScanIndex | None = None,
 ) -> list[tuple[float, float, float]]:
     margin = max(params.peak_margin_min, params.xic_feature_search_margin_min)
     start = float(tic_peak["rt_start"]) - margin
     end = float(tic_peak["rt_end"]) + margin
     tolerance = mz_tolerance(target_mz, params)
     target_centroid_tolerance = centroid_mz_tolerance(target_mz, params)
+    index = scan_index or build_peak_first_scan_index(scans)
+    left_scan = bisect_left(
+        index.rt_values,
+        start - rt_shift - local_shift,
+    )
+    right_scan = bisect_right(
+        index.rt_values,
+        end - rt_shift - local_shift,
+    )
     points: list[tuple[float, float, float]] = []
-    for scan in scans:
+    for scan_index_position in range(left_scan, right_scan):
+        scan = index.scans[scan_index_position]
         aligned_rt = scan.rt + rt_shift + local_shift
         if aligned_rt < start or aligned_rt > end:
             continue
+        mz_values = index.mz_arrays[scan_index_position]
+        intensity_values = index.intensity_arrays[scan_index_position]
+        left_mz = bisect_left(mz_values, target_mz - tolerance)
+        right_mz = bisect_right(mz_values, target_mz + tolerance)
         local_points = [
             (float(mz), float(intensity))
-            for mz, intensity in zip(scan.mz_array, scan.intensity_array)
+            for mz, intensity in zip(
+                mz_values[left_mz:right_mz],
+                intensity_values[left_mz:right_mz],
+            )
             if float(intensity) > 0.0 and abs(float(mz) - target_mz) <= tolerance
         ]
         if local_points:
@@ -1535,6 +1657,7 @@ def build_peak_feature_groups(
     area_normalization_factors: dict[str, float] | None = None,
     reference_sample: str | None = None,
     tic_area_by_sample: dict[str, float] | None = None,
+    scan_indices_by_sample: dict[str, PeakFirstScanIndex] | None = None,
 ) -> list[dict[str, object]]:
     groups: list[dict[str, object]] = []
     sample_ids = list(scans_by_sample)
@@ -1553,6 +1676,11 @@ def build_peak_feature_groups(
                 global_shifts.get(sample_id, 0.0),
                 float(local_shifts.get(sample_id, 0.0)),
                 params,
+                scan_index=(
+                    scan_indices_by_sample.get(sample_id)
+                    if scan_indices_by_sample is not None
+                    else None
+                ),
             )
             feature = detect_xic_lcms_feature(
                 xic,
@@ -1899,11 +2027,24 @@ def score_tic_peak_for_selection(
     tic_peak: dict[str, object],
     shifts: dict[str, float],
     params: PeakFirstParams,
+    scan_indices_by_sample: dict[str, PeakFirstScanIndex] | None = None,
 ) -> dict[str, object]:
     areas: dict[str, float] = {}
     heights: dict[str, float] = {}
     for sample_id, scans in scans_by_sample.items():
-        window = extract_peak_window(scans, tic_peak, shifts.get(sample_id, 0.0), True, params.peak_margin_min, "tic")
+        window = extract_peak_window(
+            scans,
+            tic_peak,
+            shifts.get(sample_id, 0.0),
+            True,
+            params.peak_margin_min,
+            "tic",
+            scan_index=(
+                scan_indices_by_sample.get(sample_id)
+                if scan_indices_by_sample is not None
+                else None
+            ),
+        )
         values = [value for _, value in window]
         areas[sample_id] = integrate_curve(window)
         heights[sample_id] = max(values, default=0.0)
@@ -1942,6 +2083,7 @@ def prepare_peak_first_payload(
     params: PeakFirstParams | None = None,
 ) -> dict[str, object]:
     params = params or PeakFirstParams()
+    scan_indices_by_sample = build_peak_first_scan_indices(scans_by_sample)
     alignment = align_rt_by_main_or_feature_peak(scans_by_sample, reference_sample, signal="bpc")
     shifts = {str(k): float(v) for k, v in dict(alignment["rt_shift_by_sample"]).items()}
     consensus_curve = consensus_tic_curve(
@@ -1955,7 +2097,15 @@ def prepare_peak_first_payload(
     sample_peaks = sample_union_tic_peaks(scans_by_sample, shifts, params, "tic")
     tic_peaks = filter_tic_peaks(merge_tic_peak_candidates(consensus_peaks, sample_peaks, params), params)
     for peak in tic_peaks:
-        peak.update(score_tic_peak_for_selection(scans_by_sample, peak, shifts, params))
+        peak.update(
+            score_tic_peak_for_selection(
+                scans_by_sample,
+                peak,
+                shifts,
+                params,
+                scan_indices_by_sample=scan_indices_by_sample,
+            )
+        )
     confirmed = sorted(
         [peak for peak in tic_peaks if peak["status"] == "confirmed_peak"],
         key=lambda item: (
@@ -1982,6 +2132,7 @@ def prepare_peak_first_payload(
             shifts,
             params,
             reference_sample=reference_sample,
+            scan_indices_by_sample=scan_indices_by_sample,
         )
         local_shifts = dict(local["local_peak_shift_by_sample"])
         cut_bounds = sample_specific_cut_bounds(peak, local_shifts, params)
@@ -1989,7 +2140,14 @@ def prepare_peak_first_payload(
         areas: dict[str, float] = {}
         widths: dict[str, float] = {}
         for sample_id, scans in scans_by_sample.items():
-            window = extract_peak_window(scans, peak, shifts.get(sample_id, 0.0) + float(local_shifts.get(sample_id, 0.0)), True, params.peak_margin_min)
+            window = extract_peak_window(
+                scans,
+                peak,
+                shifts.get(sample_id, 0.0) + float(local_shifts.get(sample_id, 0.0)),
+                True,
+                params.peak_margin_min,
+                scan_index=scan_indices_by_sample.get(sample_id),
+            )
             curves[sample_id] = resample_peak_curve([rt for rt, _ in window], [value for _, value in window], params.resample_points)
             areas[sample_id] = integrate_curve(window)
             widths[sample_id] = float(peak.get("width") or 0.0)
@@ -2001,6 +2159,7 @@ def prepare_peak_first_payload(
                 shifts.get(sample_id, 0.0),
                 float(local_shifts.get(sample_id, 0.0)),
                 params,
+                scan_index=scan_indices_by_sample.get(sample_id),
             )
             for sample_id, scans in scans_by_sample.items()
         }
@@ -2017,6 +2176,7 @@ def prepare_peak_first_payload(
                 shifts.get(sample_id, 0.0),
                 float(local_shifts.get(sample_id, 0.0)),
                 params,
+                scan_index=scan_indices_by_sample.get(sample_id),
             )
             for sample_id, scans in scans_by_sample.items()
         }
@@ -2037,6 +2197,7 @@ def prepare_peak_first_payload(
             area_normalization_factors=area_normalization_factors,
             reference_sample=reference_sample,
             tic_area_by_sample=areas,
+            scan_indices_by_sample=scan_indices_by_sample,
         )
         top_changed = feature_groups_to_top_changed_mz(feature_groups, params) or spectrum_changed
         status = classify_tic_peak_status(chrom_scores, spectrum_scores, local)

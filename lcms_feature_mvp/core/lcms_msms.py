@@ -18,6 +18,7 @@ from typing import Callable
 
 from .lcms_models import LCMSSpectrumScan, XICTrace
 from .lcms_peak_detection import detect_xic_peaks
+from .lcms_enzymes import DEFAULT_ENZYME, ENZYMES, digest_enzyme, validate_enzyme
 
 
 PROTON = 1.007276466621
@@ -376,25 +377,7 @@ def digest_trypsin(
     min_length: int = 6,
     max_length: int = 60,
 ) -> list[tuple[str, int, int, str]]:
-    peptides: list[tuple[str, int, int, str]] = []
-    for chain, sequence in chains.items():
-        cuts = [0]
-        cuts.extend(
-            index + 1
-            for index, aa in enumerate(sequence)
-            if aa in "KR" and (index + 1 == len(sequence) or sequence[index + 1] != "P")
-        )
-        if cuts[-1] != len(sequence):
-            cuts.append(len(sequence))
-        for left in range(len(cuts) - 1):
-            for missed in range(max(0, max_missed_cleavages) + 1):
-                right = left + missed + 1
-                if right >= len(cuts):
-                    break
-                start, end = cuts[left], cuts[right]
-                if min_length <= end - start <= max_length:
-                    peptides.append((chain, start + 1, end, sequence[start:end]))
-    return peptides
+    return digest_enzyme(chains, max_missed_cleavages, min_length, max_length)
 
 
 def _residue_masses(
@@ -438,7 +421,24 @@ def _candidate(
     )
 
 
-def _decoy(target: PeptideCandidate) -> PeptideCandidate:
+def _decoy(target: PeptideCandidate, enzyme: str = DEFAULT_ENZYME) -> PeptideCandidate:
+    if enzyme != DEFAULT_ENZYME:
+        rule = ENZYMES[validate_enzyme(enzyme)]
+        order = list(range(len(target.sequence)))
+        left = 1 if rule.terminus == "N" and target.sequence[0] in rule.residues else 0
+        right = len(order) - (1 if rule.terminus == "C" and target.sequence[-1] in rule.residues else 0)
+        order[left:right] = reversed(order[left:right])
+        if "".join(target.sequence[i] for i in order) == target.sequence and right - left > 1:
+            order[left:right] = order[left + 1:right] + order[left:left + 1]
+        positions = {old: new for new, old in enumerate(order)}
+        return _candidate(
+            target.chain, target.start, target.end,
+            "".join(target.sequence[i] for i in order),
+            tuple((positions[pos], name, delta) for pos, name, delta in target.modifications),
+            carbamidomethyl_cys=target.carbamidomethyl_cys,
+            proteolysis=target.proteolysis, is_decoy=True,
+            base_peptide_id=target.base_peptide_id,
+        )
     tail = target.sequence[-1] if target.sequence[-1] in "KR" else ""
     core = target.sequence[:-1] if tail else target.sequence
     decoy_sequence = core[::-1] + tail
@@ -490,18 +490,22 @@ def generate_candidates(
     max_variable_modifications: int = 1,
     semitryptic_max_trim: int = 0,
     include_decoys: bool = True,
+    enzyme: str = DEFAULT_ENZYME,
 ) -> list[PeptideCandidate]:
     targets: list[PeptideCandidate] = []
-    fully_tryptic = digest_trypsin(chains, max_missed_cleavages, min_length, max_length)
+    enzyme = validate_enzyme(enzyme)
+    fully_tryptic = digest_enzyme(chains, max_missed_cleavages, min_length, max_length, enzyme)
+    full_label = "fully_tryptic" if enzyme == DEFAULT_ENZYME else f"fully_enzymatic:{enzyme}"
+    semi_label = "semi_tryptic" if enzyme == DEFAULT_ENZYME else f"semi_enzymatic:{enzyme}"
     digested: dict[tuple[str, int, int, str], str] = {
-        row: "fully_tryptic" for row in fully_tryptic
+        row: full_label for row in fully_tryptic
     }
     for chain, start, end, sequence in fully_tryptic:
         for trim in range(1, max(0, semitryptic_max_trim) + 1):
             if len(sequence) - trim < min_length:
                 break
-            digested.setdefault((chain, start + trim, end, sequence[trim:]), "semi_tryptic")
-            digested.setdefault((chain, start, end - trim, sequence[:-trim]), "semi_tryptic")
+            digested.setdefault((chain, start + trim, end, sequence[trim:]), semi_label)
+            digested.setdefault((chain, start, end - trim, sequence[:-trim]), semi_label)
 
     for (chain, start, end, sequence), proteolysis in sorted(digested.items()):
         targets.append(_candidate(
@@ -537,7 +541,7 @@ def generate_candidates(
                 carbamidomethyl_cys=carbamidomethyl_cys,
                 proteolysis=proteolysis,
             ))
-    return targets + ([_decoy(candidate) for candidate in targets] if include_decoys else [])
+    return targets + ([_decoy(candidate, enzyme) for candidate in targets] if include_decoys else [])
 
 
 def generate_sequence_inference_candidates(
@@ -548,15 +552,18 @@ def generate_sequence_inference_candidates(
     carbamidomethyl_cys: bool = True,
     max_terminal_trim: int = 20,
     include_decoys: bool = True,
+    enzyme: str = DEFAULT_ENZYME,
 ) -> list[PeptideCandidate]:
     """Build unmodified backbone candidates including directional truncations."""
+    enzyme = validate_enzyme(enzyme)
     digested: dict[tuple[str, int, int, str], str] = {
-        row: "fully_tryptic"
-        for row in digest_trypsin(
+        row: "fully_tryptic" if enzyme == DEFAULT_ENZYME else f"fully_enzymatic:{enzyme}"
+        for row in digest_enzyme(
             chains,
             max_missed_cleavages,
             min_length,
             max_length,
+            enzyme,
         )
     }
     for chain, start, end, sequence in list(digested):
@@ -584,7 +591,7 @@ def generate_sequence_inference_candidates(
         in sorted(digested.items())
     ]
     return targets + (
-        [_decoy(candidate) for candidate in targets]
+        [_decoy(candidate, enzyme) for candidate in targets]
         if include_decoys else []
     )
 
@@ -636,6 +643,77 @@ def _longest_run(values: set[int]) -> int:
     return longest
 
 
+def _prepared_observed_spectrum(
+    scan: LCMSSpectrumScan,
+) -> tuple[list[float], list[float], float]:
+    """Return one cached, m/z-sorted view of an observed MS2 spectrum.
+
+    The mzML files produced by ThermoRawFileParser are already sorted by m/z,
+    but synthetic and legacy inputs are not required to be.  Cache only a
+    lightweight view on the scan object so every candidate reuses the same
+    binary-search arrays without duplicating the common sorted input arrays.
+    """
+    cached = getattr(scan, "_lcms_observed_spectrum_cache", None)
+    if cached is not None:
+        return cached
+    mz_values = scan.mz_array
+    intensity_values = scan.intensity_array
+    if any(
+        float(mz_values[index]) > float(mz_values[index + 1])
+        for index in range(max(0, len(mz_values) - 1))
+    ):
+        pairs = sorted(
+            zip(mz_values, intensity_values),
+            key=lambda pair: float(pair[0]),
+        )
+        observed_mz = [float(pair[0]) for pair in pairs]
+        observed_intensity = [max(0.0, float(pair[1])) for pair in pairs]
+    else:
+        observed_mz = mz_values
+        if any(float(value) < 0.0 for value in intensity_values):
+            observed_intensity = [
+                max(0.0, float(value)) for value in intensity_values
+            ]
+        else:
+            observed_intensity = intensity_values
+    cached = (
+        observed_mz,
+        observed_intensity,
+        sum(float(value) for value in observed_intensity),
+    )
+    setattr(scan, "_lcms_observed_spectrum_cache", cached)
+    return cached
+
+
+def _group_ms2_scans_by_sample(
+    scans: list[LCMSSpectrumScan],
+    require_mz: bool = True,
+) -> tuple[dict[str, list[LCMSSpectrumScan]], dict[str, list[float]]]:
+    scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
+    for scan in scans:
+        if scan.ms_level != 2 or scan.precursor_mz is None:
+            continue
+        if require_mz and not scan.mz_array:
+            continue
+        scans_by_sample.setdefault(str(scan.sample_id), []).append(scan)
+    scan_rts: dict[str, list[float]] = {}
+    for sample_id, sample_scans in scans_by_sample.items():
+        sample_scans.sort(key=lambda scan: float(scan.rt))
+        scan_rts[sample_id] = [float(scan.rt) for scan in sample_scans]
+    return scans_by_sample, scan_rts
+
+
+def _scans_in_rt_window(
+    sample_scans: list[LCMSSpectrumScan],
+    scan_rts: list[float],
+    center_rt: float,
+    tolerance_min: float,
+) -> list[LCMSSpectrumScan]:
+    left = bisect_left(scan_rts, center_rt - max(0.0, tolerance_min))
+    right = bisect_right(scan_rts, center_rt + max(0.0, tolerance_min))
+    return sample_scans[left:right]
+
+
 def match_fragments(
     scan: LCMSSpectrumScan,
     candidate: PeptideCandidate,
@@ -645,9 +723,7 @@ def match_fragments(
     max_fragment_charge: int = 2,
     include_extended_fragments: bool = True,
 ) -> dict[str, object]:
-    pairs = sorted(zip(scan.mz_array, scan.intensity_array), key=lambda pair: pair[0])
-    observed_mz = [pair[0] for pair in pairs]
-    observed_intensity = [max(0.0, pair[1]) for pair in pairs]
+    observed_mz, observed_intensity, total_intensity = _prepared_observed_spectrum(scan)
     used: set[int] = set()
     matches: list[dict[str, object]] = []
     for label, theoretical_mz, series, ordinal in theoretical_fragments(
@@ -682,7 +758,6 @@ def match_fragments(
     }
     denominator = max(1, 2 * (len(candidate.sequence) - 1))
     coverage = len(positions) / denominator
-    total_intensity = sum(observed_intensity)
     explained_intensity = sum(observed_intensity[index] for index in used) / total_intensity if total_intensity else 0.0
     continuity = max(
         _longest_run({ordinal for series, ordinal in positions if series == "b"}),
@@ -1093,6 +1168,98 @@ def _infer_unidentified_ms1_groups(
     }
     sample_ids = [str(sample_id) for sample_id in payload.get("sample_ids") or []]
 
+    @dataclass
+    class PayloadSpectrumIndex:
+        scans: list[dict[str, object]]
+        rt_values: list[float]
+        mz_arrays: list[list[float]]
+        intensity_arrays: list[list[float]]
+
+    spectrum_indices: dict[str, PayloadSpectrumIndex] = {}
+
+    def load_spectrum_index(sample_id: str) -> PayloadSpectrumIndex:
+        key = str(sample_id)
+        cached = spectrum_indices.get(key)
+        if cached is not None:
+            return cached
+        if spectra_loader is None:
+            result = PayloadSpectrumIndex([], [], [], [])
+            spectrum_indices[key] = result
+            return result
+        spectra = sorted(
+            spectra_loader(key),
+            key=lambda scan: float(
+                scan.get("aligned_rt") or scan.get("rt") or 0.0
+            ),
+        )
+        mz_arrays: list[list[float]] = []
+        intensity_arrays: list[list[float]] = []
+        for scan in spectra:
+            mz_values = scan.get("mz") or []
+            intensity_values = scan.get("intensity") or []
+            if any(
+                float(mz_values[index]) > float(mz_values[index + 1])
+                for index in range(max(0, len(mz_values) - 1))
+            ):
+                pairs = sorted(
+                    zip(mz_values, intensity_values),
+                    key=lambda pair: float(pair[0]),
+                )
+                mz_values = [float(pair[0]) for pair in pairs]
+                intensity_values = [float(pair[1]) for pair in pairs]
+            mz_arrays.append(mz_values)
+            intensity_arrays.append(intensity_values)
+        result = PayloadSpectrumIndex(
+            scans=spectra,
+            rt_values=[
+                float(scan.get("aligned_rt") or scan.get("rt") or 0.0)
+                for scan in spectra
+            ],
+            mz_arrays=mz_arrays,
+            intensity_arrays=intensity_arrays,
+        )
+        spectrum_indices[key] = result
+        return result
+
+    def payload_target_intensity(
+        spectrum_index: PayloadSpectrumIndex,
+        scan_index: int,
+        targets: list[float],
+        tolerance: float | str = "ppm",
+    ) -> float:
+        mz_values = spectrum_index.mz_arrays[scan_index]
+        intensity_values = spectrum_index.intensity_arrays[scan_index]
+        ranges: list[tuple[int, int]] = []
+        for target in targets:
+            target_tolerance = (
+                max(0.02, target * 20.0 / 1_000_000.0)
+                if tolerance == "ppm"
+                else float(tolerance)
+            )
+            left = bisect_left(mz_values, target - target_tolerance)
+            right = bisect_right(mz_values, target + target_tolerance)
+            if left < right:
+                ranges.append((left, right))
+        if not ranges:
+            return 0.0
+        ranges.sort()
+        total = 0.0
+        merged_left, merged_right = ranges[0]
+        for left, right in ranges[1:]:
+            if left <= merged_right:
+                merged_right = max(merged_right, right)
+                continue
+            total += sum(
+                float(value)
+                for value in intensity_values[merged_left:merged_right]
+            )
+            merged_left, merged_right = left, right
+        total += sum(
+            float(value)
+            for value in intensity_values[merged_left:merged_right]
+        )
+        return total
+
     def source_observations(row: dict[str, object]) -> dict[str, dict[str, float]]:
         output: dict[str, dict[str, float]] = {}
         source_ids = (
@@ -1202,31 +1369,38 @@ def _infer_unidentified_ms1_groups(
     refined_envelopes: dict[str, dict[str, object]] = {}
 
     def resolve_isotope_envelope(
-        spectra: list[dict[str, object]],
-        scan_rts: list[float],
+        spectrum_index: PayloadSpectrumIndex,
         row: dict[str, object],
         center_rt: float,
         sample_id: str,
     ) -> dict[str, object] | None:
         target_mz = float(row.get("representative_mz") or 0.0)
-        left = bisect_left(scan_rts, center_rt - 0.10)
-        right = bisect_right(scan_rts, center_rt + 0.10)
-        local_scans = spectra[left:right]
-        if not local_scans:
+        left = bisect_left(spectrum_index.rt_values, center_rt - 0.10)
+        right = bisect_right(spectrum_index.rt_values, center_rt + 0.10)
+        if left >= right:
             return None
-        apex_scan = max(
-            local_scans,
-            key=lambda scan: sum(
-                float(intensity)
-                for mz, intensity in zip(scan.get("mz") or [], scan.get("intensity") or [])
-                if abs(float(mz) - target_mz) <= 0.65
+        apex_position = max(
+            range(left, right),
+            key=lambda position: payload_target_intensity(
+                spectrum_index,
+                position,
+                [target_mz],
+                tolerance=0.65,
             ),
         )
+        apex_scan = spectrum_index.scans[apex_position]
+        apex_mz_values = spectrum_index.mz_arrays[apex_position]
+        apex_intensity_values = spectrum_index.intensity_arrays[apex_position]
+        points_left = bisect_left(apex_mz_values, target_mz - 2.2)
+        points_right = bisect_right(apex_mz_values, target_mz + 2.2)
         points = sorted(
             (
                 (float(mz), float(intensity))
-                for mz, intensity in zip(apex_scan.get("mz") or [], apex_scan.get("intensity") or [])
-                if abs(float(mz) - target_mz) <= 2.2 and float(intensity) > 0.0
+                for mz, intensity in zip(
+                    apex_mz_values[points_left:points_right],
+                    apex_intensity_values[points_left:points_right],
+                )
+                if float(intensity) > 0.0
             ),
             key=lambda item: item[0],
         )
@@ -1336,11 +1510,7 @@ def _infer_unidentified_ms1_groups(
             )
             rows_by_strongest_sample.setdefault(str(strongest_sample), []).append(row)
         for sample_id, sample_rows in rows_by_strongest_sample.items():
-            spectra = sorted(
-                spectra_loader(sample_id),
-                key=lambda scan: float(scan.get("aligned_rt") or scan.get("rt") or 0.0),
-            )
-            scan_rts = [float(scan.get("aligned_rt") or scan.get("rt") or 0.0) for scan in spectra]
+            spectrum_index = load_spectrum_index(sample_id)
             for row in sample_rows:
                 feature_id = str(row.get("feature_group_id"))
                 center_rt = float(
@@ -1348,7 +1518,12 @@ def _infer_unidentified_ms1_groups(
                     or row.get("representative_rt")
                     or 0.0
                 )
-                envelope = resolve_isotope_envelope(spectra, scan_rts, row, center_rt, sample_id)
+                envelope = resolve_isotope_envelope(
+                    spectrum_index,
+                    row,
+                    center_rt,
+                    sample_id,
+                )
                 if envelope is not None:
                     refined_envelopes[feature_id] = envelope
 
@@ -1510,31 +1685,31 @@ def _infer_unidentified_ms1_groups(
             })
 
     def xic_evidence(
-        spectra: list[dict[str, object]],
-        scan_rts: list[float],
+        spectrum_index: PayloadSpectrumIndex,
         first_targets: list[float],
         second_targets: list[float],
         center_rt: float,
     ) -> tuple[float, float] | None:
-        left = bisect_left(scan_rts, center_rt - 0.40)
-        right = bisect_right(scan_rts, center_rt + 0.40)
-        local = spectra[left:right]
-        if len(local) < 5:
+        left = bisect_left(spectrum_index.rt_values, center_rt - 0.40)
+        right = bisect_right(spectrum_index.rt_values, center_rt + 0.40)
+        if right - left < 5:
             return None
         traces = ([], [])
-        for scan in local:
-            mz_values = scan.get("mz") or []
-            intensity_values = scan.get("intensity") or []
-            for trace, targets in zip(traces, (first_targets, second_targets)):
-                trace.append(sum(
-                    float(intensity)
-                    for mz, intensity in zip(mz_values, intensity_values)
-                    if any(
-                        abs(float(mz) - target_mz)
-                        <= max(0.02, target_mz * 20.0 / 1_000_000.0)
-                        for target_mz in targets
-                    )
-                ))
+        for scan_index in range(left, right):
+            traces[0].append(
+                payload_target_intensity(
+                    spectrum_index,
+                    scan_index,
+                    first_targets,
+                )
+            )
+            traces[1].append(
+                payload_target_intensity(
+                    spectrum_index,
+                    scan_index,
+                    second_targets,
+                )
+            )
         if any(max(trace, default=0.0) <= 0.0 or sum(value > 0.0 for value in trace) < 3 for trace in traces):
             return None
         transformed = [[math.sqrt(max(0.0, value)) for value in trace] for trace in traces]
@@ -1548,24 +1723,22 @@ def _infer_unidentified_ms1_groups(
         union = active_sets[0] | active_sets[1]
         overlap = len(active_sets[0] & active_sets[1]) / max(1, len(union))
         apex_indices = [max(range(len(trace)), key=trace.__getitem__) for trace in traces]
-        apex_delta = abs(float(local[apex_indices[0]].get("aligned_rt") or local[apex_indices[0]].get("rt") or 0.0) - float(local[apex_indices[1]].get("aligned_rt") or local[apex_indices[1]].get("rt") or 0.0))
+        apex_delta = abs(
+            spectrum_index.rt_values[left + apex_indices[0]]
+            - spectrum_index.rt_values[left + apex_indices[1]]
+        )
         return max(0.0, min(1.0, 0.82 * cosine_score + 0.18 * overlap)), apex_delta
 
     accepted_edges: list[dict[str, object]] = []
     if spectra_loader is not None and candidate_edges:
         row_by_id = {str(row.get("feature_group_id")): row for row in rows}
         for sample_id in sorted({str(edge["xic_sample_id"]) for edge in candidate_edges}):
-            spectra = sorted(
-                spectra_loader(sample_id),
-                key=lambda scan: float(scan.get("aligned_rt") or scan.get("rt") or 0.0),
-            )
-            scan_rts = [float(scan.get("aligned_rt") or scan.get("rt") or 0.0) for scan in spectra]
+            spectrum_index = load_spectrum_index(sample_id)
             for edge in (item for item in candidate_edges if str(item["xic_sample_id"]) == sample_id):
                 first = row_by_id[str(edge["first_id"])]
                 second = row_by_id[str(edge["second_id"])]
                 evidence = xic_evidence(
-                    spectra,
-                    scan_rts,
+                    spectrum_index,
                     [
                         float(value)
                         for value in dict(refined_envelopes.get(str(edge["first_id"])) or {}).get(
@@ -2316,6 +2489,137 @@ def _top_spectrum_peaks(scan: LCMSSpectrumScan, limit: int = 60) -> list[dict[st
     ]
 
 
+def _labeled_spectrum_peaks(
+    scan: LCMSSpectrumScan,
+    matches: list[dict[str, object]],
+    limit: int = 60,
+) -> list[dict[str, object]]:
+    """Return the top observed peaks with optional exploratory ion labels.
+
+    ``match_fragments`` indexes the prepared (m/z-sorted) spectrum, so this
+    helper intentionally uses the same prepared arrays.  It is used for
+    sub-threshold previews only; formal PSM serialization keeps its existing
+    path and confidence rules.
+    """
+    observed_mz, observed_intensity, _ = _prepared_observed_spectrum(scan)
+    labels = {
+        int(match["observed_index"]): str(match["label"])
+        for match in matches
+        if match.get("observed_index") is not None and match.get("label")
+    }
+    top_indices = sorted(
+        range(len(observed_mz)),
+        key=observed_intensity.__getitem__,
+        reverse=True,
+    )[:max(0, limit)]
+    selected_indices = set(top_indices) | set(labels)
+    return [
+        {
+            "mz": observed_mz[index],
+            "intensity": observed_intensity[index],
+            "label": labels.get(index, ""),
+        }
+        for index in sorted(selected_indices, key=observed_mz.__getitem__)
+    ]
+
+
+def _build_exploratory_psm(
+    scan: LCMSSpectrumScan,
+    candidate: PeptideCandidate,
+    isotope_offset: int,
+    fallback_charge: int | None,
+    relation_type: str,
+    precursor_tolerance_ppm: float,
+    fragment_tolerance_ppm: float,
+) -> dict[str, object] | None:
+    """Build a clearly non-identifying preview for a failed mass candidate.
+
+    This deliberately bypasses FDR and formal score thresholds.  It exists so
+    an analyst can see whether a rejected precursor has a few plausible b/y
+    ions; the result must never be used as an accepted PSM or quantitation
+    evidence.
+    """
+    if scan.precursor_mz is None or not scan.mz_array:
+        return None
+    charge = int(scan.precursor_charge or fallback_charge or 0)
+    if charge <= 0:
+        return None
+    neutral_mass = (
+        float(scan.precursor_mz) - PROTON
+    ) * charge - int(isotope_offset) * ISOTOPE_MASS_DIFF
+    precursor_error_ppm = (
+        (neutral_mass - candidate.neutral_mass)
+        / max(candidate.neutral_mass, 1e-12)
+        * 1_000_000.0
+    )
+    evidence = match_fragments(
+        scan,
+        candidate,
+        precursor_error_ppm,
+        precursor_tolerance_ppm,
+        fragment_tolerance_ppm,
+    )
+    matches = list(evidence.get("matched_fragments") or [])
+    by_positions = {
+        (str(match.get("series")), int(match.get("ordinal") or 0))
+        for match in matches
+        if str(match.get("series")) in {"b", "y"}
+    }
+    sequence_length = len(candidate.sequence)
+    by_coverage = len(by_positions) / max(1, 2 * (sequence_length - 1))
+    score = float(evidence.get("score") or 0.0)
+    exploratory_confidence = (
+        "medium"
+        if (
+            score >= 40.0
+            and len(matches) >= 6
+            and by_coverage >= 0.15
+            and float(evidence.get("explained_intensity") or 0.0) >= 0.15
+        )
+        else "low"
+    )
+    return {
+        "sample_id": scan.sample_id,
+        "scan_id": scan.scan_id,
+        "rt": scan.rt,
+        "precursor_mz": scan.precursor_mz,
+        "precursor_charge": charge,
+        "precursor_error_ppm": precursor_error_ppm,
+        "activation_method": scan.activation_method,
+        "collision_energy": scan.collision_energy,
+        "candidate_id": candidate.candidate_id,
+        "chain": candidate.chain,
+        "start": candidate.start,
+        "end": candidate.end,
+        "sequence": candidate.sequence,
+        "modification_text": candidate.modification_text,
+        "proteolysis": candidate.proteolysis,
+        "score": score,
+        "q_value": None,
+        "matched_ion_count": len(matches),
+        "matched_by_ion_count": len(by_positions),
+        "fragment_coverage": float(evidence.get("fragment_coverage") or 0.0),
+        "exploratory_by_coverage": by_coverage,
+        "explained_intensity": float(evidence.get("explained_intensity") or 0.0),
+        "ion_continuity": float(evidence.get("ion_continuity") or 0.0),
+        "feature_link_type": relation_type,
+        "feature_isotope_offset": int(isotope_offset),
+        "search_origin": "mass_candidate_exploratory_preview",
+        "exploratory_only": True,
+        "exploratory_confidence": exploratory_confidence,
+        "exploratory_note": (
+            "探索性 b/y 匹配，仅供参考；未通过正式 MS2 鉴定阈值，"
+            "不得作为序列确认或定量依据。"
+        ),
+        "matched_ion_labels": [
+            str(match.get("label"))
+            for match in matches
+            if match.get("label")
+        ],
+        "spectrum_peaks": _labeled_spectrum_peaks(scan, matches),
+    }
+
+
 def _merge_consensus_ms2(
     scans: list[LCMSSpectrumScan],
     fragment_tolerance_ppm: float,
@@ -2394,10 +2698,7 @@ def search_selected_feature_consensus_scans(
         if row.get("difference_type") in significant_types and str(row.get("feature_group_id")) not in excluded
     ]
     shifts = dict((payload.get("alignment") or {}).get("rt_shift_by_sample") or {})
-    scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
-    for scan in scans:
-        if scan.ms_level == 2 and scan.precursor_mz is not None and scan.mz_array:
-            scans_by_sample.setdefault(scan.sample_id, []).append(scan)
+    scans_by_sample, scan_rts_by_sample = _group_ms2_scans_by_sample(scans)
     synthetic_scans: list[LCMSSpectrumScan] = []
     metadata: dict[str, tuple[dict[str, object], list[LCMSSpectrumScan]]] = {}
     for feature in features:
@@ -2407,7 +2708,17 @@ def search_selected_feature_consensus_scans(
         local_shifts = dict(feature.get("rt_correction_by_sample") or {})
         for sample_id, sample_scans in scans_by_sample.items():
             selected: list[tuple[float, float, LCMSSpectrumScan]] = []
-            for scan in sample_scans:
+            center_rt = (
+                feature_rt
+                - float(shifts.get(sample_id) or 0.0)
+                - float(local_shifts.get(sample_id) or 0.0)
+            )
+            for scan in _scans_in_rt_window(
+                sample_scans,
+                scan_rts_by_sample[sample_id],
+                center_rt,
+                rt_tolerance_min,
+            ):
                 aligned_rt = scan.rt + float(shifts.get(sample_id) or 0.0) + float(local_shifts.get(sample_id) or 0.0)
                 rt_error = aligned_rt - feature_rt
                 if abs(rt_error) > rt_tolerance_min:
@@ -2504,14 +2815,7 @@ def search_component_consensus_scans(
     """
     excluded = {str(value) for value in (exclude_feature_ids or set())}
     shifts = dict((payload.get("alignment") or {}).get("rt_shift_by_sample") or {})
-    scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
-    for scan in scans:
-        if scan.ms_level == 2 and scan.precursor_mz is not None and scan.mz_array:
-            scans_by_sample.setdefault(str(scan.sample_id), []).append(scan)
-    for sample_scans in scans_by_sample.values():
-        sample_scans.sort(key=lambda scan: float(scan.rt))
-    for sample_scans in scans_by_sample.values():
-        sample_scans.sort(key=lambda scan: float(scan.rt))
+    scans_by_sample, scan_rts_by_sample = _group_ms2_scans_by_sample(scans)
 
     ordered_candidates = sorted(candidates, key=lambda candidate: candidate.neutral_mass)
     candidate_masses = [candidate.neutral_mass for candidate in ordered_candidates]
@@ -2642,7 +2946,17 @@ def search_component_consensus_scans(
                     dict(member.get("rt_correction_by_sample") or {}).get(sample_id)
                     or 0.0
                 )
-                for scan in sample_scans:
+                center_rt = (
+                    member_rt
+                    - float(shifts.get(sample_id) or 0.0)
+                    - local_shift
+                )
+                for scan in _scans_in_rt_window(
+                    sample_scans,
+                    scan_rts_by_sample[sample_id],
+                    center_rt,
+                    rt_tolerance_min,
+                ):
                     if (
                         member_charge > 0
                         and scan.precursor_charge
@@ -3375,10 +3689,7 @@ def search_component_sequence_tag_scans(
     """
     excluded = {str(value) for value in (exclude_feature_ids or set())}
     shifts = dict((payload.get("alignment") or {}).get("rt_shift_by_sample") or {})
-    scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
-    for scan in scans:
-        if scan.ms_level == 2 and scan.precursor_mz is not None and scan.mz_array:
-            scans_by_sample.setdefault(str(scan.sample_id), []).append(scan)
+    scans_by_sample, scan_rts_by_sample = _group_ms2_scans_by_sample(scans)
     candidates = [
         candidate for candidate in backbone_candidates
         if len(candidate.sequence) >= 6
@@ -3435,7 +3746,17 @@ def search_component_sequence_tag_scans(
                     )
                     or 0.0
                 )
-                for scan in sample_scans:
+                center_rt = (
+                    member_rt
+                    - float(shifts.get(sample_id) or 0.0)
+                    - local_shift
+                )
+                for scan in _scans_in_rt_window(
+                    sample_scans,
+                    scan_rts_by_sample[sample_id],
+                    center_rt,
+                    rt_tolerance_min,
+                ):
                     if (
                         member_charge > 0
                         and scan.precursor_charge
@@ -3899,10 +4220,7 @@ def search_feature_guided_scans(
         if row.get("difference_type") in significant_types and str(row.get("feature_group_id")) not in excluded
     ]
     shifts = dict((payload.get("alignment") or {}).get("rt_shift_by_sample") or {})
-    scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
-    for scan in scans:
-        if scan.ms_level == 2 and scan.precursor_mz is not None and scan.mz_array:
-            scans_by_sample.setdefault(scan.sample_id, []).append(scan)
+    scans_by_sample, scan_rts_by_sample = _group_ms2_scans_by_sample(scans)
     synthetic_scans: list[LCMSSpectrumScan] = []
     metadata: dict[str, tuple[dict[str, object], LCMSSpectrumScan]] = {}
     counter = 0
@@ -3913,10 +4231,12 @@ def search_feature_guided_scans(
         for sample_id, sample_scans in scans_by_sample.items():
             possible: list[tuple[float, float, LCMSSpectrumScan]] = []
             center_rt = feature_rt - float(shifts.get(sample_id) or 0.0) - float(local_shifts.get(sample_id) or 0.0)
-            candidate_scans = [
-                scan for scan in sample_scans
-                if abs(float(scan.rt) - center_rt) <= max(0.0, rt_tolerance_min)
-            ]
+            candidate_scans = _scans_in_rt_window(
+                sample_scans,
+                scan_rts_by_sample[sample_id],
+                center_rt,
+                rt_tolerance_min,
+            )
             for scan in candidate_scans:
                 aligned_rt = scan.rt + float(shifts.get(sample_id) or 0.0) + float(local_shifts.get(sample_id) or 0.0)
                 rt_error = aligned_rt - feature_rt
@@ -4250,12 +4570,7 @@ def search_feature_glycopeptide_scans(
         str(glycan["name"]): glycan for glycan in TARGETED_N_GLYCANS
     }
     shifts = dict((payload.get("alignment") or {}).get("rt_shift_by_sample") or {})
-    scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
-    for scan in scans:
-        if scan.ms_level == 2 and scan.precursor_mz is not None and scan.mz_array:
-            scans_by_sample.setdefault(str(scan.sample_id), []).append(scan)
-    for sample_scans in scans_by_sample.values():
-        sample_scans.sort(key=lambda scan: float(scan.rt))
+    scans_by_sample, scan_rts_by_sample = _group_ms2_scans_by_sample(scans)
 
     diagnostic_cache: dict[str, tuple[list[float], list[float], dict[str, object]]] = {}
     winners: list[dict[str, object]] = []
@@ -4276,9 +4591,12 @@ def search_feature_glycopeptide_scans(
                 - float(local_shifts.get(sample_id) or 0.0)
             )
             possible: list[tuple[tuple[float, float], LCMSSpectrumScan, int]] = []
-            for scan in sample_scans:
-                if abs(float(scan.rt) - center_rt) > max(0.0, rt_tolerance_min):
-                    continue
+            for scan in _scans_in_rt_window(
+                sample_scans,
+                scan_rts_by_sample[sample_id],
+                center_rt,
+                rt_tolerance_min,
+            ):
                 charge = int(scan.precursor_charge or 0)
                 if charge <= 0:
                     continue
@@ -4316,14 +4634,7 @@ def search_feature_glycopeptide_scans(
         for scan, isotope_offset in selected_scans:
             cached = diagnostic_cache.get(str(scan.scan_id))
             if cached is None:
-                observed_pairs = sorted(
-                    zip(scan.mz_array, scan.intensity_array),
-                    key=lambda pair: pair[0],
-                )
-                observed_mz = [float(pair[0]) for pair in observed_pairs]
-                observed_intensity = [
-                    max(0.0, float(pair[1])) for pair in observed_pairs
-                ]
+                observed_mz, observed_intensity, _ = _prepared_observed_spectrum(scan)
                 diagnostic = _targeted_glycan_diagnostic_evidence(
                     observed_mz,
                     observed_intensity,
@@ -4547,16 +4858,11 @@ def search_feature_open_mass_scans(
         and str(row.get("feature_group_id") or "") not in excluded
     ]
     shifts = dict((payload.get("alignment") or {}).get("rt_shift_by_sample") or {})
-    scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
-    for scan in scans:
-        if scan.ms_level == 2 and scan.precursor_mz is not None and scan.mz_array:
-            scans_by_sample.setdefault(str(scan.sample_id), []).append(scan)
-
-    for sample_scans in scans_by_sample.values():
-        sample_scans.sort(key=lambda scan: float(scan.rt))
+    scans_by_sample, scan_rts_by_sample = _group_ms2_scans_by_sample(scans)
 
     candidates = [candidate for candidate in backbone_candidates if len(candidate.sequence) >= 6]
     ordered = sorted(candidates, key=lambda candidate: candidate.neutral_mass)
+    ordered_masses = [candidate.neutral_mass for candidate in ordered]
     winners: list[dict[str, object]] = []
 
     for feature in features:
@@ -4572,10 +4878,12 @@ def search_feature_open_mass_scans(
         for sample_id, sample_scans in scans_by_sample.items():
             possible: list[tuple[tuple[float, float], LCMSSpectrumScan, int]] = []
             center_rt = feature_rt - float(shifts.get(sample_id) or 0.0) - float(local_shifts.get(sample_id) or 0.0)
-            candidate_scans = [
-                scan for scan in sample_scans
-                if abs(float(scan.rt) - center_rt) <= max(0.0, rt_tolerance_min)
-            ]
+            candidate_scans = _scans_in_rt_window(
+                sample_scans,
+                scan_rts_by_sample[sample_id],
+                center_rt,
+                rt_tolerance_min,
+            )
             for scan in candidate_scans:
                 aligned_rt = (
                     float(scan.rt)
@@ -4617,8 +4925,19 @@ def search_feature_open_mass_scans(
                 component_mass = (feature_mz - PROTON) * charge - isotope_offset * ISOTOPE_MASS_DIFF
                 if component_mass <= 0.0:
                     continue
+                candidate_left = bisect_left(
+                    ordered_masses,
+                    component_mass - maximum_mass_delta_da,
+                )
+                candidate_right = bisect_right(
+                    ordered_masses,
+                    max(
+                        component_mass - minimum_mass_delta_da,
+                        component_mass + minimum_absolute_delta_da,
+                    ),
+                )
                 local_candidates = [
-                    candidate for candidate in ordered
+                    candidate for candidate in ordered[candidate_left:candidate_right]
                     if minimum_mass_delta_da
                     <= component_mass - candidate.neutral_mass
                     <= maximum_mass_delta_da
@@ -4637,11 +4956,7 @@ def search_feature_open_mass_scans(
                 )
                 local_candidates = local_candidates[: max(48, max_screened_candidates * 2)]
                 optimistic: list[tuple[float, PeptideCandidate, float]] = []
-                observed_pairs = sorted(
-                    zip(scan.mz_array, scan.intensity_array), key=lambda pair: pair[0]
-                )
-                observed_mz = [float(pair[0]) for pair in observed_pairs]
-                observed_intensity = [max(0.0, float(pair[1])) for pair in observed_pairs]
+                observed_mz, observed_intensity, _ = _prepared_observed_spectrum(scan)
                 for candidate in local_candidates:
                     delta = component_mass - candidate.neutral_mass
                     screen = _screen_mass_offset_fragments(
@@ -5311,6 +5626,7 @@ def build_feature_ms2_evidence(
     rt_tolerance_min: float = 0.5,
     mz_tolerance_ppm: float = 20.0,
     isolation_padding_da: float = 0.02,
+    fragment_tolerance_ppm: float = 20.0,
 ) -> tuple[list[dict[str, object]], dict[str, int]]:
     features = sorted(
         list(payload.get("global_feature_groups") or []),
@@ -5318,10 +5634,10 @@ def build_feature_ms2_evidence(
         reverse=True,
     )
     shifts = dict((payload.get("alignment") or {}).get("rt_shift_by_sample") or {})
-    scans_by_sample: dict[str, list[LCMSSpectrumScan]] = {}
-    for scan in scans:
-        if scan.ms_level == 2 and scan.precursor_mz is not None:
-            scans_by_sample.setdefault(scan.sample_id, []).append(scan)
+    scans_by_sample, scan_rts_by_sample = _group_ms2_scans_by_sample(
+        scans,
+        require_mz=False,
+    )
     psms_by_feature: dict[str, list[dict[str, object]]] = {}
     for psm in psms:
         for link in psm.get("feature_links") or []:
@@ -5348,6 +5664,9 @@ def build_feature_ms2_evidence(
         key=lambda candidate: candidate.neutral_mass,
     )
     target_masses = [candidate.neutral_mass for candidate in ordered_targets]
+    candidate_by_id = {
+        candidate.candidate_id: candidate for candidate in ordered_targets
+    }
 
     def mass_hypotheses(feature_mz: float, charge: int | None, isotope_offset: int) -> list[dict[str, object]]:
         matches: list[dict[str, object]] = []
@@ -5370,6 +5689,54 @@ def build_feature_ms2_evidence(
                 })
         return sorted(matches, key=lambda row: abs(float(row["mass_error_ppm"])))[:5]
 
+    compact_psm_keys = (
+        "sample_id", "scan_id", "rt", "precursor_mz", "precursor_charge",
+        "chain", "start", "end", "sequence", "proteolysis",
+        "modification_text", "score", "q_value", "matched_ion_count",
+        "matched_by_ion_count", "fragment_coverage", "exploratory_by_coverage",
+        "explained_intensity", "feature_link_type", "feature_isotope_offset",
+        "search_origin", "spectrum_peaks", "feature_charge",
+        "component_group_id", "component_neutral_mass",
+        "component_source_scan_count", "component_source_scan_ids",
+        "component_scan_support_count", "component_member_support_count",
+        "component_charge_support_count", "component_source_member_ids",
+        "component_source_charge_states", "mass_delta", "backbone_neutral_mass",
+        "localized_mass_offset_site", "sequence_tag_length", "b_ion_longest_run",
+        "y_ion_longest_run", "complementary_ion_pair_count",
+        "candidate_score_margin", "sequence_inference_level",
+        "alternative_sequence_candidates", "glycan_name", "glycan_composition",
+        "glycan_site", "glycan_diagnostic_ion_count",
+        "glycan_diagnostic_intensity_fraction", "glycan_core_y_ion_count",
+        "glycan_core_y_type_count", "glycan_has_y1_support",
+        "glycan_hexnac_fragment_count", "exploratory_only",
+        "exploratory_confidence", "exploratory_note", "matched_ion_labels",
+    )
+
+    def compact_psm(row: dict[str, object] | None) -> dict[str, object] | None:
+        if row is None:
+            return None
+        return {key: row.get(key) for key in compact_psm_keys}
+
+    def coverage_scan_record(
+        candidate: tuple[tuple[float, float, float], LCMSSpectrumScan, str, int]
+        | None,
+    ) -> dict[str, object] | None:
+        if candidate is None:
+            return None
+        _, scan, relation_type, isotope_offset = candidate
+        return {
+            "sample_id": scan.sample_id,
+            "scan_id": scan.scan_id,
+            "rt": scan.rt,
+            "precursor_mz": scan.precursor_mz,
+            "precursor_charge": scan.precursor_charge,
+            "relation_type": relation_type,
+            "isotope_offset": isotope_offset,
+            "activation_method": scan.activation_method,
+            "collision_energy": scan.collision_energy,
+            "spectrum_peaks": _top_spectrum_peaks(scan),
+        }
+
     status_counts: dict[str, int] = {}
     evidence_rows: list[dict[str, object]] = []
     for rank, feature in enumerate(features, start=1):
@@ -5378,11 +5745,25 @@ def build_feature_ms2_evidence(
         feature_rt = float(feature.get("representative_rt") or 0.0)
         local_shifts = dict(feature.get("rt_correction_by_sample") or {})
         coverage_by_sample: dict[str, dict[str, object]] = {}
+        best_coverage_scan_by_sample: dict[
+            str,
+            tuple[tuple[float, float, float], LCMSSpectrumScan, str, int],
+        ] = {}
         best_coverage_scan: tuple[tuple[float, float, float], LCMSSpectrumScan, str, int] | None = None
         for sample_id, sample_scans in scans_by_sample.items():
             acquired = selected = isotope = 0
             best_sample_scan: tuple[tuple[float, float, float], LCMSSpectrumScan, str, int] | None = None
-            for scan in sample_scans:
+            center_rt = (
+                feature_rt
+                - float(shifts.get(sample_id) or 0.0)
+                - float(local_shifts.get(sample_id) or 0.0)
+            )
+            for scan in _scans_in_rt_window(
+                sample_scans,
+                scan_rts_by_sample[sample_id],
+                center_rt,
+                rt_tolerance_min,
+            ):
                 aligned_rt = scan.rt + float(shifts.get(sample_id) or 0.0) + float(local_shifts.get(sample_id) or 0.0)
                 rt_error = aligned_rt - feature_rt
                 if abs(rt_error) > rt_tolerance_min:
@@ -5421,6 +5802,8 @@ def build_feature_ms2_evidence(
                 "best_scan_id": best_sample_scan[1].scan_id if best_sample_scan else None,
                 "best_relation": best_sample_scan[2] if best_sample_scan else "none",
             }
+            if best_sample_scan is not None:
+                best_coverage_scan_by_sample[sample_id] = best_sample_scan
 
         feature_annotations = annotations_by_feature.get(feature_id) or []
         best_annotation = max(
@@ -5430,6 +5813,17 @@ def build_feature_ms2_evidence(
         )
         feature_psms = psms_by_feature.get(feature_id) or []
         best_psm = max(feature_psms, key=lambda row: float(row.get("score") or 0.0), default=None)
+        best_psm_by_sample = {
+            sample_id: max(sample_psms, key=lambda row: float(row.get("score") or 0.0))
+            for sample_id in sorted({
+                str(row.get("sample_id") or "") for row in feature_psms
+                if row.get("sample_id")
+            })
+            if (sample_psms := [
+                row for row in feature_psms
+                if str(row.get("sample_id") or "") == sample_id
+            ])
+        }
         feature_region_candidates = sorted(
             region_candidates_by_feature.get(feature_id) or [],
             key=lambda row: float(row.get("score") or 0.0),
@@ -5439,6 +5833,20 @@ def build_feature_ms2_evidence(
             feature_region_candidates[0]
             if feature_region_candidates else None
         )
+        best_region_candidate_by_sample = {
+            sample_id: max(
+                sample_candidates,
+                key=lambda row: float(row.get("score") or 0.0),
+            )
+            for sample_id in sorted({
+                str(row.get("sample_id") or "")
+                for row in feature_region_candidates if row.get("sample_id")
+            })
+            if (sample_candidates := [
+                row for row in feature_region_candidates
+                if str(row.get("sample_id") or "") == sample_id
+            ])
+        }
         annotation_confidence = str(
             best_annotation.get("confidence") or ""
         ) if best_annotation is not None else ""
@@ -5566,65 +5974,64 @@ def build_feature_ms2_evidence(
         else:
             peptide_likelihood = "undetermined"
             peptide_likelihood_reason = "target_ms2_evidence_unavailable_or_search_space_mismatch"
-        coverage_scan = None
-        if best_coverage_scan is not None:
-            _, scan, relation_type, isotope_offset = best_coverage_scan
-            coverage_scan = {
-                "sample_id": scan.sample_id,
-                "scan_id": scan.scan_id,
-                "rt": scan.rt,
-                "precursor_mz": scan.precursor_mz,
-                "precursor_charge": scan.precursor_charge,
-                "relation_type": relation_type,
-                "isotope_offset": isotope_offset,
-                "activation_method": scan.activation_method,
-                "collision_energy": scan.collision_energy,
-                "spectrum_peaks": _top_spectrum_peaks(scan),
-            }
-        compact_best_psm = None
-        if best_psm is not None:
-            compact_best_psm = {
-                key: best_psm.get(key)
-                for key in (
-                    "sample_id", "scan_id", "rt", "precursor_mz", "precursor_charge", "chain", "start", "end",
-                    "sequence", "modification_text", "score", "q_value", "matched_ion_count", "fragment_coverage",
-                    "explained_intensity", "feature_link_type", "feature_isotope_offset", "search_origin", "spectrum_peaks",
-                    "feature_charge", "component_group_id", "component_neutral_mass",
-                    "component_source_scan_count", "component_source_scan_ids",
-                    "component_scan_support_count", "component_member_support_count",
-                    "component_charge_support_count", "component_source_member_ids",
-                    "component_source_charge_states",
-                    "mass_delta", "backbone_neutral_mass",
-                    "localized_mass_offset_site", "sequence_tag_length",
-                    "b_ion_longest_run", "y_ion_longest_run",
-                    "complementary_ion_pair_count", "candidate_score_margin",
-                    "sequence_inference_level", "alternative_sequence_candidates",
-                    "glycan_name", "glycan_composition", "glycan_site",
-                    "glycan_diagnostic_ion_count",
-                    "glycan_diagnostic_intensity_fraction",
-                    "glycan_core_y_ion_count", "glycan_core_y_type_count",
-                    "glycan_has_y1_support", "glycan_hexnac_fragment_count",
+        coverage_scan = coverage_scan_record(best_coverage_scan)
+        coverage_scan_by_sample = {
+            sample_id: coverage_scan_record(candidate)
+            for sample_id, candidate in best_coverage_scan_by_sample.items()
+        }
+        exploratory_psm = None
+        if (
+            best_annotation is None
+            and best_region_candidate is None
+            and candidate_mass_hypotheses
+            and best_coverage_scan is not None
+        ):
+            _, exploratory_scan, exploratory_relation, exploratory_isotope_offset = (
+                best_coverage_scan
+            )
+            exploratory_hypothesis = candidate_mass_hypotheses[0]
+            exploratory_candidate = candidate_by_id.get(
+                str(exploratory_hypothesis.get("candidate_id") or "")
+            )
+            if exploratory_candidate is not None:
+                exploratory_psm = _build_exploratory_psm(
+                    exploratory_scan,
+                    exploratory_candidate,
+                    int(exploratory_isotope_offset),
+                    int(exploratory_hypothesis.get("charge") or 0),
+                    str(exploratory_relation),
+                    mz_tolerance_ppm,
+                    fragment_tolerance_ppm,
                 )
-            }
-        compact_region_candidate = None
-        if best_region_candidate is not None:
-            compact_region_candidate = {
-                key: best_region_candidate.get(key)
-                for key in (
-                    "sample_id", "scan_id", "rt", "precursor_mz",
-                    "precursor_charge", "chain", "start", "end", "sequence",
-                    "proteolysis", "modification_text", "score", "q_value",
-                    "matched_ion_count", "fragment_coverage",
-                    "explained_intensity", "feature_link_type",
-                    "search_origin", "spectrum_peaks", "component_group_id",
-                    "component_neutral_mass", "mass_delta",
-                    "backbone_neutral_mass", "localized_mass_offset_site",
-                    "sequence_tag_length", "b_ion_longest_run",
-                    "y_ion_longest_run", "complementary_ion_pair_count",
-                    "candidate_score_margin", "sequence_inference_level",
-                    "alternative_sequence_candidates",
+        exploratory_psm_by_sample: dict[str, dict[str, object]] = {}
+        if best_annotation is None and best_region_candidate is None:
+            for sample_id, sample_coverage in best_coverage_scan_by_sample.items():
+                _, sample_scan, sample_relation, sample_isotope_offset = sample_coverage
+                sample_hypotheses = mass_hypotheses(
+                    feature_mz,
+                    sample_scan.precursor_charge,
+                    sample_isotope_offset,
                 )
-            }
+                if not sample_hypotheses:
+                    continue
+                sample_candidate = candidate_by_id.get(
+                    str(sample_hypotheses[0].get("candidate_id") or "")
+                )
+                if sample_candidate is None:
+                    continue
+                sample_exploratory = _build_exploratory_psm(
+                    sample_scan,
+                    sample_candidate,
+                    int(sample_isotope_offset),
+                    int(sample_hypotheses[0].get("charge") or 0),
+                    str(sample_relation),
+                    mz_tolerance_ppm,
+                    fragment_tolerance_ppm,
+                )
+                if sample_exploratory is not None:
+                    exploratory_psm_by_sample[sample_id] = sample_exploratory
+        compact_best_psm = compact_psm(best_psm)
+        compact_region_candidate = compact_psm(best_region_candidate)
         evidence_rows.append({
             "rank": rank,
             "feature_group_id": feature_id,
@@ -5702,8 +6109,22 @@ def build_feature_ms2_evidence(
             "peptide_likelihood_reason": peptide_likelihood_reason,
             "coverage_by_sample": coverage_by_sample,
             "best_psm": compact_best_psm,
+            "best_psm_by_sample": {
+                sample_id: compact_psm(row)
+                for sample_id, row in best_psm_by_sample.items()
+            },
             "candidate_psm": compact_region_candidate,
+            "candidate_psm_by_sample": {
+                sample_id: compact_psm(row)
+                for sample_id, row in best_region_candidate_by_sample.items()
+            },
             "coverage_scan": coverage_scan,
+            "coverage_scan_by_sample": coverage_scan_by_sample,
+            "exploratory_psm": exploratory_psm,
+            "exploratory_psm_by_sample": {
+                sample_id: compact_psm(row)
+                for sample_id, row in exploratory_psm_by_sample.items()
+            },
         })
     return evidence_rows, status_counts
 

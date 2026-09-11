@@ -8,6 +8,7 @@ import csv
 import json
 import os
 import sqlite3
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -34,6 +35,9 @@ from core.lcms_msms import (
     search_selected_feature_consensus_scans,
 )
 from core.lcms_parser import read_mzml
+from core.lcms_enzymes import DEFAULT_ENZYME, ENZYMES
+from core.lcms_unimod import search_unimod_rescue
+from core.lcms_sample_prep import ALL_PREP_FIELDS, PREP_CHOICES, normalize_sample_prep, sample_prep_model, filter_linear_candidates
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--feature-sqlite", default="", help="Optional Peak-first SQLite for feature linking")
     parser.add_argument("--project-id", default="vedolizumab_msms")
+    parser.add_argument("--enzyme", choices=tuple(ENZYMES), default=DEFAULT_ENZYME)
+    for key, label in ALL_PREP_FIELDS.items():
+        parser.add_argument(f"--prep-{key}", choices=tuple(PREP_CHOICES[key]), default="unknown",
+                            help=label)
+    parser.add_argument("--disable-unimod-rescue", action="store_true",
+                        help="Disable the separate exploratory second pass (for controlled comparisons)")
     parser.add_argument("--max-missed-cleavages", type=int, default=2)
     parser.add_argument("--max-variable-modifications", type=int, default=2)
     parser.add_argument("--semitryptic-max-trim", type=int, default=2)
@@ -64,12 +74,26 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Parallel sample-level MS2 workers; 0 chooses one worker per sample.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.no_carbamidomethyl_cys:
+        if args.prep_alkylation not in {"unknown", "none"}:
+            parser.error("--no-carbamidomethyl-cys conflicts with the selected alkylation reagent")
+        args.prep_alkylation = "none"
+    args.sample_prep = normalize_sample_prep({key: getattr(args, f"prep_{key}") for key in ALL_PREP_FIELDS})
+    return args
 
 
 def emit_progress(fraction: float, stage: str) -> None:
     """Emit a machine-readable progress update for the desktop worker."""
     print(f"LCMS_PROGRESS\t{max(0.0, min(1.0, fraction)):.4f}\t{stage}", flush=True)
+
+
+def emit_timing(stage: str, started: float) -> None:
+    """Emit a lightweight stage timer for performance diagnostics."""
+    print(
+        f"LCMS_TIMING\t{stage}\t{time.perf_counter() - started:.3f}",
+        flush=True,
+    )
 
 
 def compact_psm(psm: dict[str, object]) -> dict[str, object]:
@@ -327,14 +351,14 @@ body{{margin:0;font:14px Arial,"Microsoft YaHei",sans-serif;color:#172033;backgr
 </main><script id="data" type="application/json">{data}</script><script>
   const DATA=JSON.parse(document.getElementById('data').textContent),$=id=>document.getElementById(id);let selected=-1,selectedFeature=-1;
   $('summary').innerHTML=`<span>${{DATA.samples.length}} samples</span><span>${{DATA.total_ms2_scans}} MS2 scans</span><span>${{DATA.standard_accepted_psms??DATA.total_accepted_psms}} standard PSMs</span><span>${{DATA.component_consensus_accepted_psms||0}} component-consensus PSMs</span><span>${{DATA.component_sequence_tag_accepted_psms||0}} backbone/tag PSMs</span><span>${{DATA.sequence_region_candidate_count||0}} sequence-region candidates</span><span>${{DATA.consensus_feature_accepted_psms||0}} single-Feature consensus PSMs</span><span>${{DATA.feature_guided_accepted_psms||0}} feature-guided PSMs</span><span>${{DATA.feature_glycopeptide_form_count||0}} targeted glycopeptide forms / ${{DATA.feature_glycopeptide_feature_count||0}} Features</span><span>${{DATA.feature_open_mass_accepted_psms||0}} feature open-mass PSMs</span><span>${{DATA.feature_evidence?.length||0}} significant MS1 Features</span><span>${{DATA.modified_peptide_findings?.length||0}} modified findings</span><span>${{DATA.peptide_form_comparisons?.length||0}} modification pairs</span><span>${{DATA.formal_modification_level_count||0}} formal modification levels</span>`;
-$('warnings').textContent=(DATA.warnings||[]).join('；');
+$('warnings').textContent=[...(DATA.warnings||[]),...(DATA.parameters?.sample_prep_model?.warnings||[])].join('；');
 const nice=(v,n=3)=>v==null?'':Number(v).toFixed(n);function rows(){{const q=$('filter').value.toLowerCase();return DATA.psms.map((p,i)=>[p,i]).filter(([p])=>!q||[p.sample_id,p.sequence,p.modification_text,p.feature_group_id].join(' ').toLowerCase().includes(q));}}
 const statusText={{identified_direct_precursor:'直接前体鉴定',identified_isotope_envelope:'同位素包络对应',identified_charge_state_envelope:'电荷态包络对应',tentative_component_consensus_identification:'组件多电荷/同位素联合推测',tentative_backbone_sequence_support:'未知质量偏移骨架序列推测',tentative_truncation_sequence_support:'截断骨架序列推测',tentative_sequence_region_candidate:'局部 b/y 序列区段候选',tentative_feature_consensus_identification:'单 Feature 共识谱推测',tentative_feature_guided_identification:'MS1 引导定向推测',tentative_feature_open_mass_identification:'单 Feature 开放质量搜索',tentative_feature_glycopeptide_identification:'差异 Feature 定向糖肽推测',low_evidence_sequence_candidate:'低证据序列候选（不替代 Unknown）',selected_precursor_unidentified:'已采集前体，未鉴定',coisolated_ms2_unresolved:'隔离窗覆盖，未定性',no_ms2_acquired:'未采集 MS2'}};
 const statusClass=s=>s==='identified_direct_precursor'?'direct':['identified_isotope_envelope','identified_charge_state_envelope'].includes(s)?'isotope':String(s||'').startsWith('tentative_')?'tentative':'unresolved';
 const effectiveFeatureStatus=f=>String(f?.confidence||'').startsWith('D_')?'low_evidence_sequence_candidate':f?.ms2_status;
 function featureRows(){{const q=$('featureFilter').value.toLowerCase();return (DATA.feature_evidence||[]).map((f,i)=>[f,i]).filter(([f])=>!q||[f.feature_group_id,f.sequence,f.modification,f.ms2_status,f.higher_abundance_sample,f.hypothesis].join(' ').toLowerCase().includes(q));}}
   function coverageText(f){{return Object.entries(f.coverage_by_sample||{{}}).map(([sample,v])=>`${{sample}}: window ${{v.isolation_window_scan_count}}, selected ${{v.selected_precursor_scan_count}}, isotope ${{v.selected_isotope_scan_count}}`).join('；');}}
-  function renderFeatures(){{const summary=DATA.feature_ms2_summary||{{}};$('featureSummary').textContent=Object.entries(summary).map(([k,v])=>`${{statusText[k]||k}} ${{v}}`).join('；');$('featureTable').innerHTML='<tr><th>rank</th><th>Feature</th><th>TIC peak</th><th>RT</th><th>true peak m/z</th><th>envelope m/z</th><th>MS1 type</th><th>fold</th><th>higher sample</th><th>MS2 status</th><th>sequence</th><th>modification / change</th><th>confidence</th><th>MS2 coverage</th><th>interpretation</th></tr>'+featureRows().map(([f,i])=>{{const s=effectiveFeatureStatus(f);return `<tr data-feature-index="${{i}}" class="${{i===selectedFeature?'selected':''}}"><td>${{f.rank}}</td><td>${{f.feature_group_id}}</td><td>${{f.parent_tic_peak_id||''}}</td><td>${{nice(f.representative_rt)}}</td><td>${{nice(f.true_peak_mz??f.representative_mz,5)}}</td><td>${{nice(f.envelope_representative_mz??f.true_peak_mz??f.representative_mz,5)}}</td><td>${{f.difference_type||''}}</td><td>${{nice(f.max_fold_change,2)}}</td><td>${{f.higher_abundance_sample||''}}</td><td class="${{statusClass(s)}}">${{statusText[s]||s}}</td><td>${{f.sequence||''}}</td><td>${{f.modification||''}}</td><td>${{f.confidence||''}}</td><td class="wrap">${{coverageText(f)}}</td><td class="wrap">${{f.hypothesis||''}}</td></tr>`;}}).join('');document.querySelectorAll('tr[data-feature-index]').forEach(tr=>tr.onclick=()=>{{selectedFeature=Number(tr.dataset.featureIndex);renderFeatures();const f=DATA.feature_evidence[selectedFeature],e=f.best_psm||f.candidate_psm||f.coverage_scan,s=[f.best_psm,f.candidate_psm,f.coverage_scan].find(item=>Array.isArray(item?.spectrum_peaks)&&item.spectrum_peaks.length)||e;if(e)draw({{...e,spectrum_peaks:s?.spectrum_peaks||[],spectrum_source_scan_id:s?.scan_id,feature_group_id:f.feature_group_id,hypothesis:f.hypothesis}});}});}}
+  function renderFeatures(){{const summary=DATA.feature_ms2_summary||{{}};$('featureSummary').textContent=Object.entries(summary).map(([k,v])=>`${{statusText[k]||k}} ${{v}}`).join('；');$('featureTable').innerHTML='<tr><th>rank</th><th>Feature</th><th>TIC peak</th><th>RT</th><th>true peak m/z</th><th>envelope m/z</th><th>MS1 type</th><th>fold</th><th>higher sample</th><th>MS2 status</th><th>sequence</th><th>modification / change</th><th>confidence</th><th>MS2 coverage</th><th>interpretation</th></tr>'+featureRows().map(([f,i])=>{{const s=effectiveFeatureStatus(f);return `<tr data-feature-index="${{i}}" class="${{i===selectedFeature?'selected':''}}"><td>${{f.rank}}</td><td>${{f.feature_group_id}}</td><td>${{f.parent_tic_peak_id||''}}</td><td>${{nice(f.representative_rt)}}</td><td>${{nice(f.true_peak_mz??f.representative_mz,5)}}</td><td>${{nice(f.envelope_representative_mz??f.true_peak_mz??f.representative_mz,5)}}</td><td>${{f.difference_type||''}}</td><td>${{nice(f.max_fold_change,2)}}</td><td>${{f.higher_abundance_sample||''}}</td><td class="${{statusClass(s)}}">${{statusText[s]||s}}</td><td>${{f.sequence||''}}</td><td>${{f.modification||''}}</td><td>${{f.confidence||''}}</td><td class="wrap">${{coverageText(f)}}</td><td class="wrap">${{f.hypothesis||''}}</td></tr>`;}}).join('');document.querySelectorAll('tr[data-feature-index]').forEach(tr=>tr.onclick=()=>{{selectedFeature=Number(tr.dataset.featureIndex);renderFeatures();const f=DATA.feature_evidence[selectedFeature],e=f.best_psm||f.candidate_psm||f.exploratory_psm||f.coverage_scan,s=[f.best_psm,f.candidate_psm,f.exploratory_psm,f.coverage_scan].find(item=>Array.isArray(item?.spectrum_peaks)&&item.spectrum_peaks.length)||e;if(e)draw({{...e,spectrum_peaks:s?.spectrum_peaks||[],spectrum_source_scan_id:s?.scan_id,feature_group_id:f.feature_group_id,hypothesis:f.exploratory_psm?.exploratory_note||f.hypothesis}});}});}}
   const formStatusText={{ms2_confirmed:'MS2确认',ms1_multi_charge_supported:'MS1多电荷态支持',ms1_candidate:'MS1候选',not_detected:'未检出'}};
   const directionText={{increased:'供试组修饰比升高',decreased:'供试组修饰比降低',stable:'修饰比基本不变',unavailable:'无法计算'}};
   function sampleMap(values,percent=false){{return Object.entries(values||{{}}).map(([sample,value])=>`${{sample}}: ${{value==null?'NA':percent?(Number(value)*100).toFixed(2)+'%':nice(value,4)}}`).join('；');}}
@@ -348,25 +372,30 @@ const originalDraw=draw;draw=function(p){{const fallback=(DATA.feature_evidence|
 function sampleEvidenceText(f){{return Object.entries(f.sample_evidence||{{}}).map(([sample,v])=>`${{sample}}: PSM ${{v.psm_count}}, best ${{nice(v.best_score,1)}}, z ${{(v.charge_states||[]).join('/')}}`).join('；');}}
 function renderModified(){{const findings=modifiedRows(),all=DATA.modified_peptide_findings||[];const linked=findings.filter(f=>f.evidence_scope==='differential_feature_linked').length,paired=findings.filter(f=>f.pairing_status==='paired_with_unmodified_form').length;$('modSummary').textContent=`共 ${{all.length}} 个修饰肽发现；当前显示 ${{findings.length}} 个，其中差异 Feature 关联 ${{linked}} 个、已配对 ${{paired}} 个。`;$('modTable').innerHTML='<tr><th>rank</th><th>sequence</th><th>modification</th><th>proteolysis</th><th>confidence</th><th>evidence</th><th>pairing</th><th>linked Features</th><th>MS1 direction</th><th>sample MS2 evidence</th></tr>'+findings.map(f=>`<tr data-mod-index="${{all.indexOf(f)}}"><td>${{f.rank}}</td><td>${{f.sequence}}</td><td>${{f.modification}}</td><td>${{f.proteolysis||''}}</td><td>${{f.confidence}}</td><td>${{f.evidence_scope}}</td><td>${{f.pairing_status}}</td><td class="wrap">${{(f.linked_feature_ids||[]).join(', ')}}</td><td>${{f.higher_abundance_sample?f.higher_abundance_sample+' high; fold '+nice(f.max_fold_change,2):''}}</td><td class="wrap">${{sampleEvidenceText(f)}}</td></tr>`).join('');document.querySelectorAll('tr[data-mod-index]').forEach(tr=>tr.onclick=()=>{{const f=all[Number(tr.dataset.modIndex)];if(f?.best_psm)draw(f.best_psm);}});}}
 function render(){{$('table').innerHTML='<tr><th>sample</th><th>scan</th><th>Feature</th><th>RT</th><th>m/z</th><th>z</th><th>sequence</th><th>proteolysis</th><th>modification</th><th>ppm</th><th>ions</th><th>coverage</th><th>score</th><th>q</th></tr>'+rows().map(([p,i])=>`<tr data-index="${{i}}" class="${{i===selected?'selected':''}}"><td>${{p.sample_id}}</td><td>${{p.scan_id}}</td><td>${{p.feature_group_id||''}}</td><td>${{nice(p.rt)}}</td><td>${{nice(p.precursor_mz,5)}}</td><td>${{p.precursor_charge}}</td><td>${{p.sequence}}</td><td>${{p.proteolysis||''}}</td><td>${{p.modification_text}}</td><td>${{nice(p.precursor_error_ppm,2)}}</td><td>${{p.matched_ion_count}}</td><td>${{nice(p.fragment_coverage,2)}}</td><td>${{nice(p.score,1)}}</td><td>${{nice(p.q_value,4)}}</td></tr>`).join('');document.querySelectorAll('tr[data-index]').forEach(tr=>tr.onclick=()=>{{selected=Number(tr.dataset.index);render();draw(DATA.psms[selected]);}});}}
-function draw(p){{const c=$('spectrum'),x=c.getContext('2d'),peaks=p.spectrum_peaks||[];x.clearRect(0,0,c.width,c.height);const sequence=p.sequence?`${{p.chain||''}}:${{p.start||''}}-${{p.end||''}} ${{p.sequence}} | ${{p.modification_text||''}}`:'未获得合格序列鉴定',glycan=p.glycan_name?` | 糖链诊断离子 ${{p.glycan_diagnostic_ion_count||0}} | 核心 Y 离子 ${{p.glycan_core_y_ion_count||0}} | HexNAc 保留碎片 ${{p.glycan_hexnac_fragment_count||0}}`:'';$('detail').textContent=`${{p.feature_group_id||''}} | ${{p.sample_id||''}} | ${{p.scan_id||''}} | precursor ${{nice(p.precursor_mz,5)}} z${{p.precursor_charge||''}} | ${{sequence}} | score ${{nice(p.score,1)}} | q ${{nice(p.q_value,4)}}${{glycan}}${{p.hypothesis?' | '+p.hypothesis:''}}`;if(!peaks.length)return;const pad={{l:65,r:20,t:20,b:45}},maxMz=Math.max(...peaks.map(v=>v.mz)),minMz=Math.min(...peaks.map(v=>v.mz)),maxI=Math.max(...peaks.map(v=>v.intensity));x.strokeStyle='#94a3b8';x.beginPath();x.moveTo(pad.l,pad.t);x.lineTo(pad.l,c.height-pad.b);x.lineTo(c.width-pad.r,c.height-pad.b);x.stroke();peaks.forEach(v=>{{const px=pad.l+(v.mz-minMz)/Math.max(1e-9,maxMz-minMz)*(c.width-pad.l-pad.r),py=c.height-pad.b-v.intensity/maxI*(c.height-pad.t-pad.b);x.strokeStyle=v.label?'#dc2626':'#475569';x.beginPath();x.moveTo(px,c.height-pad.b);x.lineTo(px,py);x.stroke();if(v.label){{x.fillStyle='#b91c1c';x.font='11px Arial';x.fillText(v.label,px+2,Math.max(12,py-3));}}}});x.fillStyle='#475569';x.fillText(nice(minMz,1),pad.l,c.height-18);x.fillText(nice(maxMz,1),c.width-pad.r-35,c.height-18);}}
+  function ionColor(label){{const text=String(label||'');if(/^b[0-9]/.test(text))return '#2563eb';if(/^y[0-9]/.test(text))return '#dc2626';return '#7c3aed';}}
+  function draw(p){{const c=$('spectrum'),x=c.getContext('2d'),peaks=p.spectrum_peaks||[];x.clearRect(0,0,c.width,c.height);const sequence=p.sequence?(p.exploratory_only?`探索性候选：${{p.chain||''}}:${{p.start||''}}-${{p.end||''}} ${{p.sequence}} | ${{p.modification_text||''}}`:`${{p.chain||''}}:${{p.start||''}}-${{p.end||''}} ${{p.sequence}} | ${{p.modification_text||''}}`):'未获得合格序列鉴定',glycan=p.glycan_name?` | 糖链诊断离子 ${{p.glycan_diagnostic_ion_count||0}} | 核心 Y 离子 ${{p.glycan_core_y_ion_count||0}} | HexNAc 保留碎片 ${{p.glycan_hexnac_fragment_count||0}}`:'';const preview=p.exploratory_only?` | 仅供参考（${{p.exploratory_confidence||'low'}}） | b/y ${{p.matched_by_ion_count??0}}/${{nice(p.exploratory_by_coverage??p.fragment_coverage,3)}} | 解释强度 ${{nice(p.explained_intensity,3)}}`:'';$('detail').textContent=`${{p.feature_group_id||''}} | ${{p.sample_id||''}} | ${{p.scan_id||''}} | precursor ${{nice(p.precursor_mz,5)}} z${{p.precursor_charge||''}} | ${{sequence}} | score ${{nice(p.score,1)}} | q ${{nice(p.q_value,4)}}${{preview}}${{glycan}}${{p.hypothesis?' | '+p.hypothesis:''}}`;if(!peaks.length)return;const pad={{l:65,r:20,t:20,b:45}},maxMz=Math.max(...peaks.map(v=>v.mz)),minMz=Math.min(...peaks.map(v=>v.mz)),maxI=Math.max(...peaks.map(v=>v.intensity));x.strokeStyle='#94a3b8';x.beginPath();x.moveTo(pad.l,pad.t);x.lineTo(pad.l,c.height-pad.b);x.lineTo(c.width-pad.r,c.height-pad.b);x.stroke();peaks.forEach(v=>{{const px=pad.l+(v.mz-minMz)/Math.max(1e-9,maxMz-minMz)*(c.width-pad.l-pad.r),py=c.height-pad.b-v.intensity/maxI*(c.height-pad.t-pad.b);const color=v.label?ionColor(v.label):'#475569';x.strokeStyle=color;x.beginPath();x.moveTo(px,c.height-pad.b);x.lineTo(px,py);x.stroke();if(v.label){{x.fillStyle=color;x.font='11px Arial';x.fillText(v.label,px+2,Math.max(12,py-3));}}}});x.fillStyle='#475569';x.fillText(nice(minMz,1),pad.l,c.height-18);x.fillText(nice(maxMz,1),c.width-pad.r-35,c.height-18);}}
   $('featureFilter').oninput=renderFeatures;$('pairFilter').oninput=renderPairs;$('levelFilter').oninput=renderLevels;$('modFilter').oninput=renderModified;$('filter').oninput=render;renderFeatures();renderPairs();renderLevels();renderModified();render();
 </script></body></html>"""
 
 
 def main() -> None:
     args = parse_args()
+    prep_model = sample_prep_model(args.sample_prep)
+    overall_started = time.perf_counter()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     emit_progress(0.01, "validate_fasta")
+    stage_started = time.perf_counter()
     chains = read_fasta(Path(args.fasta))
     candidates = generate_candidates(
         chains,
         max_missed_cleavages=args.max_missed_cleavages,
         min_length=args.min_peptide_length,
         max_length=args.max_peptide_length,
-        carbamidomethyl_cys=not args.no_carbamidomethyl_cys,
+        carbamidomethyl_cys=prep_model["carbamidomethyl_cys"],
         max_variable_modifications=max(0, args.max_variable_modifications),
         semitryptic_max_trim=max(0, args.semitryptic_max_trim),
+        enzyme=args.enzyme,
     )
     sequence_inference_candidates = generate_sequence_inference_candidates(
         chains,
@@ -376,13 +405,17 @@ def main() -> None:
         ),
         min_length=args.min_peptide_length,
         max_length=args.max_peptide_length,
-        carbamidomethyl_cys=not args.no_carbamidomethyl_cys,
+        carbamidomethyl_cys=prep_model["carbamidomethyl_cys"],
         max_terminal_trim=max(
             0,
             args.sequence_inference_max_terminal_trim,
         ),
+        enzyme=args.enzyme,
     )
+    candidates = filter_linear_candidates(candidates, args.sample_prep)
+    sequence_inference_candidates = filter_linear_candidates(sequence_inference_candidates, args.sample_prep)
     emit_progress(0.08, "target_candidates")
+    emit_timing("candidate_generation", stage_started)
     sample_summaries: list[dict[str, object]] = []
     accepted: list[dict[str, object]] = []
     sample_jobs = [
@@ -401,6 +434,7 @@ def main() -> None:
         len(sample_jobs),
         args.ms2_workers if args.ms2_workers > 0 else (os.cpu_count() or 1),
     ))
+    stage_started = time.perf_counter()
     if worker_count > 1:
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
             sample_results = list(executor.map(search_ms2_sample, sample_jobs))
@@ -410,17 +444,33 @@ def main() -> None:
         sample_summaries.append(dict(result["sample_summary"]))
         accepted.extend(list(result["accepted"]))
     emit_progress(0.44, "standard_ms2")
+    emit_timing("standard_ms2", stage_started)
 
     # The worker processes have already populated the per-level mzML cache.
     # Reload MS2 once in the parent for the cross-sample feature/rescue stages.
+    stage_started = time.perf_counter()
     all_ms2_scans = []
     for mzml_text in args.mzml:
         _, scans = read_mzml(Path(mzml_text), args.project_id, ms_levels=(2,))
         all_ms2_scans.extend(scans)
     total_ms2_scans = len(all_ms2_scans)
     emit_progress(0.50, "cross_sample_load")
+    emit_timing("cross_sample_load", stage_started)
     feature_sqlite = Path(args.feature_sqlite).resolve() if args.feature_sqlite else None
     feature_payload = read_peak_first_payload(feature_sqlite) if feature_sqlite else None
+    spectra_cache: dict[str, list[dict[str, object]]] = {}
+
+    def load_cached_spectra(sample_id: str) -> list[dict[str, object]]:
+        key = str(sample_id)
+        if key not in spectra_cache:
+            spectra_cache[key] = (
+                read_sqlite_spectra(feature_sqlite, key)
+                if feature_sqlite is not None
+                else []
+            )
+        return spectra_cache[key]
+
+    spectra_loader = load_cached_spectra if feature_sqlite is not None else None
     targeted: list[dict[str, object]] = []
     targeted_glycopeptides: list[dict[str, object]] = []
     open_mass: list[dict[str, object]] = []
@@ -432,20 +482,19 @@ def main() -> None:
     if feature_payload is not None:
         annotate_feature_groups(accepted, feature_payload)
         initial_annotations = differential_annotations(accepted)
-        spectra_loader = (
-            (lambda sample_id: read_sqlite_spectra(feature_sqlite, sample_id))
-            if feature_sqlite is not None else None
-        )
+        stage_started = time.perf_counter()
         provisional_component_groups = build_ms1_component_groups(
             feature_payload,
             initial_annotations,
             spectra_loader=spectra_loader,
         )
         emit_progress(0.56, "component_grouping")
+        emit_timing("provisional_component_grouping", stage_started)
         # Keep low-evidence (D) single-spectrum links eligible for component
         # consensus rescue. Only Features already supported at B/C confidence
         # should be excluded from the joint charge/isotope search.
         linked_feature_ids = component_search_excluded_feature_ids(initial_annotations)
+        stage_started = time.perf_counter()
         component_consensus = search_component_consensus_scans(
             feature_payload,
             all_ms2_scans,
@@ -457,12 +506,14 @@ def main() -> None:
             fdr_threshold=args.fdr,
         )
         emit_progress(0.63, "component_consensus")
+        emit_timing("component_consensus", stage_started)
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in component_consensus
             for link in psm.get("feature_links") or []
             if link.get("feature_group_id")
         )
+        stage_started = time.perf_counter()
         (
             component_sequence_tags,
             sequence_region_candidates,
@@ -479,12 +530,14 @@ def main() -> None:
             fdr_threshold=args.fdr,
         )
         emit_progress(0.70, "sequence_tag_search")
+        emit_timing("sequence_tag_search", stage_started)
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in component_sequence_tags
             for link in psm.get("feature_links") or []
             if link.get("feature_group_id")
         )
+        stage_started = time.perf_counter()
         consensus = search_selected_feature_consensus_scans(
             feature_payload,
             all_ms2_scans,
@@ -495,12 +548,14 @@ def main() -> None:
             fdr_threshold=args.fdr,
         )
         emit_progress(0.76, "feature_consensus")
+        emit_timing("feature_consensus", stage_started)
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in consensus
             for link in psm.get("feature_links") or []
             if link.get("feature_group_id")
         )
+        stage_started = time.perf_counter()
         targeted = search_feature_guided_scans(
             feature_payload,
             all_ms2_scans,
@@ -511,12 +566,14 @@ def main() -> None:
             fdr_threshold=args.fdr,
         )
         emit_progress(0.81, "feature_guided")
+        emit_timing("feature_guided", stage_started)
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in targeted
             for link in psm.get("feature_links") or []
             if link.get("feature_group_id")
         )
+        stage_started = time.perf_counter()
         targeted_glycopeptides = search_feature_glycopeptide_scans(
             feature_payload,
             all_ms2_scans,
@@ -527,12 +584,14 @@ def main() -> None:
             fdr_threshold=args.fdr,
         )
         emit_progress(0.86, "glycopeptide_search")
+        emit_timing("glycopeptide_search", stage_started)
         linked_feature_ids.update(
             str(link.get("feature_group_id"))
             for psm in targeted_glycopeptides
             for link in psm.get("feature_links") or []
             if link.get("feature_group_id")
         )
+        stage_started = time.perf_counter()
         open_mass = search_feature_open_mass_scans(
             feature_payload,
             all_ms2_scans,
@@ -545,6 +604,7 @@ def main() -> None:
             fdr_threshold=args.fdr,
         )
         emit_progress(0.90, "open_mass_search")
+        emit_timing("open_mass_search", stage_started)
     else:
         emit_progress(0.90, "no_feature_rescue")
     evidence = (
@@ -561,6 +621,7 @@ def main() -> None:
     feature_evidence: list[dict[str, object]] = []
     feature_ms2_summary: dict[str, int] = {}
     if feature_payload is not None:
+        stage_started = time.perf_counter()
         feature_evidence, feature_ms2_summary = build_feature_ms2_evidence(
             feature_payload,
             all_ms2_scans,
@@ -568,18 +629,22 @@ def main() -> None:
             annotations,
             candidates=candidates,
             sequence_region_candidates=sequence_region_candidates,
+            fragment_tolerance_ppm=args.fragment_ppm,
         )
+        emit_timing("feature_evidence", stage_started)
     emit_progress(0.93, "feature_evidence")
     peptide_form_comparisons: list[dict[str, object]] = []
     if feature_payload is not None and feature_sqlite is not None:
+        stage_started = time.perf_counter()
         peptide_form_comparisons = build_peptide_form_comparisons(
             feature_payload,
             evidence,
             annotations,
             candidates,
-            lambda sample_id: read_sqlite_spectra(feature_sqlite, sample_id),
+            spectra_loader,
             mz_tolerance_ppm=max(0.1, args.precursor_ppm * 2.0),
         )
+        emit_timing("peptide_form_comparisons", stage_started)
     modification_level_quantitation = build_modification_level_quantitation(
         peptide_form_comparisons
     )
@@ -593,17 +658,16 @@ def main() -> None:
         peptide_form_comparisons,
     )
     emit_progress(0.96, "modification_summary")
-    ms1_component_groups = (
-        build_ms1_component_groups(
+    if feature_payload is not None:
+        stage_started = time.perf_counter()
+        ms1_component_groups = build_ms1_component_groups(
             feature_payload,
             annotations,
-            spectra_loader=(
-                (lambda sample_id: read_sqlite_spectra(feature_sqlite, sample_id))
-                if feature_sqlite is not None else None
-            ),
+            spectra_loader=spectra_loader,
         )
-        if feature_payload is not None else []
-    )
+        emit_timing("final_component_grouping", stage_started)
+    else:
+        ms1_component_groups = []
     unidentified_reason_summary: dict[str, int] = {}
     for row in feature_evidence:
         reason = str(row.get("unidentified_reason") or "")
@@ -623,13 +687,17 @@ def main() -> None:
         "target_candidates": sum(not candidate.is_decoy for candidate in candidates),
         "decoy_candidates": sum(candidate.is_decoy for candidate in candidates),
         "parameters": {
+            "enzyme": args.enzyme,
+            "enzyme_label": ENZYMES[args.enzyme].label,
+            "sample_prep": args.sample_prep,
+            "sample_prep_model": prep_model,
             "max_missed_cleavages": args.max_missed_cleavages,
             "max_variable_modifications": args.max_variable_modifications,
             "semitryptic_max_trim": args.semitryptic_max_trim,
             "precursor_ppm": args.precursor_ppm,
             "fragment_ppm": args.fragment_ppm,
             "fdr": args.fdr,
-            "fixed_modification": "None" if args.no_carbamidomethyl_cys else "Carbamidomethyl@C",
+            "fixed_modification": prep_model["fixed_modification"],
             "variable_modifications": [
                 "Oxidation/Dioxidation@M/W", "Deamidation@N/Q", "Succinimide@N",
                 "PyroGlu@peptide N-terminus", "Glycation@K/N-terminus",
@@ -723,6 +791,21 @@ def main() -> None:
             for row in modification_level_quantitation
         ),
     }
+    if not args.disable_unimod_rescue and feature_payload is not None:
+        emit_progress(0.965, "unimod_second_pass")
+        stage_started = time.perf_counter()
+        report["unimod_rescue"] = search_unimod_rescue(
+            feature_evidence, all_ms2_scans, sequence_inference_candidates, chains,
+            precursor_ppm=max(0.1, args.precursor_ppm * 2.0),
+            fragment_ppm=max(0.1, args.fragment_ppm),
+            min_delta=args.sequence_inference_min_delta_da,
+            max_delta=args.sequence_inference_max_delta_da,
+            sample_prep=report["parameters"]["sample_prep"],
+            progress=lambda done, total: emit_progress(0.965 + 0.014 * done / max(1, total), "unimod_second_pass"),
+        )
+        emit_timing("unimod_second_pass", stage_started)
+    else:
+        report["unimod_rescue"] = {"enabled": False}
     json_path = output_dir / "lcms_msms_identifications.json"
     csv_path = output_dir / "lcms_msms_identifications.csv"
     feature_csv_path = output_dir / "lcms_ms1_ms2_feature_evidence.csv"
@@ -731,6 +814,7 @@ def main() -> None:
     modification_level_csv_path = output_dir / "lcms_modification_level_quantitation.csv"
     html_path = output_dir / "lcms_msms_report.html"
     emit_progress(0.98, "write_report")
+    stage_started = time.perf_counter()
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     write_csv(csv_path, evidence)
     write_feature_evidence_csv(feature_csv_path, feature_evidence)
@@ -740,6 +824,8 @@ def main() -> None:
     html_path.write_text(html_report(report), encoding="utf-8")
     if feature_sqlite:
         write_sqlite_artifact(feature_sqlite, report)
+    emit_timing("write_report", stage_started)
+    emit_timing("total_ms2_workflow", overall_started)
     emit_progress(1.0, "ms2_complete")
     print(f"MS2 scans: {total_ms2_scans}")
     print(f"MS2 sample workers: {worker_count}")

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -175,6 +178,7 @@ class LCMSMvpTests(unittest.TestCase):
         self.assertIn("container.scrollTop", PEAK_FIRST_TEMPLATE)
         self.assertIn("feature-analysis-grid", PEAK_FIRST_TEMPLATE)
         self.assertIn('id="featureMs2Canvas"', PEAK_FIRST_TEMPLATE)
+        self.assertIn('id="featureMapCanvas" class="feature-map" width="900" height="520"', PEAK_FIRST_TEMPLATE)
         self.assertIn("function ensureMsmsData", PEAK_FIRST_TEMPLATE)
         self.assertNotIn('id="globalOpenModificationModule"', PEAK_FIRST_TEMPLATE)
         self.assertNotIn("function renderGlobalOpenModifications", PEAK_FIRST_TEMPLATE)
@@ -189,6 +193,15 @@ class LCMSMvpTests(unittest.TestCase):
         self.assertIn("isotope fit ${nice(isotopeFit,2)}", PEAK_FIRST_TEMPLATE)
         self.assertIn('"monoisotope_corrected"', PEAK_FIRST_TEMPLATE)
         self.assertIn("function drawFeatureMs2", PEAK_FIRST_TEMPLATE)
+        self.assertIn('id="featureMs2Sample"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("自动（最高评分）", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function featureMs2EvidenceSelection", PEAK_FIRST_TEMPLATE)
+        self.assertIn("best_psm_by_sample", PEAK_FIRST_TEMPLATE)
+        self.assertIn("不会自动回退显示另一个样本的谱图", PEAK_FIRST_TEMPLATE)
+        self.assertIn('id="globalFeatureSearch"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("function globalFeatureMatchesSearch", PEAK_FIRST_TEMPLATE)
+        self.assertIn("feature?.exploratory_psm", PEAK_FIRST_TEMPLATE)
+        self.assertIn("探索性 b/y（仅供参考）", PEAK_FIRST_TEMPLATE)
         self.assertIn('queryParams.get("feature_group_id")', PEAK_FIRST_TEMPLATE)
         self.assertIn("b ions", PEAK_FIRST_TEMPLATE)
         self.assertIn("y ions", PEAK_FIRST_TEMPLATE)
@@ -241,6 +254,141 @@ class LCMSMvpTests(unittest.TestCase):
         self.assertIn('pdbId:"5I1C"', PEAK_FIRST_TEMPLATE)
         self.assertIn("同源模板，非药物精确结构", PEAK_FIRST_TEMPLATE)
         self.assertNotIn("colored bands are sample-specific integration windows", PEAK_FIRST_TEMPLATE)
+
+    def test_peak_first_plot_interactions_avoid_full_report_redraws(self) -> None:
+        self.assertIn("function drawPlotForKind", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function schedulePlotDraw", PEAK_FIRST_TEMPLATE)
+        self.assertIn('schedulePlotDraw("chrom")', PEAK_FIRST_TEMPLATE)
+        self.assertIn('schedulePlotDraw("detail")', PEAK_FIRST_TEMPLATE)
+        self.assertIn('schedulePlotDraw("xic")', PEAK_FIRST_TEMPLATE)
+        self.assertIn('schedulePlotDraw("featureMap")', PEAK_FIRST_TEMPLATE)
+        self.assertIn('ctx.drawImage(dragSnapshot,0,0)', PEAK_FIRST_TEMPLATE)
+        self.assertIn("requestAnimationFrame(paintDragBox)", PEAK_FIRST_TEMPLATE)
+        self.assertNotIn("drawAll(); drawDragBox", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function featureLookupIndex", PEAK_FIRST_TEMPLATE)
+        self.assertIn("function ms2EvidenceIndex", PEAK_FIRST_TEMPLATE)
+        self.assertIn("lookupCache.sequenceLocations", PEAK_FIRST_TEMPLATE)
+
+    def test_global_feature_search_matches_feature_ids_and_sequences(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required to execute the embedded Feature search helper")
+        start = PEAK_FIRST_TEMPLATE.index("function globalFeatureSearchValues")
+        end = PEAK_FIRST_TEMPLATE.index("const residueCode", start)
+        helper_source = PEAK_FIRST_TEMPLATE[start:end]
+        setup = """
+function featureGroupIds(item){return [item.feature_group_id,item.component_primary_feature_id].filter(Boolean).map(String);}
+function evidenceForFeatureIds(){return [{feature_group_id:"TICP_0050_FG_0006",sequence:"SSQSLAKSYGNTYLSWYLQKPGQSPQLLIYGISNR",modification:"Deamidation@Q1"}];}
+function componentCandidateEvidence(){return null;}
+const component={component_group_id:"COMP_1",component_label:"COMP_1",parent_tic_peak_id:"TICP_0050",members:[{feature_group_id:"TICP_0050_FG_0006"}]};
+result=[globalFeatureMatchesSearch(component,"FG_0006"),globalFeatureMatchesSearch(component,"SSQSLAKSYGNTY"),globalFeatureMatchesSearch(component,"NO_MATCH")];
+"""
+        script = (
+            "const vm = require('vm');\n"
+            f"const source = {json.dumps(setup + helper_source)};\n"
+            "const context = {};\n"
+            "vm.runInNewContext(source, context);\n"
+            "process.stdout.write(JSON.stringify(context.result));\n"
+        )
+        completed = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(completed.stdout), [True, True, False])
+
+    def test_feature_selection_links_to_the_matching_modification_quantitation_row(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required to execute the embedded modification-link helpers")
+        start = PEAK_FIRST_TEMPLATE.index("function modFormKey")
+        end = PEAK_FIRST_TEMPLATE.index("function modProteolyticFamilyForQuantitation", start)
+        helper_source = PEAK_FIRST_TEMPLATE[start:end]
+        setup = """
+const state = {selectedFeatureGroupId: "FG_1", msms: {modification_level_quantitation: [{
+  quantitation_id: "MODLEVEL_1", rank: 1, sequence: "DTLMISR", forms: [
+    {form_id: "unmodified", modification: "Unmodified", included_in_denominator: true, relative_level_by_sample: {A: 0.8, B: 0.7}, linked_feature_ids: ["FG_1"], neutral_mass: 834.4268, ms2_confidence: "B_high"},
+    {form_id: "oxidized", modification: "Oxidation@4", included_in_denominator: true, relative_level_by_sample: {A: 0.2, B: 0.3}, linked_feature_ids: ["FG_1"], neutral_mass: 850.4219, ms2_confidence: "B_high", candidate_ids: ["DTLMISR:Oxidation@4"]}
+  ]
+}]}};
+function selectedComponentFeatureIds(){return new Set(["FG_1"]);}
+function selectedPair(){return {reference: "A", test: "B"};}
+function featureItemById(){return {component_neutral_mass: 850.4219};}
+function ms2EvidenceIndex(){return new Map([["FG_1", [{feature_group_id: "FG_1", sequence: "DTLMISR", modification: "Oxidation@4", best_psm: {candidate_id: "DTLMISR:Oxidation@4", neutral_mass: 850.4219}}]]]);}
+"""
+        probe = 'result = modificationFormTargetForFeature("FG_1").formKey;'
+        script = (
+            "const vm = require('vm');\n"
+            f"const source = {json.dumps(setup + helper_source + probe)};\n"
+            "const context = {};\n"
+            "vm.runInNewContext(source, context);\n"
+            "process.stdout.write(JSON.stringify(context.result));\n"
+        )
+        completed = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(completed.stdout), "MODLEVEL_1::oxidized")
+        self.assertIn("function linkFeatureToModificationQuantitation", PEAK_FIRST_TEMPLATE)
+        self.assertIn("data-mod-form-row-key", PEAK_FIRST_TEMPLATE)
+        self.assertNotIn('scrollToModule("modificationQuantitationModule")', PEAK_FIRST_TEMPLATE)
+        self.assertIn('container.scrollTop=Math.max(0,container.scrollTop+', PEAK_FIRST_TEMPLATE)
+        self.assertIn("background:#f3f7ff; box-shadow:none", PEAK_FIRST_TEMPLATE)
+        self.assertNotIn("box-shadow:inset 3px 0 #2563eb", PEAK_FIRST_TEMPLATE)
+        self.assertIn("const modificationLinkPromise=!preserveModificationContext&&state.selectedFeatureGroupId?linkFeatureToModificationQuantitation", PEAK_FIRST_TEMPLATE)
+        self.assertIn("await modificationLinkPromise", PEAK_FIRST_TEMPLATE)
+        self.assertIn("selectMappedFeature(element.dataset.overlapFeatureId)", PEAK_FIRST_TEMPLATE)
+
+    def test_plot_reset_buttons_preserve_the_page_scroll_position(self) -> None:
+        for button_id in ["resetChrom", "resetDetail", "resetXic", "resetFeatureMap"]:
+            self.assertIn(f'id="{button_id}" type="button"', PEAK_FIRST_TEMPLATE)
+        self.assertIn("function runWithoutPageScroll", PEAK_FIRST_TEMPLATE)
+        self.assertIn("event?.preventDefault();event?.stopPropagation()", PEAK_FIRST_TEMPLATE)
+        self.assertIn("window.scrollTo(left,top)", PEAK_FIRST_TEMPLATE)
+        self.assertIn('$("resetDetail").onclick=event=>runWithoutPageScroll', PEAK_FIRST_TEMPLATE)
+
+    def test_modification_form_colors_are_shared_across_sequences_and_scoped_to_group(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required to execute the embedded report color helpers")
+        start = PEAK_FIRST_TEMPLATE.index("function modificationFormColorKey")
+        end = PEAK_FIRST_TEMPLATE.index("function modEvaluateItem", start)
+        helper_source = PEAK_FIRST_TEMPLATE[start:end]
+        probe = """
+const palette = ["blue", "orange", "green"];
+const items = [
+  {forms: [
+    {label: "未修饰", modification: "Unmodified", is_unmodified: true},
+    {label: "PyroGlu-Q@1", modification: "PyroGlu-Q@1", is_unmodified: false}
+  ]},
+  {forms: [
+    {label: "C端 Lys 保留", modification: "Unmodified", is_unmodified: true},
+    {label: "PyroGlu-Q@1", modification: "PyroGlu-Q@1", is_unmodified: false}
+  ]}
+];
+const groupEntry = {kind: "group", members: items};
+const otherGroupEntry = {kind: "group", members: [{forms: [
+  {label: "未修饰", modification: "Unmodified", is_unmodified: true},
+  {label: "Deamidation@Q1", modification: "Deamidation@Q1", is_unmodified: false}
+]}]};
+const colorMap = modificationFormColorMapForEntry(groupEntry, palette);
+const otherColorMap = modificationFormColorMapForEntry(otherGroupEntry, palette);
+result = [
+  modificationFormColor(items[0].forms[0], colorMap, palette),
+  modificationFormColor(items[1].forms[0], colorMap, palette),
+  modificationFormColor(items[0].forms[1], colorMap, palette),
+  modificationFormColor(items[1].forms[1], colorMap, palette),
+  modificationFormColor(otherGroupEntry.members[0].forms[0], otherColorMap, palette),
+  modificationFormColor(otherGroupEntry.members[0].forms[1], otherColorMap, palette)
+];
+"""
+        script = (
+            "const vm = require('vm');\n"
+            f"const source = {json.dumps(helper_source)};\n"
+            "const context = {};\n"
+            f"vm.runInNewContext(source + {json.dumps(probe)}, context);\n"
+            "process.stdout.write(JSON.stringify(context.result));\n"
+        )
+        completed = subprocess.run(
+            [node, "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), ["blue", "blue", "orange", "orange", "blue", "orange"])
 
     def test_mock_raw_parser_creates_scan_level_arrays(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

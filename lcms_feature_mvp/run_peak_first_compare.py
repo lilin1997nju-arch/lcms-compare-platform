@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -140,6 +141,9 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .report-submodule { min-width:0; }
     #mzXicSection.single-module .xic-grid { grid-template-columns:1fr; }
     #globalFeatureTable th.global-component-column, #globalFeatureTable td.global-component-column { width:350px; min-width:350px; max-width:350px; white-space:normal; overflow-wrap:anywhere; word-break:break-word; vertical-align:top; }
+    .feature-list-search { margin-top:10px; margin-bottom:10px; }
+    .feature-list-search input[type="search"] { min-width:280px; }
+    .feature-list-search-info { margin-left:auto; }
     .controls label { display:inline-flex; gap:5px; align-items:center; color:#536a86; font-size:11px; font-weight:650; }
     button, select, input { border:1px solid #cfdcea; border-radius:9px; padding:8px 10px; color:var(--ink); font:inherit; font-size:12px; background:#fff; outline:none; transition:border-color .18s ease,box-shadow .18s ease,background .18s ease,transform .18s ease; }
     button { cursor:pointer; font-weight:700; }
@@ -163,9 +167,11 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .feature-map { height:auto; }
     .feature-analysis-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px; align-items:start; }
     .feature-analysis-pane { min-width:0; }
-    .feature-ms2-heading { display:flex; gap:10px; align-items:center; justify-content:space-between; margin-bottom:8px; }
+    .feature-ms2-heading { display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; margin-bottom:8px; }
     .feature-ms2-heading h3 { margin:0; color:#294866; font-size:13px; }
     .feature-ms2-heading a { color:#205ab6; font-size:11px; }
+    .feature-ms2-sample { display:inline-flex; gap:6px; align-items:center; color:#536a86; font-size:11px; font-weight:700; }
+    .feature-ms2-sample select { min-width:150px; max-width:260px; }
     .feature-ms2-detail { min-height:38px; margin-bottom:8px; padding:9px 11px; color:#536a86; font-size:11px; line-height:1.5; border:1px solid #e3ebf4; border-radius:10px; background:#f8fafd; }
     .feature-ms2-status { display:inline-block; margin-right:6px; padding:2px 7px; border-radius:10px; background:#eef2ff; color:#344054; font-weight:700; }
     .feature-ms2-status.identified { background:#e7f8f0; color:#087b55; }
@@ -230,7 +236,11 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .mod-form-link { padding:0; border:0; color:#175cd3; background:transparent; font:inherit; text-align:left; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; cursor:pointer; }
     .mod-form-link:hover { color:#0b4cac; }
     .mod-form-link-count { flex:0 0 auto; margin-left:3px; color:#667085; font-size:9px; white-space:nowrap; }
-    .mod-form-matrix tr.mod-form-selected td { background:#eef6ff; box-shadow:inset 0 1px #b9d4fb,inset 0 -1px #b9d4fb; }
+    .mod-form-matrix tr.mod-form-selected { position:relative; z-index:1; box-shadow:0 3px 10px rgba(37,99,235,.14); }
+    .mod-form-matrix tr.mod-form-selected td { background:#eef6ff; box-shadow:none; }
+    .mod-quant-table tr.mod-quantitation-selected { position:relative; z-index:1; box-shadow:0 4px 12px rgba(37,99,235,.12); }
+    .mod-quant-table tr.mod-quantitation-selected > td { background:#f3f7ff; box-shadow:none; }
+    .mod-quant-table tr.mod-quantitation-selected .mod-quant-event { color:#175cd3; }
     .mod-delta-up { color:#b42318; font-weight:750; }
     .mod-delta-down { color:#175cd3; font-weight:750; }
     .mod-delta-stable { color:#667085; }
@@ -426,7 +436,7 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
       <label><input type="checkbox" id="showAligned" checked> 使用对齐 RT</label>
       <label><input type="checkbox" id="showLocalPeakAligned" checked> 使用局部峰 RT 校正</label>
       <label>纵向错位 <input id="offset" type="range" min="0" max="1.2" step="0.05" value="0"></label>
-      <button id="resetChrom">重置视图</button>
+      <button id="resetChrom" type="button">重置视图</button>
       <label>平移 <input id="chromPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
     </div>
     <div id="chromLegend" class="chrom-legend" aria-label="TIC 图例"></div>
@@ -440,7 +450,7 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     <div class="peak-inspection-pane" id="spectrumModule">
     <h3>汇总质谱</h3>
     <div class="controls">
-      <button id="resetDetail">重置质谱视图</button>
+      <button id="resetDetail" type="button">重置质谱视图</button>
       <label>平移 <input id="detailPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
       <span id="featureInfo" class="note"></span>
     </div>
@@ -467,8 +477,8 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
       <div id="xicModule" class="report-submodule">
         <h3>XIC 定量确认</h3>
         <div class="controls">
-          <button id="resetXic">重置 XIC 视图</button>
-          <button id="toggleXicFull">显示整体 XIC</button>
+          <button id="resetXic" type="button">重置 XIC 视图</button>
+          <button id="toggleXicFull" type="button">显示整体 XIC</button>
           <label>平移 <input id="xicPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
       </div>
       <div id="xicLegend" class="chrom-legend" aria-label="XIC 图例"></div>
@@ -485,6 +495,11 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
       <span class="module-collapse-indicator">⌃</span>
     </div>
     <div class="note">MS2 已定性肽段形式和严格 MS1 推断的未知成分分别只排序一次。MS1 推断要求中性质量一致、共同洗脱、XIC 形状相关且样本变化方向一致，但不等同于肽段定性。点击 ▸ 可查看成分内的各个 Feature。</div>
+    <div class="controls feature-list-search">
+      <label>搜索 Feature / 序列 <input id="globalFeatureSearch" type="search" placeholder="输入编号或序列（支持部分匹配）" autocomplete="off"></label>
+      <button id="clearGlobalFeatureSearch" type="button">清除</button>
+      <span id="globalFeatureSearchInfo" class="note feature-list-search-info"></span>
+    </div>
     <div class="scroll"><table id="globalFeatureTable"></table></div>
   </section>
 
@@ -495,7 +510,7 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
       <label>比较样本 <select id="featureMapTest"></select></label>
       <button id="swapFeatureMapSamples">交换</button>
       <label>颜色模式 <select id="featureMapMode"><option value="direction">差异方向</option><option value="magnitude">倍数大小</option></select></label>
-      <button id="resetFeatureMap">重置图形视图</button>
+      <button id="resetFeatureMap" type="button">重置图形视图</button>
       <label>平移 <input id="featureMapPan" class="pan" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
       <span id="featureMapPairLegend" class="pair-legend note"></span>
       <span id="featureMapInfo" class="note"></span>
@@ -503,12 +518,19 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     <div class="feature-analysis-grid">
       <div class="feature-analysis-pane feature-map-pane">
         <div id="featureMapLegend" class="feature-map-legend" aria-label="Heatmap color scale"></div>
-        <canvas id="featureMapCanvas" class="feature-map" width="900" height="430"></canvas>
+        <canvas id="featureMapCanvas" class="feature-map" width="900" height="520"></canvas>
       </div>
       <div class="feature-analysis-pane">
         <div class="feature-ms2-heading">
           <h3>当前成分的 MS/MS 谱图</h3>
+          <label class="feature-ms2-sample">显示样本
+            <select id="featureMs2Sample" aria-label="切换 MS/MS 谱图样本"><option value="">自动（最高评分）</option></select>
+          </label>
         </div>
+        <label class="note">证据来源
+          <select id="featureMs2Evidence" aria-label="切换原有证据与 Unimod 探索候选"><option value="">原有证据</option></select>
+        </label>
+        <div id="featureMs2Unimod" class="note" hidden></div>
         <div id="featureMs2Detail" class="feature-ms2-detail">请从 Feature 图或差异 Feature 列表中选择一个成分。</div>
         <canvas id="featureMs2Canvas" width="900" height="430"></canvas>
         <div id="featureMs2Info" class="note"></div>
@@ -571,7 +593,7 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
 <script>
 let DATA = null;
 let COMPARISONS = [];
-let state = { comparison:null, activeModuleId:"chromModule", selectedPeakId:null, selectedMz:null, selectedFeatureRt:null, selectedFeatureGroupId:null, selectedModificationFormKey:null, selectedModificationFormContext:null, scrollGlobalSelectionIntoView:false, chromZoom:null, detailZoom:null, xicZoom:null, xicFull:true, xic:null, xicLoading:false, xicRequestId:0, featureMapZoom:null, pairReference:null, pairTest:null, featureMapMode:"direction", globalSort:{key:"ranking_score",dir:"desc"}, mzSort:{key:"ranking_score",dir:"desc"}, expandedComponents:new Set(), expandedModificationFamilies:new Set(), expandedProteolyticFamilies:new Set(), modQuantViewMode:"composition", features:[], agentAnnotations:[], msms:null, msmsLoading:false, msmsLoaded:false, msmsError:null, msmsPromise:null, sequenceOverlapSelection:null, structureViewer:null, structureModel:null, structureText:null, structureFormat:null, structureLabel:null, structureSourceMeta:null, structureChains:[], structureSourceChainMap:{}, structureSelectedChain:"", structureRenderSignature:"", structureRequestId:0, structureLoading:false, structureAutoAttemptedComparison:null };
+let state = { comparison:null, activeModuleId:"chromModule", selectedPeakId:null, selectedMz:null, selectedFeatureRt:null, selectedFeatureGroupId:null, selectedModificationFormKey:null, selectedModificationFormContext:null, scrollGlobalSelectionIntoView:false, scrollModificationSelectionIntoView:false, chromZoom:null, detailZoom:null, xicZoom:null, xicFull:true, xic:null, xicLoading:false, xicRequestId:0, featureMapZoom:null, pairReference:null, pairTest:null, featureMapMode:"direction", globalSort:{key:"ranking_score",dir:"desc"}, mzSort:{key:"ranking_score",dir:"desc"}, globalFeatureSearch:"", expandedComponents:new Set(), expandedModificationFamilies:new Set(), expandedProteolyticFamilies:new Set(), modQuantViewMode:"composition", features:[], agentAnnotations:[], msms:null, msmsLoading:false, msmsLoaded:false, msmsError:null, msmsPromise:null, featureMs2SampleId:"", sequenceOverlapSelection:null, structureViewer:null, structureModel:null, structureText:null, structureFormat:null, structureLabel:null, structureSourceMeta:null, structureChains:[], structureSourceChainMap:{}, structureSelectedChain:"", structureRenderSignature:"", structureRequestId:0, structureLoading:false, structureAutoAttemptedComparison:null };
 const colors = ["#1f77b4","#e74c3c","#2ecc71","#9b59b6","#f39c12","#00bcd4","#795548","#e91e63"];
 const REPORT_MODULES = [
   {key:"chromModule", label:"TIC/BPC 总览与峰检测"},
@@ -710,6 +732,11 @@ function scrollToModule(moduleId){
   const module=$(moduleId); if(!module||module.hidden)return;
   setActiveModule(moduleId); module.scrollIntoView({behavior:"smooth",block:"start"});
 }
+function runWithoutPageScroll(event,action){
+  event?.preventDefault();event?.stopPropagation();
+  const left=window.scrollX,top=window.scrollY;action();
+  requestAnimationFrame(()=>{if(window.scrollX!==left||window.scrollY!==top)window.scrollTo(left,top);});
+}
 function moveReportModule(sourceId,targetId,placeAfter=false){
   const order=orderedReportModules().map(item=>item.key).filter(key=>key!==sourceId);
   let targetIndex=order.indexOf(targetId); if(targetIndex<0)return;
@@ -828,6 +855,42 @@ function currentComponentRows(){
   const updated=state.msms?.ms1_component_groups;
   return Array.isArray(updated)&&updated.length?updated:(DATA?.ms1_component_groups||[]);
 }
+const lookupCache={featureSource:null,componentSource:null,featureById:new Map(),componentByFeatureId:new Map(),evidenceSource:null,evidenceByFeatureId:new Map(),sequenceEvidenceSource:null,sequenceFeatureSource:null,sequenceComponentSource:null,sequencePairKey:"",sequenceLocations:null};
+function featureLookupIndex(){
+  const featureSource=DATA?.global_feature_groups||[],componentSource=currentComponentRows();
+  if(lookupCache.featureSource===featureSource&&lookupCache.componentSource===componentSource)return lookupCache;
+  const featureById=new Map(),componentByFeatureId=new Map();
+  featureSource.forEach(item=>featureGroupIds(item).forEach(id=>{if(!featureById.has(id))featureById.set(id,item);}));
+  componentSource.forEach(component=>{
+    const componentIds=new Set(featureGroupIds(component));
+    (component.members||[]).forEach(member=>{
+      featureGroupIds(member).forEach(id=>{
+        componentIds.add(id);
+        if(!featureById.has(id))featureById.set(id,member);
+      });
+    });
+    componentIds.forEach(id=>componentByFeatureId.set(id,component));
+  });
+  lookupCache.featureSource=featureSource;lookupCache.componentSource=componentSource;lookupCache.featureById=featureById;lookupCache.componentByFeatureId=componentByFeatureId;
+  return lookupCache;
+}
+function ms2EvidenceIndex(){
+  const evidenceSource=state.msms?.feature_evidence||[];
+  if(lookupCache.evidenceSource===evidenceSource)return lookupCache.evidenceByFeatureId;
+  const evidenceByFeatureId=new Map();
+  evidenceSource.forEach(evidence=>{
+    const id=String(evidence?.feature_group_id||"");if(!id)return;
+    if(!evidenceByFeatureId.has(id))evidenceByFeatureId.set(id,[]);
+    evidenceByFeatureId.get(id).push(evidence);
+  });
+  lookupCache.evidenceSource=evidenceSource;lookupCache.evidenceByFeatureId=evidenceByFeatureId;
+  return evidenceByFeatureId;
+}
+function evidenceForFeatureIds(ids){
+  const index=ms2EvidenceIndex(),result=[];
+  for(const id of ids)result.push(...(index.get(String(id))||[]));
+  return result;
+}
 const ms2StatusText={
   identified_direct_precursor:"direct precursor identified",
   identified_isotope_envelope:"identified through isotope envelope",
@@ -849,7 +912,7 @@ const ms2StatusText={
 function selectedComponentFeatureIds(){
   const target=String(state.selectedFeatureGroupId||"");
   const ids=new Set(target?[target]:[]);
-  const component=currentComponentRows().find(item=>componentContainsFeature(item,target));
+  const component=featureLookupIndex().componentByFeatureId.get(target);
   if(component){
     featureGroupIds(component).forEach(id=>ids.add(id));
     (component.members||[]).forEach(member=>featureGroupIds(member).forEach(id=>ids.add(id)));
@@ -858,11 +921,10 @@ function selectedComponentFeatureIds(){
 }
 function selectedMs2Evidence(){
   const target=String(state.selectedFeatureGroupId||"");
-  const evidence=state.msms?.feature_evidence||[];
-  const exact=evidence.find(item=>String(item.feature_group_id||"")===target);
+  const exact=(ms2EvidenceIndex().get(target)||[])[0];
   if(exact)return {feature:exact,relation:"exact Feature"};
   const componentIds=selectedComponentFeatureIds();
-  const related=evidence.filter(item=>componentIds.has(String(item.feature_group_id||"")));
+  const related=evidenceForFeatureIds(componentIds);
   related.sort((a,b)=>Number(Boolean(b.best_psm))-Number(Boolean(a.best_psm)) || Number(a.rank||1e9)-Number(b.rank||1e9));
   return related.length?{feature:related[0],relation:"linked component member"}:null;
 }
@@ -870,7 +932,7 @@ function componentCandidateEvidence(item){
   if(item?.component_candidate_sequence)return {sequence:item.component_candidate_sequence,modification:item.component_candidate_modification,confidence:item.component_candidate_confidence||"D_low_evidence"};
   const ids=new Set(featureGroupIds(item));
   (item?.members||[]).forEach(member=>featureGroupIds(member).forEach(id=>ids.add(id)));
-  const candidates=(state.msms?.feature_evidence||[]).filter(evidence=>ids.has(String(evidence.feature_group_id||""))&&evidence.sequence&&String(evidence.confidence||"")==="D_low_evidence");
+  const candidates=evidenceForFeatureIds(ids).filter(evidence=>evidence.sequence&&String(evidence.confidence||"")==="D_low_evidence");
   candidates.sort((a,b)=>Number(b.best_psm?.score||b.candidate_psm?.score||0)-Number(a.best_psm?.score||a.candidate_psm?.score||0));
   return candidates[0]||null;
 }
@@ -894,18 +956,49 @@ function preferredComponentEvidenceFeatureId(item){
     coisolated_ms2_unresolved:100,
     no_ms2_acquired:0,
   };
-  const candidates=(state.msms?.feature_evidence||[]).filter(evidence=>ids.has(String(evidence.feature_group_id||"")));
+  const candidates=evidenceForFeatureIds(ids);
   candidates.sort((a,b)=>{
     const aPriority=Number(statusPriority[String(a.ms2_status||"")]||0), bPriority=Number(statusPriority[String(b.ms2_status||"")]||0);
     return bPriority-aPriority || Number(b.best_psm?.score||b.candidate_psm?.score||0)-Number(a.best_psm?.score||a.candidate_psm?.score||0) || Number(a.rank||1e9)-Number(b.rank||1e9);
   });
   return String(candidates[0]?.feature_group_id||item?.component_primary_feature_id||item?.feature_group_id||"");
 }
-function componentDisplayLabel(item){
+function componentDisplayLabel(item,candidateEvidence=undefined){
   const base=String(item?.component_label||item?.feature_group_id||"");
   if(item?.identified_component)return base;
-  const candidate=componentCandidateEvidence(item), sequence=String(candidate?.sequence||"");
+  const candidate=candidateEvidence===undefined?componentCandidateEvidence(item):candidateEvidence, sequence=String(candidate?.sequence||"");
   return sequence&&!base.includes(sequence)?`${base} | candidate ${sequence}`:base;
+}
+function globalFeatureSearchValues(item){
+  const values=[];
+  const add=value=>{if(value!==null&&value!==undefined&&String(value).trim())values.push(String(value));};
+  const addEvidence=evidence=>{
+    if(!evidence||typeof evidence!=="object")return;
+    [evidence.feature_group_id,evidence.sequence,evidence.modification,evidence.modification_text,evidence.hypothesis,evidence.exploratory_note].forEach(add);
+    [evidence.best_psm,evidence.candidate_psm,evidence.exploratory_psm,evidence.coverage_scan].forEach(psm=>{
+      if(!psm||typeof psm!=="object")return;
+      [psm.sequence,psm.modification,psm.modification_text,psm.hypothesis,psm.exploratory_note].forEach(add);
+    });
+    (evidence.candidate_mass_hypotheses||[]).forEach(hypothesis=>{
+      if(!hypothesis||typeof hypothesis!=="object")return;
+      [hypothesis.sequence,hypothesis.modification,hypothesis.modification_text,hypothesis.hypothesis].forEach(add);
+    });
+  };
+  [item?.component_group_id,item?.component_label,item?.feature_group_id,item?.component_primary_feature_id,item?.parent_tic_peak_id,item?.component_candidate_sequence,item?.component_candidate_modification].forEach(add);
+  featureGroupIds(item).forEach(add);
+  (item?.members||[]).forEach(member=>{
+    [member?.feature_group_id,member?.component_label,member?.parent_tic_peak_id,member?.component_candidate_sequence,member?.component_candidate_modification].forEach(add);
+    featureGroupIds(member).forEach(add);
+  });
+  const ids=new Set(featureGroupIds(item));
+  (item?.members||[]).forEach(member=>featureGroupIds(member).forEach(id=>ids.add(id)));
+  evidenceForFeatureIds(ids).forEach(addEvidence);
+  addEvidence(componentCandidateEvidence(item));
+  return values;
+}
+function globalFeatureMatchesSearch(item,query){
+  const needle=String(query||"").trim().toLocaleLowerCase();
+  return !needle||globalFeatureSearchValues(item).some(value=>value.toLocaleLowerCase().includes(needle));
 }
 const residueCode={
   ALA:"A",ARG:"R",ASN:"N",ASP:"D",CYS:"C",GLN:"Q",GLU:"E",GLY:"G",HIS:"H",ILE:"I",
@@ -916,13 +1009,7 @@ function cleanPeptideSequence(value){ return String(value||"").toUpperCase().rep
 function featureItemById(featureId){
   const target=String(featureId||"");
   if(!target)return null;
-  const direct=(DATA?.global_feature_groups||[]).find(item=>featureGroupIds(item).includes(target));
-  if(direct)return direct;
-  for(const component of currentComponentRows()){
-    const member=(component.members||[]).find(item=>featureGroupIds(item).includes(target));
-    if(member)return member;
-  }
-  return null;
+  return featureLookupIndex().featureById.get(target)||null;
 }
 function sequenceLocationForEvidence(f,relation=""){
   if(!f||typeof f!=="object")return null;
@@ -1018,8 +1105,10 @@ function updateSequenceDirectionLegend(){
   if(lower){lower.innerHTML=`<i class="legend-swatch lower"></i>蓝色：${escapeHtml(reference)} 高于 ${escapeHtml(test)}`;lower.title=`${pair.reference||reference} > ${pair.test||test}`;}
 }
 function globalSequenceLocations(){
+  const evidenceSource=state.msms?.feature_evidence||[],featureIndex=featureLookupIndex(),pair=selectedPair(),pairKey=`${pair.reference||""}|${pair.test||""}`;
+  if(lookupCache.sequenceEvidenceSource===evidenceSource&&lookupCache.sequenceFeatureSource===featureIndex.featureSource&&lookupCache.sequenceComponentSource===featureIndex.componentSource&&lookupCache.sequencePairKey===pairKey&&lookupCache.sequenceLocations)return lookupCache.sequenceLocations;
   const groups=new Map();
-  for(const evidence of state.msms?.feature_evidence||[]){
+  for(const evidence of evidenceSource){
     const location=sequenceLocationForEvidence(evidence,"global differential evidence");
     if(!location||!location.chain||!Number.isFinite(location.start)||!Number.isFinite(location.end))continue;
     const feature=featureItemById(location.featureId)||evidence;
@@ -1043,7 +1132,9 @@ function globalSequenceLocations(){
       existing.tentative=existing.tentative&&location.tentative;
     }else groups.set(key,location);
   }
-  return [...groups.values()].sort((a,b)=>String(a.chain).localeCompare(String(b.chain))||a.start-b.start||a.end-b.end);
+  const locations=[...groups.values()].sort((a,b)=>String(a.chain).localeCompare(String(b.chain))||a.start-b.start||a.end-b.end);
+  lookupCache.sequenceEvidenceSource=evidenceSource;lookupCache.sequenceFeatureSource=featureIndex.featureSource;lookupCache.sequenceComponentSource=featureIndex.componentSource;lookupCache.sequencePairKey=pairKey;lookupCache.sequenceLocations=locations;
+  return locations;
 }
 function chainDisplayName(chain){
   const upper=String(chain||"").toUpperCase();
@@ -1583,6 +1674,7 @@ function renderModificationQuantitationLegacy(){
   if(!evaluated.length){table.innerHTML='<tr><td class="note">当前筛选条件下没有可显示的修饰形式族。</td></tr>';return;}
   const formPalette=["#2563eb","#f59e0b","#10b981","#8b5cf6","#ef4444","#06b6d4","#84cc16","#f97316","#64748b"];
   table.innerHTML='<tr><th></th><th>rank</th><th>事件 / 位置</th><th>肽段</th><th>主要变化</th><th>定量等级</th><th>形式数</th></tr>'+evaluated.map(item=>{
+    const formColorMap=buildModificationFormColorMap([item],formPalette);
     const changes=item.currentChanges||[], strongest=item.currentStrongest;
     let conclusion='<span class="note">暂不能形成组间比例结论</span>';
     if(strongest){
@@ -1603,15 +1695,15 @@ function renderModificationQuantitationLegacy(){
     const contextBadge=isNestedMember?' <span class="mod-quant-badge">酶切族成员</span>':"";
     const summaryRow=`<tr class="${standaloneHighValue?"high-value":""}"><td><button type="button" class="mod-quant-toggle" data-mod-quant-toggle="${escapeHtml(familyKey)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${item.rank||""}</td><td class="wrap"><div class="mod-quant-event">${escapeHtml(item.event_name||"")}${standaloneHighValue?' <span class="mod-quant-badge high-value">独立高价值候选</span>':""}${contextBadge}${imbalanceBadge}</div><div class="mod-quant-site">${location}</div></td><td class="wrap"><b>${escapeHtml(item.sequence||"")}</b></td><td class="mod-quant-conclusion ${standaloneHighValue?"high-value":""}">${conclusion}${isNestedMember?'<br><span class="note">该肽段属于上方酶切形态族，最终判断以位点级一致性结论为准。</span>':""}${item.familyResponseImbalance?'<br><span class="note">该肽段自身总响应相差超过2倍，不单独解释为修饰或蛋白丰度变化。</span>':""}</td><td class="wrap"><b>${escapeHtml(modificationQuantitationStatusLabel(item.quantitation_status))}</b><br><span class="note">${escapeHtml(confidenceGrade)}</span></td><td>${changes.length}</td></tr>`;
     if(!expanded)return summaryRow;
-    const barForSample=sample=>`<div class="mod-composition-row"><div class="mod-composition-sample" title="${escapeHtml(sample)}">${escapeHtml(sampleShort(sample))}</div><div class="mod-composition-bar">${changes.map((change,index)=>{const level=sample===pair.reference?change.referenceLevel:change.testLevel;return `<span class="mod-composition-segment" style="width:${Math.max(0,level*100)}%;background:${formPalette[index%formPalette.length]}" title="${escapeHtml(change.form.label)}：${(level*100).toFixed(2)}%"></span>`;}).join("")}</div></div>`;
-    const matrixRows=changes.map((change,index)=>{
+    const barForSample=sample=>`<div class="mod-composition-row"><div class="mod-composition-sample" title="${escapeHtml(sample)}">${escapeHtml(sampleShort(sample))}</div><div class="mod-composition-bar">${changes.map(change=>{const level=sample===pair.reference?change.referenceLevel:change.testLevel;return `<span class="mod-composition-segment" style="width:${Math.max(0,level*100)}%;background:${modificationFormColor(change.form,formColorMap,formPalette)}" title="${escapeHtml(change.form.label)}：${(level*100).toFixed(2)}%"></span>`;}).join("")}</div></div>`;
+    const matrixRows=changes.map(change=>{
       const sign=change.delta>0?"+":"", deltaClass=change.delta>0.005?"mod-delta-up":(change.delta<-0.005?"mod-delta-down":"mod-delta-stable");
       const evidence=String(change.form.ms2_confidence||"").startsWith("B_")?"B级":(String(change.form.ms2_confidence||"").startsWith("C_")?"C级":"D级");
       let responseFoldText="NA";
       if(change.responseFold!=null){const responseHigher=change.responseFold>=1?pair.test:pair.reference,responseRatio=change.responseFold>=1?change.responseFold:1/change.responseFold;responseFoldText=`${escapeHtml(sampleShort(responseHigher))} ${responseRatio.toFixed(2)}x`;}
       else if(change.referenceArea<=0&&change.testArea>0)responseFoldText=`仅 ${escapeHtml(sampleShort(pair.test))} 检出`;
       else if(change.testArea<=0&&change.referenceArea>0)responseFoldText=`仅 ${escapeHtml(sampleShort(pair.reference))} 检出`;
-      return `<tr><td><div class="mod-form-label"><span class="mod-form-swatch" style="background:${formPalette[index%formPalette.length]}"></span><span>${escapeHtml(change.form.label)}</span></div></td><td>${(change.referenceLevel*100).toFixed(2)}%</td><td>${(change.testLevel*100).toFixed(2)}%</td><td class="${deltaClass}">${sign}${(change.delta*100).toFixed(2)}</td><td>${responseFoldText}</td><td>${evidence}</td></tr>`;
+      return `<tr><td><div class="mod-form-label"><span class="mod-form-swatch" style="background:${modificationFormColor(change.form,formColorMap,formPalette)}"></span><span>${escapeHtml(change.form.label)}</span></div></td><td>${(change.referenceLevel*100).toFixed(2)}%</td><td>${(change.testLevel*100).toFixed(2)}%</td><td class="${deltaClass}">${sign}${(change.delta*100).toFixed(2)}</td><td>${responseFoldText}</td><td>${evidence}</td></tr>`;
     }).join("")||'<tr><td colspan="6" class="note">互补形式不足，暂不能计算构成比例</td></tr>';
     let familyResponseText="";
     if(item.familyResponseFold!=null){const familyHigher=item.familyResponseFold>=1?pair.test:pair.reference,familyRatio=item.familyResponseFold>=1?item.familyResponseFold:1/item.familyResponseFold;familyResponseText=`同肽段形式族总归一化响应：${escapeHtml(sampleShort(familyHigher))} 为 ${familyRatio.toFixed(2)}x。`;}
@@ -1636,6 +1728,31 @@ function modFormatArea(value){
   if(!Number.isFinite(number))return "NA";
   return number.toLocaleString("zh-CN",{maximumFractionDigits:0});
 }
+function modificationFormColorKey(form){
+  const label=String(form?.label||"").trim().replace(/\s+/g," "),modification=String(form?.modification||"").trim().replace(/\s+/g," ");
+  if(form?.is_unmodified===true||/^(unmodified|未修饰|none|无修饰)$/i.test(modification||label))return "__unmodified__";
+  return (modification||label||"__unknown__").toLowerCase();
+}
+function buildModificationFormColorMap(items,palette){
+  const colors=Array.isArray(palette)&&palette.length?palette:["#64748b"],forms=(items||[]).flatMap(item=>(item.forms||[]).filter(form=>form?.included_in_denominator!==false)),hasUnmodified=forms.some(form=>modificationFormColorKey(form)==="__unmodified__"),colorMap=new Map();
+  if(hasUnmodified)colorMap.set("__unmodified__",colors[0]);
+  let colorIndex=hasUnmodified?1:0;
+  for(const form of forms){
+    const key=modificationFormColorKey(form);
+    if(!colorMap.has(key)){colorMap.set(key,colors[colorIndex%colors.length]);colorIndex+=1;}
+  }
+  return colorMap;
+}
+function modificationFormColorMapForEntry(entry,palette){
+  return buildModificationFormColorMap(entry?.kind==="group"?entry.members:[entry?.item],palette);
+}
+function modificationFormColor(form,colorMap,palette){
+  const key=modificationFormColorKey(form);
+  if(colorMap?.has(key))return colorMap.get(key);
+  const colors=Array.isArray(palette)&&palette.length?palette:["#64748b"],color=colors[(colorMap?.size||0)%colors.length];
+  if(colorMap)colorMap.set(key,color);
+  return color;
+}
 function modEvaluateItem(item,pair){
   const changes=(item.forms||[]).filter(form=>form.included_in_denominator).map(form=>{
     const levels=form.relative_level_by_sample||{},areas=form.normalized_area_by_sample||{},referenceLevel=levels[pair.reference],testLevel=levels[pair.test];
@@ -1646,16 +1763,16 @@ function modEvaluateItem(item,pair){
   const totals=item.total_area_by_sample||{},familyReferenceArea=Number(totals[pair.reference]||0),familyTestArea=Number(totals[pair.test]||0),familyResponseFold=familyReferenceArea>0&&familyTestArea>0?familyTestArea/familyReferenceArea:null;
   return {...item,currentChanges:changes,currentStrongest:changes[0]||null,familyReferenceArea,familyTestArea,familyResponseFold,familyResponseImbalance:familyResponseFold!=null&&(familyResponseFold>2||familyResponseFold<0.5)};
 }
-function modItemDetailRow(item,pair,formPalette){
+function modItemDetailRow(item,pair,formPalette,formColorMap){
   const changes=item.currentChanges||[],mode=state.modQuantViewMode||"composition",maxTotal=Math.max(item.familyReferenceArea,item.familyTestArea,1);
   const barForSample=sample=>{
     const isReference=sample===pair.reference,total=isReference?item.familyReferenceArea:item.familyTestArea;
     const scaleWidth=mode==="composition"?100:Math.max(0,total/maxTotal*100);
-    const segments=changes.map((change,index)=>{
+    const segments=changes.map(change=>{
       const value=isReference?change.referenceArea:change.testArea,level=isReference?change.referenceLevel:change.testLevel;
       const segmentWidth=mode==="composition"?Math.max(0,level*100):(total>0?Math.max(0,value/total*100):0);
       const title=mode==="composition"?`${change.form.label}：${(level*100).toFixed(2)}%`:`${change.form.label}：${modFormatArea(value)}`;
-      return `<span class="mod-composition-segment" style="width:${segmentWidth}%;background:${formPalette[index%formPalette.length]}" title="${escapeHtml(title)}"></span>`;
+      return `<span class="mod-composition-segment" style="width:${segmentWidth}%;background:${modificationFormColor(change.form,formColorMap,formPalette)}" title="${escapeHtml(title)}"></span>`;
     }).join("");
     return `<div class="mod-composition-row"><div class="mod-composition-sample" title="${escapeHtml(sample)}">${escapeHtml(sampleShort(sample))}</div><div class="mod-composition-bar"><div class="mod-composition-scale" data-target-width="${scaleWidth.toFixed(4)}">${segments}</div></div></div>`;
   };
@@ -1665,12 +1782,12 @@ function modItemDetailRow(item,pair,formPalette){
     if(change.responseFold!=null){const responseHigher=change.responseFold>=1?pair.test:pair.reference,responseRatio=change.responseFold>=1?change.responseFold:1/change.responseFold;responseFoldText=`${escapeHtml(sampleShort(responseHigher))} ${responseRatio.toFixed(2)}x`;}
     else if(change.referenceArea<=0&&change.testArea>0)responseFoldText=`仅 ${escapeHtml(sampleShort(pair.test))} 检出`;
     else if(change.testArea<=0&&change.referenceArea>0)responseFoldText=`仅 ${escapeHtml(sampleShort(pair.reference))} 检出`;
-    const linkedIds=(change.form.linked_feature_ids||[]).map(String).filter(Boolean),formKey=`${item.quantitation_id||item.family_id||""}::${change.form.form_id||change.form.label||index}`,selected=state.selectedModificationFormKey===formKey,targetable=linkedIds.length||Number.isFinite(Number(change.form.neutral_mass))&&Boolean((change.form.consensus_rts||[]).length);
+    const linkedIds=(change.form.linked_feature_ids||[]).map(String).filter(Boolean),formKey=modFormKey(item,change.form,index),selected=state.selectedModificationFormKey===formKey,targetable=linkedIds.length||Number.isFinite(Number(change.form.neutral_mass))&&Boolean((change.form.consensus_rts||[]).length);
     const formText=targetable?`<button type="button" class="mod-form-link" data-mod-form-key="${escapeHtml(formKey)}" data-mod-form-links="${escapeHtml(linkedIds.join("|"))}" title="${linkedIds.length?"点击后联动 Feature、热图、XIC、MS/MS、序列及结构模块":"该形式不在差异Feature表中；点击后联动目标XIC、MS/MS、序列及结构模块"}">${escapeHtml(change.form.label)}</button><span class="mod-form-link-count">↗ ${linkedIds.length||"XIC"}</span>`:`<span title="该形式暂无可关联信号">${escapeHtml(change.form.label)}</span>`;
-    const label=`<div class="mod-form-label"><span class="mod-form-swatch" style="background:${formPalette[index%formPalette.length]}"></span>${formText}</div>`;
-    if(mode==="xic")return `<tr class="${selected?"mod-form-selected":""}"><td>${label}</td><td>${modFormatArea(change.referenceArea)}</td><td>${modFormatArea(change.testArea)}</td><td>${responseFoldText}</td><td>${evidence}</td></tr>`;
+    const label=`<div class="mod-form-label"><span class="mod-form-swatch" style="background:${modificationFormColor(change.form,formColorMap,formPalette)}"></span>${formText}</div>`;
+    if(mode==="xic")return `<tr class="${selected?"mod-form-selected":""}" data-mod-form-row-key="${escapeHtml(formKey)}"><td>${label}</td><td>${modFormatArea(change.referenceArea)}</td><td>${modFormatArea(change.testArea)}</td><td>${responseFoldText}</td><td>${evidence}</td></tr>`;
     const sign=change.delta>0?"+":"",deltaClass=change.delta>0.005?"mod-delta-up":(change.delta<-0.005?"mod-delta-down":"mod-delta-stable");
-    return `<tr class="${selected?"mod-form-selected":""}"><td>${label}</td><td>${(change.referenceLevel*100).toFixed(2)}%</td><td>${(change.testLevel*100).toFixed(2)}%</td><td class="${deltaClass}">${sign}${(change.delta*100).toFixed(2)}</td><td>${responseFoldText}</td><td>${evidence}</td></tr>`;
+    return `<tr class="${selected?"mod-form-selected":""}" data-mod-form-row-key="${escapeHtml(formKey)}"><td>${label}</td><td>${(change.referenceLevel*100).toFixed(2)}%</td><td>${(change.testLevel*100).toFixed(2)}%</td><td class="${deltaClass}">${sign}${(change.delta*100).toFixed(2)}</td><td>${responseFoldText}</td><td>${evidence}</td></tr>`;
   }).join("")||`<tr><td colspan="${mode==="xic"?5:6}" class="note">互补形式不足，暂不能计算</td></tr>`;
   let familyResponseText="";
   if(item.familyResponseFold!=null){const higher=item.familyResponseFold>=1?pair.test:pair.reference,ratio=item.familyResponseFold>=1?item.familyResponseFold:1/item.familyResponseFold;familyResponseText=`同肽段形式族总归一化 XIC 响应：${escapeHtml(sampleShort(higher))} 为 ${ratio.toFixed(2)}x。`;}
@@ -1681,7 +1798,7 @@ function modItemDetailRow(item,pair,formPalette){
   const featureButtons=(item.linked_feature_ids||[]).map(id=>`<button type="button" class="mod-quant-feature" data-mod-quant-feature="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join("");
   return `<tr class="mod-quant-detail-row"><td colspan="7"><div class="mod-quant-detail"><div class="mod-quant-detail-grid"><div class="mod-composition-panel"><div class="mod-detail-title">${panelTitle}</div>${barForSample(pair.reference)}${barForSample(pair.test)}<div class="note">${panelNote}</div></div><div class="mod-form-panel"><div class="mod-detail-title">${tableTitle}</div><table class="mod-form-matrix">${tableHead}${matrixRows}</table></div></div><details class="mod-feature-details"><summary>关联 Feature（${(item.linked_feature_ids||[]).length}）</summary><div>${featureButtons||'<span class="note">无</span>'}</div></details></div></td></tr>`;
 }
-function modItemRows(item,pair,formPalette,nestedMember=false,familyVisual=null){
+function modItemRows(item,pair,formPalette,formColorMap,nestedMember=false,familyVisual=null){
   const changes=item.currentChanges||[],strongest=item.currentStrongest;
   let conclusion='<span class="note">暂不能形成组间比例结论</span>';
   if(strongest){
@@ -1690,13 +1807,13 @@ function modItemRows(item,pair,formPalette,nestedMember=false,familyVisual=null)
     if(strongest.responseFold!=null){const responseHigher=strongest.responseFold>=1?pair.test:pair.reference,responseRatio=strongest.responseFold>=1?strongest.responseFold:1/strongest.responseFold;responseText=`；${escapeHtml(sampleShort(responseHigher))} 的该形式归一化响应为 ${responseRatio.toFixed(2)}x`;}
     conclusion=`<b>${escapeHtml(sampleShort(higher))}</b> 的“${escapeHtml(strongest.form.label)}”构成较高 <b>${(Math.abs(strongest.delta)*100).toFixed(2)} 个百分点</b><br><span class="note">${(lowerLevel*100).toFixed(2)}% → ${(higherLevel*100).toFixed(2)}%${responseText}</span>`;
   }
-  const familyKey=String(item.quantitation_id||item.family_id||item.rank||""),expanded=state.expandedModificationFamilies.has(familyKey),standaloneHigh=item.high_value_candidate&&!nestedMember;
+  const familyKey=String(item.quantitation_id||item.family_id||item.rank||""),expanded=state.expandedModificationFamilies.has(familyKey),standaloneHigh=item.high_value_candidate&&!nestedMember,selected=String(state.selectedModificationFormKey||"").startsWith(`${familyKey}::`);
   const confidenceGrade=changes.some(change=>String(change.form.ms2_confidence||"").startsWith("C_"))?"含C级定位":"B级形式";
   const badges=`${standaloneHigh?'<span class="mod-quant-badge high-value">独立高价值候选</span>':""}${nestedMember?'<span class="mod-quant-badge">分组内序列</span>':""}${item.familyResponseImbalance?'<span class="mod-quant-badge high-value">该肽段总响应不平衡</span>':""}`;
-  const rowClass=`${nestedMember?`mod-proteolytic-member-row ${familyVisual?.first?"family-first-member ":""}${familyVisual?.last?"family-last-member ":""}`:""}${standaloneHigh?"high-value":""}`;
+  const rowClass=`${nestedMember?`mod-proteolytic-member-row ${familyVisual?.first?"family-first-member ":""}${familyVisual?.last?"family-last-member ":""}`:""}${standaloneHigh?"high-value ":""}${selected?"mod-quantitation-selected":""}`;
   const visualStyle=nestedMember&&familyVisual?` style="--mod-family-accent:${familyVisual.accent};--mod-family-tint:${familyVisual.tint}"`:"";
-  const summaryRow=`<tr class="${rowClass}"${visualStyle}><td><button type="button" class="mod-quant-toggle" data-mod-quant-toggle="${escapeHtml(familyKey)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${item.rank||""}</td><td class="wrap"><div class="mod-quant-event">${escapeHtml(item.event_name||"")} ${badges}</div><div class="mod-quant-site">${escapeHtml(item.chain||"")} ${item.start||""}-${item.end||""}</div></td><td class="wrap"><b>${escapeHtml(item.sequence||"")}</b></td><td class="mod-quant-conclusion ${standaloneHigh?"high-value":""}">${conclusion}${item.familyResponseImbalance?'<br><span class="note">该肽段自身总响应不单独解释为修饰或蛋白丰度变化。</span>':""}</td><td class="wrap"><b>${escapeHtml(modificationQuantitationStatusLabel(item.quantitation_status))}</b><br><span class="note">${escapeHtml(confidenceGrade)}</span></td><td>${changes.length}</td></tr>`;
-  let detailRow=expanded?modItemDetailRow(item,pair,formPalette):"";
+  const summaryRow=`<tr class="${rowClass}" data-mod-quantitation-id="${escapeHtml(familyKey)}"${visualStyle}><td><button type="button" class="mod-quant-toggle" data-mod-quant-toggle="${escapeHtml(familyKey)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${item.rank||""}</td><td class="wrap"><div class="mod-quant-event">${escapeHtml(item.event_name||"")} ${badges}</div><div class="mod-quant-site">${escapeHtml(item.chain||"")} ${item.start||""}-${item.end||""}</div></td><td class="wrap"><b>${escapeHtml(item.sequence||"")}</b></td><td class="mod-quant-conclusion ${standaloneHigh?"high-value":""}">${conclusion}${item.familyResponseImbalance?'<br><span class="note">该肽段自身总响应不单独解释为修饰或蛋白丰度变化。</span>':""}</td><td class="wrap"><b>${escapeHtml(modificationQuantitationStatusLabel(item.quantitation_status))}</b><br><span class="note">${escapeHtml(confidenceGrade)}</span></td><td>${changes.length}</td></tr>`;
+  let detailRow=expanded?modItemDetailRow(item,pair,formPalette,formColorMap):"";
   if(detailRow&&nestedMember)detailRow=detailRow.replace('class="mod-quant-detail-row"',`class="mod-quant-detail-row mod-proteolytic-member-detail ${familyVisual?.last?"family-last-detail":""}"`);
   return summaryRow+detailRow;
 }
@@ -1711,7 +1828,7 @@ function modFamilyVisual(key,high=false){
   ],hash=[...String(key||"")].reduce((total,char)=>total+char.charCodeAt(0),0);
   return palette[hash%palette.length];
 }
-function modProteolyticGroupRows(family,members,pair,formPalette){
+function modProteolyticGroupRows(family,members,pair,formPalette,formColorMap){
   const key=String(family.family_id||family.rank||""),expanded=state.expandedProteolyticFamilies.has(key);
   const sites=(family.site_conclusions||[]).map(site=>({site,comparison:modOrientedSiteComparison(site,pair)})).filter(item=>item.comparison).sort((a,b)=>Math.abs(Number(b.comparison.median_percentage_point_difference||0))-Math.abs(Number(a.comparison.median_percentage_point_difference||0)));
   const lead=sites[0],comparison=lead?.comparison,site=lead?.site;
@@ -1723,7 +1840,7 @@ function modProteolyticGroupRows(family,members,pair,formPalette){
   }else if(comparison)conclusion=`<b>${escapeHtml(site.event_label)}</b>：重叠肽段间方向不一致，暂不形成位点级结论。`;
   const high=Boolean(site?.high_value_consensus&&comparison?.consistent&&comparison?.all_b_grade),rank=Math.min(...members.map(member=>Number(member.rank||9999))),sequences=members.map(member=>member.sequence).join(" / "),visual=modFamilyVisual(key,high),familyStyle=`--mod-family-accent:${visual.accent};--mod-family-tint:${visual.tint}`;
   const groupRow=`<tr class="mod-proteolytic-group-row ${high?"high-value":""}"><td><button type="button" class="mod-quant-toggle" data-proteolytic-toggle="${escapeHtml(key)}" aria-expanded="${expanded}">${expanded?"−":"+"}</button></td><td>${rank}</td><td class="wrap"><div class="mod-quant-event">重叠肽段修饰组 ${high?'<span class="mod-quant-badge high-value">跨序列高价值</span>':""}${redistribution?'<span class="mod-quant-badge high-value">疑似酶切分配差异</span>':""}</div><div class="mod-quant-site">${escapeHtml(family.chain||"")} ${family.start||""}-${family.end||""}</div></td><td class="wrap"><b>${members.length} 条互相包含序列</b><div class="mod-group-sequences">${escapeHtml(sequences)}</div></td><td class="mod-quant-conclusion ${high?"high-value":""}">${conclusion}${redistribution?'<br><span class="note">长短肽总响应呈相反方向，展开后分别复核；不同序列面积不直接合并为绝对修饰率。</span>':""}</td><td class="wrap"><b>位点一致性判断</b><br><span class="note">各序列独立定量</span></td><td>${members.length} 序列</td></tr>`;
-  return `<tbody class="mod-proteolytic-family ${high?"high-value":""}" style="${familyStyle}">${groupRow}${expanded?members.map((member,index)=>modItemRows(member,pair,formPalette,true,{...visual,first:index===0,last:index===members.length-1})).join(""):""}</tbody>`;
+  return `<tbody class="mod-proteolytic-family ${high?"high-value":""}" style="${familyStyle}">${groupRow}${expanded?members.map((member,index)=>modItemRows(member,pair,formPalette,formColorMap,true,{...visual,first:index===0,last:index===members.length-1})).join(""):""}</tbody>`;
 }
 function modBestLinkedFeatureId(featureIds){
   return (featureIds||[]).map(id=>({id:String(id),item:featureItemById(id)})).filter(entry=>entry.item).sort((first,second)=>{
@@ -1731,10 +1848,79 @@ function modBestLinkedFeatureId(featureIds){
     return significant(second.item)-significant(first.item)||Number(second.item.ranking_score||0)-Number(first.item.ranking_score||0)||Math.max(...Object.values(second.item.normalized_area_by_sample||second.item.area_by_sample||{}).map(Number),0)-Math.max(...Object.values(first.item.normalized_area_by_sample||first.item.area_by_sample||{}).map(Number),0);
   })[0]?.id||null;
 }
+function modFormKey(item,form,index=0){return `${item?.quantitation_id||item?.family_id||""}::${form?.form_id||form?.label||index}`;}
+function modComparableText(value){return String(value||"").trim().toLowerCase().replaceAll("；",";").replace(/\s+/g,"");}
+function modFeatureEvidenceCandidates(featureId){
+  const target=String(featureId||""),ids=target===String(state.selectedFeatureGroupId||"")?selectedComponentFeatureIds():new Set([target]),seen=new Set(),result=[];
+  for(const id of [target,...ids])for(const evidence of ms2EvidenceIndex().get(String(id))||[]){if(seen.has(evidence))continue;seen.add(evidence);result.push({evidence,exact:String(id)===target});}
+  return result.sort((a,b)=>Number(b.exact)-Number(a.exact)||Number(Boolean(b.evidence?.best_psm))-Number(Boolean(a.evidence?.best_psm))||Number(a.evidence?.rank||1e9)-Number(b.evidence?.rank||1e9));
+}
+function modFormEvidenceScore(item,form,evidenceEntry){
+  const evidence=evidenceEntry?.evidence||{},formSequence=modComparableText(item?.sequence),evidenceSequence=modComparableText(evidence.sequence||evidence.best_psm?.sequence||evidence.candidate_psm?.sequence),formModification=modComparableText(form?.modification||form?.label),evidenceModification=modComparableText(evidence.modification||evidence.best_psm?.modification_text||evidence.candidate_psm?.modification_text);
+  let score=evidenceEntry?.exact?40:0;
+  if(formSequence&&evidenceSequence&&formSequence===evidenceSequence)score+=180;
+  if(formModification&&evidenceModification&&formModification===evidenceModification)score+=900;
+  const evidenceCandidate=String(evidence.best_psm?.candidate_id||evidence.candidate_psm?.candidate_id||""),formCandidates=new Set([form?.best_psm?.candidate_id,...(form?.candidate_ids||[])].filter(Boolean).map(String));
+  if(evidenceCandidate&&formCandidates.has(evidenceCandidate))score+=1400;
+  const formMass=Number(form?.neutral_mass),evidenceMass=Number(evidence.best_psm?.neutral_mass??evidence.candidate_psm?.neutral_mass);
+  if(Number.isFinite(formMass)&&Number.isFinite(evidenceMass)){const error=Math.abs(formMass-evidenceMass);if(error<=0.02)score+=500;else if(error<=0.2)score+=200;}
+  return score;
+}
+function modificationFormTargetForFeature(featureId){
+  const target=String(featureId||"");if(!target)return null;
+  const relatedIds=target===String(state.selectedFeatureGroupId||"")?selectedComponentFeatureIds():new Set([target]),evidenceCandidates=modFeatureEvidenceCandidates(target),feature=featureItemById(target),featureMass=Number(feature?.component_neutral_mass),pair=selectedPair(),matches=[];
+  for(const item of state.msms?.modification_level_quantitation||[]){
+    for(const [index,form] of (item.forms||[]).entries()){
+      const levels=form.relative_level_by_sample||{};
+      if(!form.included_in_denominator||levels[pair.reference]==null||levels[pair.test]==null)continue;
+      const links=new Set((form.linked_feature_ids||[]).map(String)),exact=links.has(target),related=!exact&&[...relatedIds].some(id=>links.has(String(id)));
+      if(!exact&&!related)continue;
+      let score=exact?10000:1000;
+      for(const evidenceEntry of evidenceCandidates)score=Math.max(score,(exact?10000:1000)+modFormEvidenceScore(item,form,evidenceEntry));
+      const formMass=Number(form.neutral_mass);
+      if(Number.isFinite(featureMass)&&Number.isFinite(formMass)){const error=Math.abs(featureMass-formMass);if(error<=0.02)score+=700;else if(error<=0.2)score+=300;}
+      if(String(form.ms2_confidence||"").startsWith("B_"))score+=20;
+      matches.push({item,form,index,formKey:modFormKey(item,form,index),score});
+    }
+  }
+  return matches.sort((a,b)=>b.score-a.score||Number(a.item.rank||1e9)-Number(b.item.rank||1e9)||a.index-b.index)[0]||null;
+}
+function modProteolyticFamilyForQuantitation(quantitationId){
+  const target=String(quantitationId||"");
+  return (state.msms?.proteolytic_modification_families||[]).find(family=>(family.members||[]).some(member=>String(member.quantitation_id||"")===target))||null;
+}
+function ensureModificationTargetVisible(match,family){
+  const filter=$("modQuantFilter"),status=$("modQuantStatus");if(filter)filter.value="";
+  const members=family?(family.members||[]).map(member=>(state.msms?.modification_level_quantitation||[]).find(item=>String(item.quantitation_id||"")===String(member.quantitation_id||""))).filter(Boolean):[match.item],mode=status?.value||"quantifiable";
+  const hidden=mode==="formal"?members.some(item=>item.quantitation_status!=="formal_relative_quantitation"):mode==="quantifiable"?members.some(item=>!item.quantifiable):false;
+  if(hidden&&status)status.value="all";
+}
+function scrollModificationSelectionToView(table){
+  if(!state.scrollModificationSelectionIntoView||!state.selectedModificationFormKey)return;
+  const key=String(state.selectedModificationFormKey),target=[...table.querySelectorAll("tr[data-mod-form-row-key]")].find(row=>String(row.dataset.modFormRowKey||"")===key);if(!target)return;
+  requestAnimationFrame(()=>{
+    if(String(state.selectedModificationFormKey||"")!==key)return;
+    const container=table.closest(".tall-scroll");
+    if(container){const rowRect=target.getBoundingClientRect(),containerRect=container.getBoundingClientRect();container.scrollTop=Math.max(0,container.scrollTop+(rowRect.top+rowRect.height/2)-(containerRect.top+container.clientHeight/2));}
+    state.scrollModificationSelectionIntoView=false;
+  });
+}
+async function linkFeatureToModificationQuantitation(featureId,scroll=true){
+  const target=String(featureId||"");if(!target)return false;
+  await ensureMsmsData();
+  if(target!==String(state.selectedFeatureGroupId||"")||state.msmsError)return false;
+  const match=modificationFormTargetForFeature(target);if(!match)return false;
+  const family=modProteolyticFamilyForQuantitation(match.item.quantitation_id);
+  state.selectedModificationFormKey=match.formKey;state.selectedModificationFormContext={...match.form,quantitation_id:match.item.quantitation_id,family_id:match.item.family_id,sequence:match.item.sequence,chain:match.item.chain,start:match.item.start,end:match.item.end,reference_sample:match.item.reference_sample,form_label:match.form.label};
+  state.expandedModificationFamilies.add(String(match.item.quantitation_id||match.item.family_id||match.item.rank||""));
+  if(family)state.expandedProteolyticFamilies.add(String(family.family_id||family.rank||""));
+  ensureModificationTargetVisible(match,family);state.scrollModificationSelectionIntoView=Boolean(scroll);renderModificationQuantitation();
+  return true;
+}
 function modFormContextByKey(formKey){
   for(const item of state.msms?.modification_level_quantitation||[]){
-    for(const form of item.forms||[]){
-      const key=`${item.quantitation_id||item.family_id||""}::${form.form_id||form.label||""}`;
+    for(const [index,form] of (item.forms||[]).entries()){
+      const key=modFormKey(item,form,index);
       if(key===formKey)return {...form,quantitation_id:item.quantitation_id,family_id:item.family_id,sequence:item.sequence,chain:item.chain,start:item.start,end:item.end,reference_sample:item.reference_sample,form_label:form.label};
     }
   }
@@ -1779,11 +1965,15 @@ function renderModificationQuantitation(){
   summary.innerHTML=`<span class="mod-quant-badge">${entries.length} 个表格分组（${all.length} 个序列形式族）</span><span class="mod-quant-badge formal">${formal} 个正式相对定量</span><span class="mod-quant-badge high-value">${siteHigh} 个跨序列高价值结论</span>${standaloneHigh?`<span class="mod-quant-badge high-value">${standaloneHigh} 个独立高价值候选</span>`:""}<span class="note">当前图表：${state.modQuantViewMode==="xic"?"归一化 XIC 面积":"组成比例"}；${escapeHtml(sampleShort(pair.test))} 对 ${escapeHtml(sampleShort(pair.reference))}</span>`;
   if(!entries.length){table.innerHTML='<tr><td class="note">当前筛选条件下没有可显示的修饰形式族。</td></tr>';return;}
   const formPalette=["#2563eb","#f59e0b","#10b981","#8b5cf6","#ef4444","#06b6d4","#84cc16","#f97316","#64748b"];
-  table.innerHTML='<thead><tr><th></th><th>rank</th><th>事件 / 位置</th><th>肽段 / 分组</th><th>主要变化</th><th>定量等级</th><th>形式数</th></tr></thead>'+entries.map(entry=>entry.kind==="group"?modProteolyticGroupRows(entry.family,entry.members,pair,formPalette):`<tbody class="mod-quant-standalone">${modItemRows(entry.item,pair,formPalette,false)}</tbody>`).join("");
+  table.innerHTML='<thead><tr><th></th><th>rank</th><th>事件 / 位置</th><th>肽段 / 分组</th><th>主要变化</th><th>定量等级</th><th>形式数</th></tr></thead>'+entries.map(entry=>{
+    const formColorMap=modificationFormColorMapForEntry(entry,formPalette);
+    return entry.kind==="group"?modProteolyticGroupRows(entry.family,entry.members,pair,formPalette,formColorMap):`<tbody class="mod-quant-standalone">${modItemRows(entry.item,pair,formPalette,formColorMap,false)}</tbody>`;
+  }).join("");
   table.querySelectorAll("[data-proteolytic-toggle]").forEach(button=>button.onclick=()=>{const key=String(button.dataset.proteolyticToggle||"");if(state.expandedProteolyticFamilies.has(key))state.expandedProteolyticFamilies.delete(key);else state.expandedProteolyticFamilies.add(key);renderModificationQuantitation();});
   table.querySelectorAll("[data-mod-quant-toggle]").forEach(button=>button.onclick=()=>{const key=String(button.dataset.modQuantToggle||"");if(state.expandedModificationFamilies.has(key))state.expandedModificationFamilies.delete(key);else state.expandedModificationFamilies.add(key);renderModificationQuantitation();});
-  table.querySelectorAll("[data-mod-form-key]").forEach(button=>button.onclick=async event=>{event.stopPropagation();const formKey=String(button.dataset.modFormKey||""),context=modFormContextByKey(formKey),ids=String(button.dataset.modFormLinks||"").split("|").filter(Boolean),featureId=modBestLinkedFeatureId(ids);state.selectedModificationFormKey=formKey;state.selectedModificationFormContext=context;renderModificationQuantitation();if(featureId)await selectMappedFeature(featureId,true);else await selectTargetedModificationForm(context);});
+  table.querySelectorAll("[data-mod-form-key]").forEach(button=>button.onclick=async event=>{event.stopPropagation();const formKey=String(button.dataset.modFormKey||""),context=modFormContextByKey(formKey),ids=String(button.dataset.modFormLinks||"").split("|").filter(Boolean),featureId=modBestLinkedFeatureId(ids);state.selectedModificationFormKey=formKey;state.selectedModificationFormContext=context;state.scrollModificationSelectionIntoView=false;renderModificationQuantitation();if(featureId)await selectMappedFeature(featureId,true);else await selectTargetedModificationForm(context);});
   table.querySelectorAll("[data-mod-quant-feature]").forEach(button=>button.onclick=()=>selectMappedFeature(button.dataset.modQuantFeature));
+  scrollModificationSelectionToView(table);
   requestAnimationFrame(()=>requestAnimationFrame(()=>table.querySelectorAll(".mod-composition-scale[data-target-width]").forEach(scale=>{scale.style.width=`${Math.max(0,Math.min(100,Number(scale.dataset.targetWidth||0)))}%`;scale.classList.add("animated");})));
 }
 async function ensureMsmsData(){
@@ -1824,10 +2014,76 @@ function renderAgentAnnotations(feature=null){
   container.hidden=false;
   container.innerHTML=`<b>Agent 待人工确认注释（${annotations.length}）</b>${rows.join("")}`;
 }
+function featureMs2SampleIds(){
+  const ids=(state.msms?.samples||[]).map(item=>String(item?.sample_id||"")).filter(Boolean);
+  return [...new Set(ids)];
+}
+function featureMs2SampleDisplayName(sampleId){
+  const id=String(sampleId||""); if(!id)return "";
+  const raw=(DATA?.raw_files||[]).find(item=>{
+    const rawId=String(item?.raw_file_id||""), fileName=String(item?.file_name||item?.file||"").replace(/\.[^.]+$/,"");
+    return rawId===id||fileName===id||String(item?.sample_id||"")===id;
+  });
+  return String(raw?.sample_id||id);
+}
+function renderFeatureMs2SampleSelector(){
+  const select=$("featureMs2Sample"); if(!select)return;
+  const sampleIds=featureMs2SampleIds();
+  if(state.featureMs2SampleId&&!sampleIds.includes(state.featureMs2SampleId))state.featureMs2SampleId="";
+  select.innerHTML=`<option value="">自动（最高评分）</option>${sampleIds.map(sampleId=>`<option value="${escapeHtml(sampleId)}">${escapeHtml(featureMs2SampleDisplayName(sampleId))}</option>`).join("")}`;
+  select.value=state.featureMs2SampleId;
+  select.disabled=state.msmsLoading||!sampleIds.length;
+}
+function featureMs2EvidenceSelection(feature,sampleId=""){
+  const selectedSample=String(sampleId||"");
+  const rows=selectedSample?[
+    ["best_psm",feature?.best_psm_by_sample?.[selectedSample]],
+    ["candidate_psm",feature?.candidate_psm_by_sample?.[selectedSample]],
+    ["exploratory_psm",feature?.exploratory_psm_by_sample?.[selectedSample]],
+    ["coverage_scan",feature?.coverage_scan_by_sample?.[selectedSample]]
+  ]:[
+    ["best_psm",feature?.best_psm],
+    ["candidate_psm",feature?.candidate_psm],
+    ["exploratory_psm",feature?.exploratory_psm],
+    ["coverage_scan",feature?.coverage_scan]
+  ];
+  const evidenceEntry=rows.find(([,row])=>Boolean(row));
+  if(!evidenceEntry)return {sourceType:"",evidenceP:null,spectrumP:null};
+  const spectrumEntry=rows.find(([,row])=>Array.isArray(row?.spectrum_peaks)&&row.spectrum_peaks.length);
+  return {sourceType:evidenceEntry[0],evidenceP:evidenceEntry[1],spectrumP:spectrumEntry?.[1]||evidenceEntry[1]};
+}
+function unimodEvidenceCandidates(feature,sampleId=""){
+  return (feature?.unimod_rescue_candidates||[]).filter(row=>!sampleId||String(row.sample_id)===String(sampleId));
+}
+function renderUnimodEvidenceSelector(feature=null,sampleId=""){
+  const select=$("featureMs2Evidence"), note=$("featureMs2Unimod"); if(!select||!note)return null;
+  const context=`${feature?.feature_group_id||""}|${sampleId}`, previous=select.dataset.context===context?select.value:"";
+  const candidates=unimodEvidenceCandidates(feature,sampleId);
+  select.dataset.context=context;
+  select.innerHTML='<option value="">原有证据</option>'+candidates.map((row,index)=>`<option value="${index}">Unimod 探索 ${index+1}：${escapeHtml(row.unimod_title)} / ${escapeHtml(row.sequence)} / ${escapeHtml(featureMs2SampleDisplayName(row.sample_id))} / ${nice(row.score,1)} 分</option>`).join("");
+  select.value=[...select.options].some(option=>option.value===previous)?previous:"";
+  select.disabled=!candidates.length;
+  note.hidden=!feature; note.textContent="";
+  const summary=state.msms?.unimod_rescue;
+  if(feature){
+    const enzyme=state.msms?.parameters?.enzyme_label||"Trypsin";
+    note.textContent=`酶切：${enzyme}。${summary?.enabled?`Unimod 探索候选 ${candidates.length} 个（当前样本范围）；仅供参考，不参与正式鉴定和定量。`:"此报告尚未运行 Unimod 二阶段搜索；新建并分析任务后可用。"}`;
+    const prep=summary?.sample_prep||state.msms?.parameters?.sample_prep||{}, labels={biotin:"生物素化",tmt:"TMT",itraq:"iTRAQ"}, states={yes:"使用过",no:"未使用",unknown:"不清楚"};
+    note.textContent+=" 制样条件："+Object.entries(labels).map(([key,label])=>`${label} ${states[prep[key]]||states.unknown}`).join("；")+"（仅过滤试剂相关探索规则）。";
+    const reductionLabels={unknown:"未知",reduced:"已充分还原",none:"未还原"}, alkylationLabels={unknown:"未知（旧版 CAM 假设）",cam:"IAA/CAA 类",none:"未烷基化"};
+    note.textContent+=` 还原：${reductionLabels[prep.reduction]||"未知"}；烷基化：${alkylationLabels[prep.alkylation]||"未知（旧版 CAM 假设）"}。`;
+    const model=summary?.sample_prep_model||state.msms?.parameters?.sample_prep_model;
+    if(model?.warnings?.length) note.textContent+=" "+model.warnings.join(" ");
+  }
+  return select.value===""?null:candidates[Number(select.value)]||null;
+}
 function drawFeatureMs2(){
   const canvas=$("featureMs2Canvas"),detail=$("featureMs2Detail"),info=$("featureMs2Info");
   if(!canvas||!detail||!info)return;
+  renderFeatureMs2SampleSelector();
   renderAgentAnnotations();
+  $("featureMs2Unimod").hidden=true;
+  $("featureMs2Evidence").disabled=true;
   const ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
   canvas._featureMs2Peaks=[]; canvas._featureMs2Domain=null;
   const featureId=String(state.selectedFeatureGroupId||"");
@@ -1859,24 +2115,43 @@ function drawFeatureMs2(){
     else {detail.innerHTML=`<span class="feature-ms2-status missing">MS2 evidence index unavailable</span>${escapeHtml(featureId)}`;info.textContent="该 Feature 未出现在当前报告的 MS2 关联索引中，通常表示这是尚未重新计算的旧报告，而不是已经确认未采集 MS2。重新运行 MS2 后会区分“未采集 MS2”和“已采集但未定性”。";}
     return;
   }
-  const f=matched.feature, evidenceP=f.best_psm||f.candidate_psm||f.coverage_scan;
-  const spectrumP=[f.best_psm,f.candidate_psm,f.coverage_scan].find(item=>Array.isArray(item?.spectrum_peaks)&&item.spectrum_peaks.length)||evidenceP;
-  const confidence=String(f.confidence||""), identified=Boolean(f.best_psm)&&confidence.startsWith("B_"), candidate=Boolean(f.candidate_psm)||confidence.startsWith("C_")||confidence.startsWith("D_");
+  const f=matched.feature, selectedSampleId=String(state.featureMs2SampleId||""), selection=featureMs2EvidenceSelection(f,selectedSampleId);
+  const unimodP=renderUnimodEvidenceSelector(f,selectedSampleId), unimod=Boolean(unimodP);
+  const {sourceType,evidenceP,spectrumP}=unimod?{sourceType:"unimod_rescue",evidenceP:unimodP,spectrumP:unimodP}:selection;
+  if(selectedSampleId&&!evidenceP){
+    const sampleName=featureMs2SampleDisplayName(selectedSampleId);
+    detail.innerHTML=`<span class="feature-ms2-status missing">${escapeHtml(sampleName)}</span><b>${escapeHtml(featureId||(formContext?.form_label||"目标 XIC 形式"))}</b><br>该样本未找到覆盖当前 Feature 的 MS/MS 扫描。`;
+    info.textContent="已固定到所选样本，不会自动回退显示另一个样本的谱图。";
+    if(featureId)renderAgentAnnotations(f);
+    return;
+  }
+  const exploratory=sourceType==="exploratory_psm"||Boolean(evidenceP?.exploratory_only);
+  const confidence=String(f.confidence||""), identified=sourceType==="best_psm"&&confidence.startsWith("B_"), candidate=sourceType==="candidate_psm"||exploratory||confidence.startsWith("C_")||confidence.startsWith("D_");
   // Older task databases labelled some D-level sequence matches as identified.
   // Derive the display status from confidence so reopening an old report cannot
   // overstate a low-evidence candidate.
   const effectiveStatus=confidence.startsWith("D_")?"low_evidence_sequence_candidate":f.ms2_status;
-  const status=ms2StatusText[effectiveStatus]||effectiveStatus||"unknown MS2 status";
+  const status=unimod?"Unimod 探索候选（未经 FDR 校准）":ms2StatusText[effectiveStatus]||effectiveStatus||"unknown MS2 status";
   const statusClass=identified?"identified":((candidate||evidenceP)?"unresolved":"missing");
-  const sequence=f.sequence||evidenceP?.sequence||"", modification=f.modification||evidenceP?.modification_text||"";
+  const sequence=(selectedSampleId||unimod?evidenceP?.sequence:null)||f.sequence||evidenceP?.sequence||"", modification=(selectedSampleId||unimod?evidenceP?.modification_text:null)||f.modification||evidenceP?.modification_text||"";
   const displayId=featureId||(formContext?.form_label||"目标 XIC 形式"),relation=!featureId||String(f.feature_group_id||"")===featureId?"":` | evidence Feature ${f.feature_group_id} (${matched.relation})`;
-  detail.innerHTML=`<span class="feature-ms2-status ${statusClass}">${escapeHtml(status)}</span><b>${escapeHtml(displayId)}</b>${escapeHtml(relation)}<br>${sequence?`序列 <b>${escapeHtml(sequence)}</b>${modification?` | ${escapeHtml(modification)}`:""}`:"尚未分配肽段序列"}`;
-  const reason=f.unidentified_reason||f.hypothesis||"";
-  const scanText=spectrumP?`${spectrumP.sample_id||""} | scan ${spectrumP.scan_id||""} | RT ${nice(spectrumP.rt,3)} min | precursor ${nice(spectrumP.precursor_mz,5)} z${spectrumP.precursor_charge||"?"}`:"No covering MS2 scan";
+  const exploratoryBadge=exploratory?`<span class="feature-ms2-status unresolved">探索性 b/y（仅供参考）</span>`:"";
+  const shownSampleId=String(spectrumP?.sample_id||evidenceP?.sample_id||""), shownSampleName=featureMs2SampleDisplayName(shownSampleId);
+  const sampleBadge=shownSampleName?`<span class="feature-ms2-status">${selectedSampleId||unimod?"样本":"自动"}：${escapeHtml(shownSampleName)}${unimod?"（所选探索候选）":selectedSampleId?"":"（最高评分）"}</span>`:"";
+  const sourceLabel={best_psm:"最佳 PSM",candidate_psm:"候选 PSM",exploratory_psm:"探索性谱",coverage_scan:"覆盖扫描",unimod_rescue:"单个新增修饰的定向 b/y 验证"}[sourceType]||"";
+  detail.innerHTML=`<span class="feature-ms2-status ${statusClass}">${escapeHtml(status)}</span>${exploratoryBadge}${sampleBadge}<b>${escapeHtml(displayId)}</b>${escapeHtml(relation)}<br>${sequence?`序列 <b>${escapeHtml(sequence)}</b>${modification?` | ${escapeHtml(modification)}`:""}`:"尚未分配肽段序列"}${sourceLabel?` | ${escapeHtml(sourceLabel)}`:""}`;
+  const reason=f.unidentified_reason||f.hypothesis||(exploratory?evidenceP?.exploratory_note:"")||"";
+  const scanText=spectrumP?`${shownSampleName||spectrumP.sample_id||""} | scan ${spectrumP.scan_id||""} | RT ${nice(spectrumP.rt,3)} min | precursor ${nice(spectrumP.precursor_mz,5)} z${spectrumP.precursor_charge||"?"}`:"No covering MS2 scan";
   const glycanText=evidenceP?.glycan_name?` | glycan diagnostic ions ${evidenceP.glycan_diagnostic_ion_count||0} | core Y ions ${evidenceP.glycan_core_y_ion_count||0} | HexNAc-retaining fragments ${evidenceP.glycan_hexnac_fragment_count||0}`:"";
-  const scoreText=(identified||candidate)&&evidenceP?` | ${candidate&&!identified?"candidate ":""}score ${nice(evidenceP.score,1)} | q ${nice(evidenceP.q_value,4)} | matched ions ${evidenceP.matched_ion_count||0} | fragment coverage ${nice(evidenceP.fragment_coverage,2)}${evidenceP.sequence_tag_length!=null?` | sequence tag ${evidenceP.sequence_tag_length} aa`:""}${evidenceP.mass_delta!=null?` | ΔMass ${nice(evidenceP.mass_delta,4)} Da`:""}${glycanText}`:"";
+  const exploratoryCoverage=Number(evidenceP?.exploratory_by_coverage??evidenceP?.fragment_coverage), exploratoryText=exploratory&&evidenceP?` | 仅供参考；score ${nice(evidenceP.score,1)} | matched ions ${evidenceP.matched_ion_count||0} | b/y ions ${evidenceP.matched_by_ion_count||0} | b/y coverage ${Number.isFinite(exploratoryCoverage)?`${nice(exploratoryCoverage*100,1)}%`:""} | explained intensity ${Number.isFinite(Number(evidenceP.explained_intensity))?`${nice(Number(evidenceP.explained_intensity)*100,1)}%`:""}`:"";
+  const scoreText=exploratoryText||((identified||candidate)&&evidenceP?` | ${candidate&&!identified?"candidate ":""}score ${nice(evidenceP.score,1)} | q ${nice(evidenceP.q_value,4)} | matched ions ${evidenceP.matched_ion_count||0} | fragment coverage ${nice(evidenceP.fragment_coverage,2)}${evidenceP.sequence_tag_length!=null?` | sequence tag ${evidenceP.sequence_tag_length} aa`:""}${evidenceP.mass_delta!=null?` | ΔMass ${nice(evidenceP.mass_delta,4)} Da`:""}${glycanText}`:"");
   const fallbackText=spectrumP&&evidenceP&&spectrumP!==evidenceP?" | displaying the best stored covering scan":"";
   info.textContent=`${scanText}${scoreText}${fallbackText}${reason?` | ${reason}`:""}`;
+  if(unimod){
+    const sites=(evidenceP.site_candidates||[]).map(site=>`${site.site}${site.position} (${site.specificity}; ${site.classification}; ${nice(site.score,1)} 分)`).join("；");
+    $("featureMs2Unimod").textContent=`${evidenceP.exploratory_note} 化学衍生化/制样伪影候选需核对实验条件；数据库审核状态也不代表本样品已鉴定。展示位置 ${evidenceP.display_site} 仅是最佳打分模型，位点未确认。备选：${sites}`;
+    info.textContent=`${scanText}${scoreText} | ΔMass ${nice(evidenceP.mass_delta,6)} Da | 前体误差 ${nice(evidenceP.precursor_error_ppm,2)} ppm | UNIMOD:${evidenceP.unimod_id}`;
+  }
   if(featureId)renderAgentAnnotations(f);
   const peaks=(spectrumP?.spectrum_peaks||[]).map(v=>({mz:Number(v.mz),intensity:Number(v.intensity),label:String(v.label||"")})).filter(v=>Number.isFinite(v.mz)&&Number.isFinite(v.intensity)&&v.intensity>0);
   canvas._featureMs2Peaks=peaks;
@@ -2172,7 +2447,7 @@ function drawChrom(){
   const localText=selected&&!localAlignmentGatePassed(selected)?"local peak RT correction SKIPPED because no clear two-sided peak shape was found; global RT is retained.":(localPeakAlignmentEnabled()?"local peak RT correction ON: curves are shifted by the selected peak local RT shift.":"global RT alignment is shown.");
   const featureText=Number.isFinite(selectedFeatureRt())?` Purple dashed line marks selected Feature RT ${nice(selectedFeatureRt(),4)} min.`:"";
   canvas._plot=p; $("chromInfo").textContent=`${DATA.peak_results.length} compared TIC peaks; ${localText} The single blue band is the selected TIC integration window.${featureText} Small ticks mark other compared peak apices.`;
-  setPan("chromPan",state.chromZoom,full,(xmin,width)=>{state.chromZoom={...state.chromZoom,xmin,xmax:xmin+width};drawAll();});
+  setPan("chromPan",state.chromZoom,full,(xmin,width)=>{state.chromZoom={...state.chromZoom,xmin,xmax:xmin+width};schedulePlotDraw("chrom");});
 }
 function nearestPointIndex(values,target){
   if(!values?.length)return -1;
@@ -2307,7 +2582,7 @@ function showFeatureMapTooltip(e, item){
 }
 async function selectSpectrumMz(mz, representativeRt=null, featureGroupId=null, allowFeatureAutoMatch=true, preserveModificationContext=false){
   const requestId=++state.xicRequestId;
-  if(!preserveModificationContext){state.selectedModificationFormKey=null;state.selectedModificationFormContext=null;}
+  if(!preserveModificationContext){state.selectedModificationFormKey=null;state.selectedModificationFormContext=null;state.scrollModificationSelectionIntoView=false;}
   state.selectedMz=Number(mz);
   state.selectedFeatureGroupId=featureGroupId?String(featureGroupId):null;
   if(!state.selectedFeatureGroupId&&allowFeatureAutoMatch){
@@ -2322,12 +2597,14 @@ async function selectSpectrumMz(mz, representativeRt=null, featureGroupId=null, 
   }
   if(state.selectedFeatureGroupId)ensureMsmsData();
   state.xicZoom=null; state.xic=null; state.xicLoading=true; drawAll();
+  const modificationLinkPromise=!preserveModificationContext&&state.selectedFeatureGroupId?linkFeatureToModificationQuantitation(state.selectedFeatureGroupId,true):Promise.resolve(false);
   try {
     await loadXic(requestId);
     if(requestId===state.xicRequestId){ state.xicLoading=false; drawAll(); }
   } catch(err) {
     if(requestId===state.xicRequestId){ state.xicLoading=false; $("xicInfo").textContent=`XIC request failed: ${err.message||err}`; }
   }
+  await modificationLinkPromise;
 }
 function drawDetail(){
   const canvas=$("detailCanvas"),ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
@@ -2339,7 +2616,7 @@ function drawDetail(){
   DATA.sample_ids.forEach((sample,i)=>{ const v=matrix[sample]||[]; ctx.strokeStyle=color(i); v.forEach((inten,j)=>{ if(inten<=0)return; const x=p.toX(bins[j]); if(x<p.left||x>p.right)return; ctx.beginPath(); ctx.moveTo(x,p.bottom); ctx.lineTo(x,p.toY(inten)); ctx.stroke(); }); });
   if(state.selectedMz){ const x=p.toX(state.selectedMz); if(x>=p.left&&x<=p.right){ ctx.save(); ctx.strokeStyle="#111827"; ctx.setLineDash([6,4]); ctx.beginPath(); ctx.moveTo(x,p.top); ctx.lineTo(x,p.bottom); ctx.stroke(); ctx.fillStyle="#111827"; ctx.fillText(`m/z ${nice(state.selectedMz,4)}`,Math.min(x+6,p.right-95),p.top+14); ctx.restore(); }}
   canvas._plot=p;
-  setPan("detailPan",state.detailZoom,full,(xmin,width)=>{state.detailZoom={...state.detailZoom,xmin,xmax:xmin+width};drawAll();});
+  setPan("detailPan",state.detailZoom,full,(xmin,width)=>{state.detailZoom={...state.detailZoom,xmin,xmax:xmin+width};schedulePlotDraw("detail");});
   const scoreText=`shape ${nice(pk.shape_score)}; area ${nice(pk.area_score)}; alignment ${nice(pk.apex_score)}; width ${nice(pk.width_score)}; cosine ${nice(pk.cosine_score)}; top m/z ${nice(pk.top_mz_overlap_score)}; rel abundance ${nice(pk.relative_abundance_score)}; presence ${nice(pk.presence_absence_score)}; apex spectrum ${nice(pk.apex_spectrum_score)}`;
   const local=pk.local_alignment||{}, shifts=local.local_peak_shift_by_sample||{}, profile=local.profile_score_by_sample||{};
   const localText=DATA.sample_ids.map(sample=>`${sample}: shift ${nice(shifts[sample]||0,4)} min, profile ${nice(profile[sample]||0,3)}`).join("; ");
@@ -2384,7 +2661,7 @@ function drawXic(){
   if(reportSettings.xicIntegrationBand&&x1>=p.left&&x0<=p.right){ ctx.save(); ctx.fillStyle="rgba(34,197,94,.12)"; ctx.fillRect(Math.max(p.left,x0),p.top,Math.min(p.right,x1)-Math.max(p.left,x0),p.bottom-p.top); ctx.restore(); }
   DATA.sample_ids.forEach((sample,i)=>{ const s=series[sample]; if(!s)return; ctx.strokeStyle=color(i); ctx.beginPath(); let started=false; s.rt.forEach((x,j)=>{ if(x<domain.xmin||x>domain.xmax){started=false; return;} const px=p.toX(x),py=p.toY(s.intensity[j]); if(!started){ctx.moveTo(px,py); started=true;} else ctx.lineTo(px,py); }); ctx.stroke(); });
   canvas._plot=p;
-  setPan("xicPan",state.xicZoom,full,(xmin,width)=>{state.xicZoom={...state.xicZoom,xmin,xmax:xmin+width,ymax:null};drawAll();});
+  setPan("xicPan",state.xicZoom,full,(xmin,width)=>{state.xicZoom={...state.xicZoom,xmin,xmax:xmin+width,ymax:null};schedulePlotDraw("xic");});
   $("xicInfo").textContent=`单质心 XIC：m/z ${nice(state.xic.target_mz,5)} ± ${nice(state.xic.mz_tolerance,5)} Da；所属 TIC 峰 ${state.xic.peak_id}；${state.xic.full_run?"整体 XIC":"局部 XIC"}；绿色区域为 Feature/TIC 积分区间 RT ${nice(state.xic.integration_rt_start)}–${nice(state.xic.integration_rt_end)}`;
 }
 function xicHitAt(canvas,clientX,clientY){
@@ -2554,15 +2831,15 @@ function drawFeatureMap(){
   });
   canvas._plot=p;
   updateFeatureMapLegend();
-  setPan("featureMapPan",state.featureMapZoom,full,(xmin,width)=>{state.featureMapZoom={...state.featureMapZoom,xmin,xmax:xmin+width};drawAll();});
+  setPan("featureMapPan",state.featureMapZoom,full,(xmin,width)=>{state.featureMapZoom={...state.featureMapZoom,xmin,xmax:xmin+width};schedulePlotDraw("featureMap");});
   const pair=selectedPair();
   $("featureMapInfo").textContent=directionMode?`${rows.length} 个 Feature；${sampleShort(pair.test)} 对 ${sampleShort(pair.reference)}；红色表示比较样本较高，蓝色表示比较样本较低；颜色按截断后的 |ln(比较/参比)| 显示，最大按 ${MAX_FEATURE_FOLD}x 计；方块面积表示两样本中较高的归一化丰度。`:`${rows.length} 个 Feature；颜色按 ln(倍数) 显示，范围为 1x 至 ${nice(maxFold,1)}x，最大按 ${MAX_FEATURE_FOLD}x 计；方块面积表示两样本中较高的归一化丰度。`;
 }
 function renderGlobalFeatureTable(){
   const componentRows=currentComponentRows();
   const source=componentRows.length?componentRows:(DATA.global_feature_groups||[]).map(item=>({...item,component_group_id:`MS1SINGLE_${item.feature_group_id}`,component_label:item.feature_group_id,component_member_count:1,component_primary_feature_id:item.feature_group_id,members:[item]}));
-  const sorted=sortedTableRows(source,state.globalSort), rows=[];
-  sorted.forEach((item,i)=>{
+  const sorted=sortedTableRows(source,state.globalSort), query=String(state.globalFeatureSearch||""), filtered=sorted.filter(item=>globalFeatureMatchesSearch(item,query)), rows=[];
+  filtered.forEach((item,i)=>{
     const itemTrueMz=truePeakMz(item), itemEnvelopeMz=envelopeRepresentativeMz(item);
     const pair=pairMetrics(item), componentId=String(item.component_group_id||item.feature_group_id||""), members=item.members||[], expandable=members.length>1, expanded=state.expandedComponents.has(componentId);
     const componentSelected=componentContainsFeature(item,state.selectedFeatureGroupId);
@@ -2575,7 +2852,7 @@ function renderGlobalFeatureTable(){
     const chargeText=(item.component_charge_states||[]).length?`z=${item.component_charge_states.join('/')}`:"";
     const isotopeFit=Number(item.component_isotope_fit_score), isotopeFitText=Number.isFinite(isotopeFit)?`; isotope fit ${nice(isotopeFit,2)}${item.component_monoisotope_corrected?"; mono corrected":""}`:"";
     const componentMeta=(item.identified_component||item.inferred_component)?`${members.length} ions${chargeText?`; ${chargeText}`:""}${isotopeFitText}`:`unresolved singleton`;
-    rows.push(`<tr data-global-feature="1" data-component-parent="1" data-component-id="${escapeHtml(componentId)}" data-feature-id="${escapeHtml(parentFeatureId)}" data-selection-target="${parentSelected?'1':'0'}" data-peak="${escapeHtml(item.parent_tic_peak_id)}" data-rt="${item.representative_rt}" data-mz="${itemTrueMz}" class="component-row ${parentSelected?'selected':''}"><td>${i+1}</td><td class="component-cell">${toggle}<span class="component-label">${escapeHtml(componentDisplayLabel(item))}</span>${identification}<span class="component-meta">${escapeHtml(componentMeta)}</span></td><td>${escapeHtml(item.parent_tic_peak_id)}</td><td>${nice(item.representative_rt,3)}</td><td>${nice(itemTrueMz,5)}</td><td>${nice(itemEnvelopeMz,5)}</td><td>${nice(item.component_neutral_mass,4)}</td><td>${pairDifferenceType(item)}</td><td>${pairDirectionHtml(item)}</td><td>${abundanceOrderHtml(item)}</td><td>${nice(pair.fold,2)}</td><td>${nice(pair.logRatio,3)}</td><td>${nice(item.ranking_score,3)}</td><td>${nice(item.max_area,1)}</td><td>${escapeHtml(item.quantitation_confidence||"")}</td><td>${members.length||1}</td><td>${item.merged_feature_count||1}</td><td>${escapeHtml(item.difference_type||"")}</td></tr>`);
+    rows.push(`<tr data-global-feature="1" data-component-parent="1" data-component-id="${escapeHtml(componentId)}" data-feature-id="${escapeHtml(parentFeatureId)}" data-selection-target="${parentSelected?'1':'0'}" data-peak="${escapeHtml(item.parent_tic_peak_id)}" data-rt="${item.representative_rt}" data-mz="${itemTrueMz}" class="component-row ${parentSelected?'selected':''}"><td>${i+1}</td><td class="component-cell">${toggle}<span class="component-label">${escapeHtml(componentDisplayLabel(item,candidateEvidence))}</span>${identification}<span class="component-meta">${escapeHtml(componentMeta)}</span></td><td>${escapeHtml(item.parent_tic_peak_id)}</td><td>${nice(item.representative_rt,3)}</td><td>${nice(itemTrueMz,5)}</td><td>${nice(itemEnvelopeMz,5)}</td><td>${nice(item.component_neutral_mass,4)}</td><td>${pairDifferenceType(item)}</td><td>${pairDirectionHtml(item)}</td><td>${abundanceOrderHtml(item)}</td><td>${nice(pair.fold,2)}</td><td>${nice(pair.logRatio,3)}</td><td>${nice(item.ranking_score,3)}</td><td>${nice(item.max_area,1)}</td><td>${escapeHtml(item.quantitation_confidence||"")}</td><td>${members.length||1}</td><td>${item.merged_feature_count||1}</td><td>${escapeHtml(item.difference_type||"")}</td></tr>`);
     if(expandable&&expanded)members.forEach(member=>{
       const memberTrueMz=truePeakMz(member), memberEnvelopeMz=envelopeRepresentativeMz(member), childFeatureSelected=state.selectedFeatureGroupId&&featureGroupIds(member).includes(String(state.selectedFeatureGroupId)), childSelected=state.selectedFeatureGroupId?childFeatureSelected:(member.parent_tic_peak_id===state.selectedPeakId&&Math.abs(Number(memberTrueMz)-Number(state.selectedMz||0))<1e-6), childPair=pairMetrics(member), offset=Number(member.component_isotope_offset||0), isotope=offset===0?"M":(offset>0?`M+${offset}`:`M${offset}`), charge=member.component_charge?`z=${member.component_charge}`:"z=?", relation=String(member.component_link_type||"").replace("_envelope","").replaceAll("_"," ");
       const memberFit=Number(member.component_isotope_fit_score), fitText=Number.isFinite(memberFit)?`; isotope fit ${nice(memberFit,2)}${Number(member.component_monoisotopic_offset||0)>0?`; M+${member.component_monoisotopic_offset} corrected`:""}`:"";
@@ -2584,6 +2861,8 @@ function renderGlobalFeatureTable(){
     });
   });
   $("globalFeatureTable").innerHTML=`<tr>${sortableTh("rank","ranking_score","global")}${sortableTh("component / Feature","component_label","global")}${sortableTh("TIC peak","parent_tic_peak_id","global")}${sortableTh("RT","representative_rt","global")}${sortableTh("true peak m/z","true_peak_mz","global")}${sortableTh("envelope m/z","envelope_representative_mz","global")}${sortableTh("neutral mass","component_neutral_mass","global")}${sortableTh("pair type","pair_type","global")}${sortableTh("test direction","pair_log_ratio","global")}${sortableTh("abundance order","pair_log_ratio","global")}${sortableTh("pair fold","pair_fold","global")}${sortableTh("ln(test/ref)","pair_log_ratio","global")}${sortableTh("ranking","ranking_score","global")}${sortableTh("max raw area","max_area","global")}${sortableTh("confidence","quantitation_confidence","global")}${sortableTh("ions","component_member_count","global")}<th>merged</th>${sortableTh("cohort type","difference_type","global")}</tr>${rows.join("")}`;
+  const searchInfo=$("globalFeatureSearchInfo");
+  if(searchInfo)searchInfo.textContent=query?`共 ${source.length} 个成分；匹配 ${filtered.length} 个`:`共 ${source.length} 个成分`;
   applyTableColumnVisibility("globalFeatureTable","globalFeatureTable");
   bindSortableHeaders("global",renderGlobalFeatureTable);
   document.querySelectorAll("button[data-component-toggle]").forEach(button=>button.onclick=event=>{event.stopPropagation();const id=button.dataset.componentToggle;if(state.expandedComponents.has(id))state.expandedComponents.delete(id);else state.expandedComponents.add(id);renderGlobalFeatureTable();});
@@ -2681,6 +2960,18 @@ async function saveFeature(){
   const p=await fetchJson(apiUrl("/api/features"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({features:[...state.features,feature]})}); state.features=p.features||[]; $("featureInfo").textContent=`Saved ${p.saved_count} features`; renderFeatures();
 }
 function drawAll(){ drawChrom(); renderPeakTable(); drawDetail(); renderMzTable(); drawXic(); renderGlobalFeatureTable(); drawFeatureMap(); drawFeatureMs2(); renderModificationQuantitation(); drawStructureModule(); renderAnalysisContext(); }
+function drawPlotForKind(kind){
+  if(kind==="chrom")drawChrom();
+  else if(kind==="detail")drawDetail();
+  else if(kind==="xic")drawXic();
+  else if(kind==="featureMap")drawFeatureMap();
+}
+const scheduledPlotFrames=new Map();
+function schedulePlotDraw(kind){
+  if(scheduledPlotFrames.has(kind))return;
+  const frame=requestAnimationFrame(()=>{scheduledPlotFrames.delete(kind);drawPlotForKind(kind);});
+  scheduledPlotFrames.set(kind,frame);
+}
 function attachHover(canvas, kind){
   if(!canvas)return;
   canvas.onmousemove=e=>{
@@ -2693,8 +2984,17 @@ function attachHover(canvas, kind){
   canvas.onmouseleave=()=>{ hideDetailTooltip(); canvas.style.cursor="default"; };
 }
 function attachZoom(canvas, kind){
-  let start=null;
-  canvas.onmousedown=e=>{ const r=canvas.getBoundingClientRect(); start={x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height}; };
+  let start=null,dragSnapshot=null,pendingEnd=null,dragFrame=0;
+  const canvasPoint=e=>{const r=canvas.getBoundingClientRect();return {x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height};};
+  const cancelDragFrame=()=>{if(dragFrame){cancelAnimationFrame(dragFrame);dragFrame=0;}pendingEnd=null;};
+  const paintDragBox=()=>{
+    dragFrame=0;if(!start||!pendingEnd||!dragSnapshot)return;
+    const ctx=canvas.getContext("2d");ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(dragSnapshot,0,0);drawDragBox(canvas,start,pendingEnd);
+  };
+  canvas.onmousedown=e=>{
+    if(e.button!==0||!canvas._plot)return;
+    start=canvasPoint(e);dragSnapshot=document.createElement("canvas");dragSnapshot.width=canvas.width;dragSnapshot.height=canvas.height;dragSnapshot.getContext("2d").drawImage(canvas,0,0);
+  };
   canvas.onmousemove=e=>{
     if(!start){
       if(kind==="chrom"){ const hit=chromHitAt(canvas,e.clientX,e.clientY); canvas.style.cursor=hit?"crosshair":"default"; showChromTooltip(e,hit); }
@@ -2705,18 +3005,19 @@ function attachZoom(canvas, kind){
     }
     if(!canvas._plot)return;
     hideDetailTooltip();
-    const r=canvas.getBoundingClientRect(); const cur={x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height};
-    drawAll(); drawDragBox(canvas,start,cur);
+    pendingEnd=canvasPoint(e);
+    if(!dragFrame)dragFrame=requestAnimationFrame(paintDragBox);
   };
-  canvas.onmouseleave=()=>{ hideDetailTooltip(); canvas.style.cursor="default"; if(start){ start=null; drawAll(); } };
+  canvas.onmouseleave=()=>{ hideDetailTooltip(); canvas.style.cursor="default"; if(start){cancelDragFrame();start=null;dragSnapshot=null;drawPlotForKind(kind);} };
   canvas.onmouseup=e=>{
     if(!start||!canvas._plot)return;
-    const r=canvas.getBoundingClientRect(); const end={x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height};
+    cancelDragFrame();const end=canvasPoint(e);
     const p=canvas._plot; const dx=Math.abs(end.x-start.x), dy=Math.abs(end.y-start.y);
+    let fullRedraw=false,selectionAction=false;
     if(dx<5&&dy<5){
-      if(kind==="chrom"){ const rt=p.fromX(end.x); const hit=DATA.peak_results.find(pk=>pk.rt_start<=rt&&rt<=pk.rt_end); if(hit){state.selectedPeakId=hit.tic_peak_id; state.selectedMz=null; state.selectedFeatureRt=null; state.selectedFeatureGroupId=null; state.xic=null; state.detailZoom=null; state.xicZoom=null;} }
-      if(kind==="detail"){ const hit=spectrumHitAt(canvas,e.clientX,e.clientY); if(hit){ selectSpectrumMz(hit.mz); } }
-      if(kind==="featureMap"){ const hit=featureMapHitAt(canvas,e.clientX,e.clientY); if(hit){ selectGlobalFeature(hit); } }
+      if(kind==="chrom"){ const rt=p.fromX(end.x); const hit=DATA.peak_results.find(pk=>pk.rt_start<=rt&&rt<=pk.rt_end); if(hit){state.selectedPeakId=hit.tic_peak_id; state.selectedMz=null; state.selectedFeatureRt=null; state.selectedFeatureGroupId=null; state.xic=null; state.detailZoom=null; state.xicZoom=null;fullRedraw=true;} }
+      if(kind==="detail"){ const hit=spectrumHitAt(canvas,e.clientX,e.clientY); if(hit){selectionAction=true;selectSpectrumMz(hit.mz);} }
+      if(kind==="featureMap"){ const hit=featureMapHitAt(canvas,e.clientX,e.clientY); if(hit){selectionAction=true;selectGlobalFeature(hit);} }
     } else {
       const xmin=Math.min(p.fromX(start.x),p.fromX(end.x)), xmax=Math.max(p.fromX(start.x),p.fromX(end.x));
       const ymin=Math.max(0,Math.min(p.fromY(start.y),p.fromY(end.y))), ymax=Math.max(p.fromY(start.y),p.fromY(end.y));
@@ -2725,7 +3026,8 @@ function attachZoom(canvas, kind){
       if(kind==="xic") state.xicZoom={xmin,xmax,ymin,ymax};
       if(kind==="featureMap") state.featureMapZoom={xmin,xmax,ymin,ymax};
     }
-    start=null; drawAll();
+    start=null;dragSnapshot=null;
+    if(fullRedraw)drawAll();else if(!selectionAction)drawPlotForKind(kind);
   };
 }
 async function boot(){
@@ -2744,13 +3046,19 @@ async function boot(){
   }
 }
 async function loadComparison(){
-  DATA=await fetchJson(apiUrl("/api/bootstrap")); state.selectedPeakId=null; state.selectedMz=null; state.selectedFeatureRt=null; state.selectedFeatureGroupId=null; state.sequenceOverlapSelection=null; state.featureMapZoom=null;
+  DATA=await fetchJson(apiUrl("/api/bootstrap")); state.selectedPeakId=null; state.selectedMz=null; state.selectedFeatureRt=null; state.selectedFeatureGroupId=null; state.featureMs2SampleId=""; state.sequenceOverlapSelection=null; state.featureMapZoom=null;
   const typeCounts=(DATA.global_feature_groups||[]).reduce((acc,item)=>{const key=item.difference_type||"unknown";acc[key]=(acc[key]||0)+1;return acc;},{});
   setupReportSettings();
   renderPairControls(true);
-  ["chromMode","showAligned","showLocalPeakAligned","offset"].forEach(id=>$(id).oninput=drawAll); $("resetChrom").onclick=()=>{state.chromZoom=null;drawAll();}; $("resetDetail").onclick=()=>{state.detailZoom=null;drawAll();}; $("resetXic").onclick=()=>{ if(state.xic){state.xicZoom=state.xicFull?null:{xmin:Number(state.xic.rt_start),xmax:Number(state.xic.rt_end),ymin:0,ymax:null};} drawAll(); }; $("resetFeatureMap").onclick=()=>{state.featureMapZoom=null;drawAll();};
+  const globalFeatureSearch=$("globalFeatureSearch"), clearGlobalFeatureSearch=$("clearGlobalFeatureSearch");
+  if(globalFeatureSearch){globalFeatureSearch.value=state.globalFeatureSearch;globalFeatureSearch.oninput=()=>{state.globalFeatureSearch=globalFeatureSearch.value;renderGlobalFeatureTable();};}
+  if(clearGlobalFeatureSearch)clearGlobalFeatureSearch.onclick=()=>{state.globalFeatureSearch="";if(globalFeatureSearch)globalFeatureSearch.value="";renderGlobalFeatureTable();};
+  const featureMs2Sample=$("featureMs2Sample");
+  if(featureMs2Sample)featureMs2Sample.onchange=()=>{state.featureMs2SampleId=featureMs2Sample.value;drawFeatureMs2();};
+  $("featureMs2Evidence").onchange=()=>drawFeatureMs2();
+  ["chromMode","showAligned","showLocalPeakAligned","offset"].forEach(id=>$(id).oninput=()=>schedulePlotDraw("chrom")); $("resetChrom").onclick=event=>runWithoutPageScroll(event,()=>{state.chromZoom=null;drawChrom();}); $("resetDetail").onclick=event=>runWithoutPageScroll(event,()=>{state.detailZoom=null;drawDetail();}); $("resetXic").onclick=event=>runWithoutPageScroll(event,()=>{if(state.xic){state.xicZoom=state.xicFull?null:{xmin:Number(state.xic.rt_start),xmax:Number(state.xic.rt_end),ymin:0,ymax:null};}drawXic();}); $("resetFeatureMap").onclick=event=>runWithoutPageScroll(event,()=>{state.featureMapZoom=null;drawFeatureMap();});
   $("exportGlobalFeature").onclick=exportGlobalFeatureTable;
-  $("toggleXicFull").onclick=async()=>{ state.xicFull=!state.xicFull; reportSettings.xicFull=state.xicFull; saveReportSettings(); updateXicToggleLabel(); if(state.selectedMz){ await selectSpectrumMz(state.selectedMz,state.selectedFeatureRt); } else { drawAll(); } };
+  $("toggleXicFull").onclick=async()=>{ state.xicFull=!state.xicFull; reportSettings.xicFull=state.xicFull; saveReportSettings(); updateXicToggleLabel(); if(state.selectedMz){ await selectSpectrumMz(state.selectedMz,state.selectedFeatureRt); } else { drawXic(); } };
   updateXicToggleLabel();
   wireStructureControls();
   attachZoom($("chromCanvas"),"chrom"); attachZoom($("detailCanvas"),"detail"); attachZoom($("xicCanvas"),"xic"); attachZoom($("featureMapCanvas"),"featureMap");
@@ -2851,6 +3159,14 @@ def emit_progress(fraction: float, stage: str) -> None:
     print(f"LCMS_PROGRESS\t{max(0.0, min(1.0, fraction)):.4f}\t{stage}", flush=True)
 
 
+def emit_timing(stage: str, started: float) -> None:
+    """Emit a lightweight stage timer for performance diagnostics."""
+    print(
+        f"LCMS_TIMING\t{stage}\t{time.perf_counter() - started:.3f}",
+        flush=True,
+    )
+
+
 def apply_sample_names(
     raw_files: list[object],
     scans_by_sample: dict[str, list[object]],
@@ -2884,10 +3200,12 @@ def apply_sample_names(
 
 def main() -> None:
     args = parse_args()
+    overall_started = time.perf_counter()
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     emit_progress(0.02, "read_ms1")
+    stage_started = time.perf_counter()
 
     def report_ms1_file_progress(index: int, total: int, _path: Path) -> None:
         fraction = 0.04 + 0.24 * index / max(1, total)
@@ -2899,6 +3217,7 @@ def main() -> None:
         progress_callback=report_ms1_file_progress,
     )
     emit_progress(0.30, "loaded_ms1")
+    emit_timing("read_ms1", stage_started)
     raw_files, scans_by_sample = apply_sample_names(raw_files, scans_by_sample, args.sample_names_json)
     if args.include_sample or args.sample_contains:
         exact = set(args.include_sample or [])
@@ -2915,6 +3234,7 @@ def main() -> None:
             f"Selected: {list(scans_by_sample)}"
         )
     emit_progress(0.36, "global_tic_compare")
+    stage_started = time.perf_counter()
     sample_ids = list(scans_by_sample)
     reference = args.reference_sample if args.reference_sample in scans_by_sample else sample_ids[0]
     params = PeakFirstParams(
@@ -2941,6 +3261,8 @@ def main() -> None:
     )
     payload = prepare_peak_first_payload(raw_files, scans_by_sample, args.project_id, reference, params)
     emit_progress(0.78, "global_feature_complete")
+    emit_timing("peak_first_feature_workflow", stage_started)
+    stage_started = time.perf_counter()
     spectra = spectrum_payload(
         scans_by_sample,
         shifts=dict(payload["alignment"]["rt_shift_by_sample"]),
@@ -2955,11 +3277,15 @@ def main() -> None:
         spectra_loader=lambda sample_id: list(spectra.get(sample_id, [])),
     )
     emit_progress(0.90, "ms1_spectrum_results")
+    emit_timing("ms1_component_grouping", stage_started)
     html_path = output_dir / "lcms_peak_first_compare.html"
     sqlite_path = output_dir / args.sqlite_name
+    stage_started = time.perf_counter()
     write_peak_first_sqlite(sqlite_path, payload, spectra)
     html_path.write_text(PEAK_FIRST_TEMPLATE, encoding="utf-8")
     emit_progress(1.0, "ms1_complete")
+    emit_timing("ms1_write_report", stage_started)
+    emit_timing("total_ms1_workflow", overall_started)
     print(f"Samples: {len(sample_ids)}")
     print(f"Reference: {reference}")
     print(f"Confirmed TIC peaks: {len(payload['peak_results'])}")

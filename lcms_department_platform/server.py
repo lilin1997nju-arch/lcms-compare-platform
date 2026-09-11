@@ -77,6 +77,7 @@ PROGRESS_STAGE_LABELS = {
     "feature_guided": "完成 Feature 引导定向检索",
     "glycopeptide_search": "完成差异 Feature 糖肽检索",
     "open_mass_search": "完成开放质量与序列区域检索",
+    "unimod_second_pass": "Unimod 定向碎片验证（探索性，不改变正式鉴定）",
     "no_feature_rescue": "无 MS1 Feature 数据，跳过跨样本救援检索",
     "feature_evidence": "汇总 MS1/MS2 Feature 证据",
     "modification_summary": "完成修饰肽与相对定量结果整理",
@@ -98,6 +99,8 @@ from serve_peak_first_compare import (  # noqa: E402
     xic_payload,
 )
 from core.lcms_msms import read_fasta  # noqa: E402
+from core.lcms_enzymes import DEFAULT_ENZYME, ENZYMES, validate_enzyme  # noqa: E402
+from core.lcms_sample_prep import ALL_PREP_FIELDS, PREP_CHOICES, normalize_sample_prep, sample_prep_cli_args, sample_prep_model  # noqa: E402
 from run_peak_first_compare import PEAK_FIRST_TEMPLATE  # noqa: E402
 try:  # Support both ``python server.py`` and package-level test imports.
     from .mcp_server import MCPApplication, read_agent_annotations  # type: ignore[import-not-found]  # noqa: E402
@@ -1126,7 +1129,10 @@ class TaskWorker(threading.Thread):
                     str(db),
                     "--project-id",
                     task_id,
+                    "--enzyme",
+                    validate_enzyme(params.get("enzyme")),
                 ]
+                msms_command.extend(sample_prep_cli_args(params.get("sample_prep")))
                 for mzml_path in converted:
                     msms_command.extend(["--mzml", mzml_path])
                 self.run_command(
@@ -1143,6 +1149,10 @@ class TaskWorker(threading.Thread):
                     "status": "completed",
                     "report_available": True,
                     "fasta": sequence_meta.get("name", fasta_path.name),
+                    "enzyme": validate_enzyme(params.get("enzyme")),
+                    "enzyme_label": ENZYMES[validate_enzyme(params.get("enzyme"))].label,
+                    "sample_prep": normalize_sample_prep(params.get("sample_prep")),
+                    "sample_prep_model": sample_prep_model(params.get("sample_prep")),
                 }
                 if structure_meta.get("provided"):
                     self.store.update(task_id, stage="准备蛋白结构映射", progress=95)
@@ -1505,6 +1515,17 @@ INDEX_BODY = r"""
         <div class="auto-method-note"><b>自动判定</b><span>TIC 峰和候选组分数量由信号阈值、局部噪声与连续扫描证据自动确定，无需设置固定数量。</span></div>
         <form id="taskForm">
           <div class="field-grid"><div class="field-span"><label>任务名称</label><input name="task_name" required placeholder="例如：202407 PTM 两样品比对"></div></div>
+          <label for="enzyme">酶切酶类型</label>
+          <select id="enzyme" name="enzyme">__ENZYME_OPTIONS__</select>
+          <div class="note">请选择样品实际使用的酶及切割规则；用于 FASTA 候选肽生成和 MS/MS 搜索。默认 Trypsin。</div>
+          <div class="note">提供 FASTA 后自动启用离线 Unimod 二阶段搜索：仅对未解释的差异 Feature 验证单个新增修饰；探索性结果不计入正式鉴定或定量。</div>
+          <details class="optional-reference" open>
+            <summary>制样条件 <span>还原／烷基化 · 可选试剂过滤</span></summary>
+            <div class="field-grid">__PREP_OPTIONS__</div>
+            <div class="note">适用于本任务全部样品。仅“未使用”会排除对应试剂相关的 Unimod 探索规则；样品条件不同请选“不清楚”。“使用过”不代表确认修饰，也不启用 TMT/iTRAQ 专用鉴定或报告离子定量。天然赖氨酸生物素化保留。</div>
+            <div class="note" id="prepModelNote" role="status" aria-live="polite"></div>
+            <div class="note">仅支持 IAA/CAA 完全烷基化或未烷基化；其他烷基化试剂、部分烷基化和二硫键连接肽暂不支持。不同样品的还原／烷基化方案请分别建任务，不要用“不清楚”代替混合方案。</div>
+          </details>
           <label>样品数据 <span class="note">至少 2 个 RAW 或 mzML 文件</span></label>
           <div class="upload-box">
             <div class="upload-icon">＋</div><div class="upload-title">添加本地样品文件</div>
@@ -1566,12 +1587,25 @@ function formatBytes(value){ const n=Number(value||0); if(!n) return "0 B"; cons
    const refs=task.references||{}, seq=refs.sequence||{}, structure=refs.structure||{};
    const sequence=seq.provided?`FASTA：${seq.source||"已提供"}`:"FASTA：未提供";
    const structureText=structure.provided?`结构：${structure.source==="pdb_id"?`PDB ${structure.pdb_id||""}`:(structure.name||"已提供")}`:"结构：未提供";
-   return `${sequence}；${structureText}`;
+   const enzymeSelect=$("enzyme"), enzyme=task.params?.enzyme||"trypsin";
+   const enzymeLabel=[...enzymeSelect.options].find(option=>option.value===enzyme)?.textContent||enzyme;
+   const prep=task.params?.sample_prep||{}, prepLabels={reduction:"还原",alkylation:"烷基化",biotin:"生物素化",tmt:"TMT",itraq:"iTRAQ"};
+   const prepText=Object.entries(prepLabels).map(([key,label])=>{const select=$("prep_"+key), state=prep[key]||"unknown";return `${label}：${[...select.options].find(option=>option.value===state)?.textContent||state}`;}).join(" / ");
+   return `${sequence}；${structureText}；酶切：${enzymeLabel}；制样：${prepText}`;
  }
 function taskResultLinks(task){
   if(task.status !== "finished") return "";
   return `<a class="action-link" href="${escapeHtml(task.report_url||"")}">查看报告</a>`;
 }
+function renderPrepModelNote(){
+  const reduction=$("prep_reduction").value, alkylation=$("prep_alkylation").value;
+  const notes=[alkylation==="none"?"未烷基化：Cys 不添加固定质量，同时排除 Unimod:4 CAM 探索候选。":alkylation==="unknown"?"烷基化未知：沿用旧版固定 CAM-Cys 假设，每个 Cys +57.021464 Da，请核对。":"IAA/CAA：按 Cys 完全烷基化建模，每个 Cys +57.021464 Da。"];
+  notes.push(reduction==="none"?"未还原：仅搜索不含 Cys 的线性肽，不鉴定二硫键连接肽或含 Cys 肽。":reduction==="unknown"?"还原未知：沿用线性还原肽假设，不支持二硫键连接肽。":"按已充分还原的线性肽搜索；还原试剂不作为固定质量叠加。");
+  $("prepModelNote").textContent=notes.join(" ");
+}
+["prep_reduction","prep_alkylation"].forEach(id=>$(id).addEventListener("change",renderPrepModelNote));
+$("taskForm").addEventListener("reset",()=>setTimeout(renderPrepModelNote,0));
+renderPrepModelNote();
 function taskActionButton(task){
   if(task.status === "waiting") return `<button class="action-button" data-task-action="cancel" data-task-id="${escapeHtml(task.task_id)}">取消排队</button>`;
   if(task.status === "running") return `<button class="action-button" data-task-action="cancel" data-task-id="${escapeHtml(task.task_id)}">取消任务</button>`;
@@ -2186,7 +2220,19 @@ def make_handler(config: PortalConfig, store: TaskStore) -> type[BaseHTTPRequest
             path = parsed.path
             try:
                 if path == "/":
-                    self.send_bytes(page_shell("LC-MS/MS分析任务平台", INDEX_BODY), "text/html; charset=utf-8")
+                    enzyme_options = "".join(
+                        f'<option value="{html.escape(key)}">{html.escape(rule.label)}</option>'
+                        for key, rule in ENZYMES.items()
+                    )
+                    prep_options = "".join(
+                        f'<div><label for="prep_{key}">{html.escape(label)}</label>'
+                        f'<select id="prep_{key}" name="prep_{key}">'
+                        + "".join(f'<option value="{state}">{html.escape(text)}</option>'
+                                  for state, text in PREP_CHOICES[key].items())
+                        + '</select></div>' for key, label in ALL_PREP_FIELDS.items()
+                    )
+                    body = INDEX_BODY.replace("__ENZYME_OPTIONS__", enzyme_options).replace("__PREP_OPTIONS__", prep_options)
+                    self.send_bytes(page_shell("LC-MS/MS分析任务平台", body), "text/html; charset=utf-8")
                     return
                 if path == "/api/tasks":
                     self.send_json({"tasks": task_snapshots(store.load())})
@@ -2620,6 +2666,8 @@ def make_handler(config: PortalConfig, store: TaskStore) -> type[BaseHTTPRequest
                 if pdb_id and not re.fullmatch(r"[A-Z0-9]{4,12}", pdb_id):
                     raise ValueError("PDB ID 必须为 4-12 位字母或数字")
                 task_name = fields.get("task_name") or f"LCMS task {int(time.time())}"
+                enzyme = validate_enzyme(fields.get("enzyme"))
+                sample_prep = normalize_sample_prep({key: fields.get(f"prep_{key}", "unknown") for key in ALL_PREP_FIELDS})
                 try:
                     submitted_sample_names = json.loads(str(fields.get("sample_names") or "[]"))
                 except json.JSONDecodeError as error:
@@ -2746,6 +2794,8 @@ def make_handler(config: PortalConfig, store: TaskStore) -> type[BaseHTTPRequest
                     "reference_files": reference_files,
                     "references": references,
                     "params": {
+                        "enzyme": enzyme,
+                        "sample_prep": sample_prep,
                         "reference_sample": "",
                         "top_n_peaks": DEFAULT_TOP_N_TIC_PEAKS,
                         "top_n_mz": DEFAULT_TOP_N_MZ,

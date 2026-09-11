@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # Support package-level imports in tests and integr
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MCP_SERVER_NAME = "lcms-department-platform"
-MCP_SERVER_VERSION = "1.0.0"
+MCP_SERVER_VERSION = "1.1.0"
 MAX_TOOL_LIMIT = 500
 MAX_SPECTRUM_PEAKS = 500
 MAX_UNKNOWN_ANALYSIS_LIMIT = 100
@@ -245,6 +245,8 @@ def _selected_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
         "peptide_likelihood_reason",
         "unidentified_reason",
         "candidate_mass_hypotheses",
+        "unimod_rescue_candidates",
+        "unimod_rescue_note",
         "sequence_region_candidates",
         "coverage_by_sample",
         "best_psm",
