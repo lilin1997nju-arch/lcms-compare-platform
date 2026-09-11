@@ -14,6 +14,7 @@ from core.lcms_parser import load_lcms_directory
 from core.lcms_msms import build_ms1_component_groups
 from core.lcms_peak_first import PeakFirstParams, prepare_peak_first_payload
 from core.lcms_workbench import spectrum_payload
+from core.lcms_unimod_annotations import unimod_name_notes
 
 
 PEAK_FIRST_TEMPLATE = r"""<!doctype html>
@@ -177,6 +178,8 @@ PEAK_FIRST_TEMPLATE = r"""<!doctype html>
     .feature-ms2-status.identified { background:#e7f8f0; color:#087b55; }
     .feature-ms2-status.unresolved { background:#fff5e8; color:#a45d0c; }
     .feature-ms2-status.missing { background:#f1f4f7; color:#667085; }
+    .unimod-explained { cursor:help; text-decoration:underline dotted; text-underline-offset:3px; }
+    .unimod-explained:focus-visible { outline:2px solid #2563eb; outline-offset:3px; border-radius:2px; }
     #featureMs2Annotations { margin-top:9px; padding:9px 11px; color:#6a4b0b; border:1px solid #f0d790; border-radius:10px; background:#fffbeb; }
     .agent-annotation { margin-top:7px; padding-top:7px; border-top:1px solid #f5e7b8; }
     .mod-quant-summary { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 11px; }
@@ -2052,6 +2055,15 @@ function featureMs2EvidenceSelection(feature,sampleId=""){
   const spectrumEntry=rows.find(([,row])=>Array.isArray(row?.spectrum_peaks)&&row.spectrum_peaks.length);
   return {sourceType:evidenceEntry[0],evidenceP:evidenceEntry[1],spectrumP:spectrumEntry?.[1]||evidenceEntry[1]};
 }
+const UNIMOD_NAME_NOTES=__UNIMOD_NAME_NOTES__;
+function unimodNameNote(evidence){
+  const id=String(evidence?.unimod_id);
+  return Object.prototype.hasOwnProperty.call(UNIMOD_NAME_NOTES,id)?UNIMOD_NAME_NOTES[id]:"";
+}
+function unimodModificationHtml(evidence,label){
+  const note=unimodNameNote(evidence);
+  return note?`<span class="unimod-explained" tabindex="0" title="${escapeHtml(note)}" aria-label="${escapeHtml(label+'。'+note)}">${escapeHtml(label)}</span>`:escapeHtml(label);
+}
 function unimodEvidenceCandidates(feature,sampleId=""){
   return (feature?.unimod_rescue_candidates||[]).filter(row=>!sampleId||String(row.sample_id)===String(sampleId));
 }
@@ -2062,6 +2074,9 @@ function renderUnimodEvidenceSelector(feature=null,sampleId=""){
   select.dataset.context=context;
   select.innerHTML='<option value="">原有证据</option>'+candidates.map((row,index)=>`<option value="${index}">Unimod 探索 ${index+1}：${escapeHtml(row.unimod_title)} / ${escapeHtml(row.sequence)} / ${escapeHtml(featureMs2SampleDisplayName(row.sample_id))} / ${nice(row.score,1)} 分</option>`).join("");
   select.value=[...select.options].some(option=>option.value===previous)?previous:"";
+  const selected=select.value===""?null:candidates[Number(select.value)]||null;
+  const nameNote=unimodNameNote(selected);
+  if(nameNote)select.title=nameNote;else select.removeAttribute("title");
   select.disabled=!candidates.length;
   note.hidden=!feature; note.textContent="";
   const summary=state.msms?.unimod_rescue;
@@ -2075,7 +2090,7 @@ function renderUnimodEvidenceSelector(feature=null,sampleId=""){
     const model=summary?.sample_prep_model||state.msms?.parameters?.sample_prep_model;
     if(model?.warnings?.length) note.textContent+=" "+model.warnings.join(" ");
   }
-  return select.value===""?null:candidates[Number(select.value)]||null;
+  return selected;
 }
 function drawFeatureMs2(){
   const canvas=$("featureMs2Canvas"),detail=$("featureMs2Detail"),info=$("featureMs2Info");
@@ -2084,6 +2099,7 @@ function drawFeatureMs2(){
   renderAgentAnnotations();
   $("featureMs2Unimod").hidden=true;
   $("featureMs2Evidence").disabled=true;
+  $("featureMs2Evidence").removeAttribute("title");
   const ctx=canvas.getContext("2d"); ctx.clearRect(0,0,canvas.width,canvas.height);
   canvas._featureMs2Peaks=[]; canvas._featureMs2Domain=null;
   const featureId=String(state.selectedFeatureGroupId||"");
@@ -2139,7 +2155,7 @@ function drawFeatureMs2(){
   const shownSampleId=String(spectrumP?.sample_id||evidenceP?.sample_id||""), shownSampleName=featureMs2SampleDisplayName(shownSampleId);
   const sampleBadge=shownSampleName?`<span class="feature-ms2-status">${selectedSampleId||unimod?"样本":"自动"}：${escapeHtml(shownSampleName)}${unimod?"（所选探索候选）":selectedSampleId?"":"（最高评分）"}</span>`:"";
   const sourceLabel={best_psm:"最佳 PSM",candidate_psm:"候选 PSM",exploratory_psm:"探索性谱",coverage_scan:"覆盖扫描",unimod_rescue:"单个新增修饰的定向 b/y 验证"}[sourceType]||"";
-  detail.innerHTML=`<span class="feature-ms2-status ${statusClass}">${escapeHtml(status)}</span>${exploratoryBadge}${sampleBadge}<b>${escapeHtml(displayId)}</b>${escapeHtml(relation)}<br>${sequence?`序列 <b>${escapeHtml(sequence)}</b>${modification?` | ${escapeHtml(modification)}`:""}`:"尚未分配肽段序列"}${sourceLabel?` | ${escapeHtml(sourceLabel)}`:""}`;
+  detail.innerHTML=`<span class="feature-ms2-status ${statusClass}">${escapeHtml(status)}</span>${exploratoryBadge}${sampleBadge}<b>${escapeHtml(displayId)}</b>${escapeHtml(relation)}<br>${sequence?`序列 <b>${escapeHtml(sequence)}</b>${modification?` | ${unimod?unimodModificationHtml(evidenceP,modification):escapeHtml(modification)}`:""}`:"尚未分配肽段序列"}${sourceLabel?` | ${escapeHtml(sourceLabel)}`:""}`;
   const reason=f.unidentified_reason||f.hypothesis||(exploratory?evidenceP?.exploratory_note:"")||"";
   const scanText=spectrumP?`${shownSampleName||spectrumP.sample_id||""} | scan ${spectrumP.scan_id||""} | RT ${nice(spectrumP.rt,3)} min | precursor ${nice(spectrumP.precursor_mz,5)} z${spectrumP.precursor_charge||"?"}`:"No covering MS2 scan";
   const glycanText=evidenceP?.glycan_name?` | glycan diagnostic ions ${evidenceP.glycan_diagnostic_ion_count||0} | core Y ions ${evidenceP.glycan_core_y_ion_count||0} | HexNAc-retaining fragments ${evidenceP.glycan_hexnac_fragment_count||0}`:"";
@@ -3070,6 +3086,11 @@ boot().catch(err=>{document.body.innerHTML=`<pre>${err.stack||err}</pre>`;});
 </body>
 </html>
 """
+
+# Embed display definitions so existing results and exported reports work offline.
+PEAK_FIRST_TEMPLATE = PEAK_FIRST_TEMPLATE.replace(
+    "__UNIMOD_NAME_NOTES__", json.dumps(unimod_name_notes(), ensure_ascii=False).replace("</", "<\\/")
+)
 
 
 def write_peak_first_sqlite(path: Path, payload: dict[str, object], spectra: dict[str, object]) -> None:

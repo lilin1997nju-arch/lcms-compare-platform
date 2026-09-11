@@ -1,6 +1,6 @@
 {
   "name": "lcms-department-desktop",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "description": "LC-MS/MS 单机离线分析平台桌面版",
   "author": "LC-MS Department Platform",
