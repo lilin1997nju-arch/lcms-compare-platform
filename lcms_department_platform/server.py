@@ -1323,6 +1323,9 @@ def page_shell(title: str, body: str) -> bytes:
     .field-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:0 14px; }}
     .field-grid label {{ margin-top:8px; }}
     .field-grid input {{ width:100%; }}
+    .prep-grid {{ grid-template-columns:repeat(3,minmax(0,1fr)); gap:0 12px; }}
+    .prep-grid > div {{ min-width:0; }}
+    .prep-grid select {{ width:100%; }}
     .field-span {{ grid-column:1/-1; }}
     .upload-box {{ padding:17px; border:1px dashed #9bb9da; border-radius:14px; background:linear-gradient(145deg,#f8fbff,#f3f9fb); transition:border-color .18s ease,background .18s ease; }}
     .upload-box:focus-within {{ border-color:#4b91ea; background:#f2f8ff; }}
@@ -1521,7 +1524,7 @@ INDEX_BODY = r"""
           <div class="note">提供 FASTA 后自动启用离线 Unimod 二阶段搜索：仅对未解释的差异 Feature 验证单个新增修饰；探索性结果不计入正式鉴定或定量。</div>
           <details class="optional-reference" open>
             <summary>制样条件 <span>还原／烷基化 · 可选试剂过滤</span></summary>
-            <div class="field-grid">__PREP_OPTIONS__</div>
+            <div class="field-grid prep-grid">__PREP_OPTIONS__</div>
             <div class="note">适用于本任务全部样品。仅“未使用”会排除对应试剂相关的 Unimod 探索规则；样品条件不同请选“不清楚”。“使用过”不代表确认修饰，也不启用 TMT/iTRAQ 专用鉴定或报告离子定量。天然赖氨酸生物素化保留。</div>
             <div class="note" id="prepModelNote" role="status" aria-live="polite"></div>
             <div class="note">仅支持 IAA/CAA 完全烷基化或未烷基化；其他烷基化试剂、部分烷基化和二硫键连接肽暂不支持。不同样品的还原／烷基化方案请分别建任务，不要用“不清楚”代替混合方案。</div>

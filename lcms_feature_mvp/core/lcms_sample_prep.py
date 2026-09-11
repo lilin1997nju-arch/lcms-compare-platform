@@ -13,12 +13,12 @@ PREP_FIELDS = {
 }
 PREP_STATES = {"unknown": "不清楚／未填写", "no": "未使用", "yes": "使用过"}
 REDUCTION_CHOICES = {
-    "unknown": "不清楚（沿用线性还原肽模型）",
+    "unknown": "不清楚",
     "reduced": "已充分还原（DTT、TCEP 等）",
     "none": "未还原（仅搜索不含 Cys 的线性肽）",
 }
 ALKYLATION_CHOICES = {
-    "unknown": "不清楚（沿用固定 CAM-Cys 假设）",
+    "unknown": "不清楚",
     "cam": "IAA/CAA 类（Cys +57.021464 Da）",
     "none": "未烷基化（Cys 不添加固定质量）",
 }
